@@ -369,6 +369,7 @@ dependencies = [
 name = "pgr-input"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pgr-core",
  "tempfile",
  "thiserror",
