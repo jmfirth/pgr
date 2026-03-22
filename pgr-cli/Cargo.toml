@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1"
 pgr-core = { path = "../pgr-core" }
 pgr-input = { path = "../pgr-input" }
 pgr-search = { path = "../pgr-search" }
