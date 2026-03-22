@@ -8,9 +8,9 @@ check:
 test:
     cargo test --workspace --lib --bins && cargo test --workspace --doc
 
-# Full test suite
+# Full test suite (includes slow PTY/integration tests)
 test-all:
-    cargo test --workspace
+    cargo test --workspace -- --include-ignored
 
 # Debug build
 build:

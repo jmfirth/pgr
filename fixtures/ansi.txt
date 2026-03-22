@@ -1,0 +1,5 @@
+[31mRed text[0m
+[32mGreen text[0m
+[1;34mBold blue text[0m
+Normal text
+[33mYellow[0m and [35mMagenta[0m mixed
