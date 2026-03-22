@@ -10,7 +10,7 @@ pub mod keymap;
 pub mod terminal;
 
 pub use command::Command;
-pub use dispatch::Pager;
+pub use dispatch::{Pager, PendingCommand};
 pub use error::{KeyError, Result};
 pub use key::Key;
 pub use key_reader::KeyReader;

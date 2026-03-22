@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 
-use pgr_core::{Buffer, LineIndex};
+use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
     paint_prompt, paint_screen, render_prompt, PromptContext, PromptStyle, RawControlMode, Screen,
 };
@@ -15,6 +15,21 @@ use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
 use crate::Command;
+
+/// A partially-entered multi-key command awaiting its argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingCommand {
+    /// `m` pressed; waiting for a mark letter.
+    SetMarkTop,
+    /// `M` pressed; waiting for a mark letter.
+    SetMarkBottom,
+    /// `'` pressed; waiting for a mark letter or `'`.
+    GotoMark,
+    /// `ESC-m` pressed; waiting for a mark letter.
+    ClearMark,
+    /// `^X` pressed; waiting for `^X` (to complete `^X^X` for goto mark).
+    CtrlXPrefix,
+}
 
 /// The main pager state, tying together all subsystems.
 pub struct Pager<R: Read, W: Write> {
@@ -32,6 +47,12 @@ pub struct Pager<R: Read, W: Write> {
     pending_count: Option<usize>,
     /// Whether we should quit.
     should_quit: bool,
+    /// Named position marks.
+    marks: MarkStore,
+    /// The `top_line` before the last "large" movement, for `''` (return to previous).
+    last_position: Option<usize>,
+    /// A partially-entered multi-key command awaiting its argument.
+    pending_command: Option<PendingCommand>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -60,6 +81,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             prompt_style: PromptStyle::Short,
             pending_count: None,
             should_quit: false,
+            marks: MarkStore::new(),
+            last_position: None,
+            pending_command: None,
         }
     }
 
@@ -89,6 +113,17 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Process a single key event. Returns `Ok(true)` if the pager should
     /// continue, `Ok(false)` if it should quit.
     fn process_key(&mut self, key: &Key) -> Result<bool> {
+        // If there's a pending multi-key command, resolve it.
+        if let Some(pending) = self.pending_command.take() {
+            return self.resolve_pending(pending, key);
+        }
+
+        // Check if this key starts a multi-key command.
+        if let Some(pending) = Self::check_pending_start(key) {
+            self.pending_command = Some(pending);
+            return Ok(true);
+        }
+
         // Digit accumulation for numeric prefixes.
         if let Key::Char(c) = *key {
             if c.is_ascii_digit() {
@@ -112,6 +147,109 @@ impl<R: Read, W: Write> Pager<R, W> {
         Ok(!self.should_quit)
     }
 
+    /// Check if a key initiates a multi-key command sequence.
+    fn check_pending_start(key: &Key) -> Option<PendingCommand> {
+        match *key {
+            Key::Char('m') => Some(PendingCommand::SetMarkTop),
+            Key::Char('M') => Some(PendingCommand::SetMarkBottom),
+            Key::Char('\'') => Some(PendingCommand::GotoMark),
+            Key::EscSeq('m') => Some(PendingCommand::ClearMark),
+            Key::Ctrl('x') => Some(PendingCommand::CtrlXPrefix),
+            _ => None,
+        }
+    }
+
+    /// Resolve a pending multi-key command with the argument key.
+    fn resolve_pending(&mut self, pending: PendingCommand, key: &Key) -> Result<bool> {
+        match pending {
+            PendingCommand::SetMarkTop => {
+                if let Key::Char(c) = *key {
+                    let mark = Mark {
+                        line: self.screen.top_line(),
+                        horizontal_offset: self.screen.horizontal_offset(),
+                    };
+                    // Silently ignore invalid mark characters.
+                    let _ = self.marks.set(c, mark);
+                }
+            }
+            PendingCommand::SetMarkBottom => {
+                if let Key::Char(c) = *key {
+                    let (_, end) = self.screen.visible_range();
+                    let total = self.index.lines_indexed();
+                    let bottom = end.min(total).saturating_sub(1);
+                    let mark = Mark {
+                        line: bottom,
+                        horizontal_offset: self.screen.horizontal_offset(),
+                    };
+                    let _ = self.marks.set(c, mark);
+                }
+            }
+            PendingCommand::GotoMark => {
+                self.resolve_goto_mark(key)?;
+            }
+            PendingCommand::ClearMark => {
+                if let Key::Char(c) = *key {
+                    let _ = self.marks.clear(c);
+                }
+            }
+            PendingCommand::CtrlXPrefix => {
+                if *key == Key::Ctrl('x') {
+                    // ^X^X: same as ' -- wait for mark letter.
+                    self.pending_command = Some(PendingCommand::GotoMark);
+                    return Ok(true);
+                }
+                // Not ^X: ignore the prefix, process key normally.
+                return self.process_key(key);
+            }
+        }
+        Ok(!self.should_quit)
+    }
+
+    /// Handle the second key of a goto-mark sequence (`'` then key).
+    fn resolve_goto_mark(&mut self, key: &Key) -> Result<()> {
+        match *key {
+            Key::Char('\'') => {
+                // '' = return to previous position.
+                if let Some(prev) = self.last_position {
+                    self.save_last_position();
+                    let total = self.index.total_lines(&*self.buffer)?;
+                    self.screen.goto_line(prev, total);
+                    self.repaint()?;
+                }
+            }
+            Key::Char('^') => {
+                self.save_last_position();
+                let total = self.index.total_lines(&*self.buffer)?;
+                self.screen.goto_line(0, total);
+                self.repaint()?;
+            }
+            Key::Char('$') => {
+                self.save_last_position();
+                let total = self.index.total_lines(&*self.buffer)?;
+                let end = total.saturating_sub(self.screen.content_rows());
+                self.screen.goto_line(end, total);
+                self.repaint()?;
+            }
+            Key::Char(c) => {
+                if let Some(mark) = self.marks.get(c).copied() {
+                    self.save_last_position();
+                    let total = self.index.total_lines(&*self.buffer)?;
+                    self.screen.goto_line(mark.line, total);
+                    self.screen.set_horizontal_offset(mark.horizontal_offset);
+                    self.repaint()?;
+                }
+                // Unknown mark: silently ignore.
+            }
+            _ => {} // Non-char key after ': ignore.
+        }
+        Ok(())
+    }
+
+    /// Save the current top line as the last position for `''` return.
+    fn save_last_position(&mut self) {
+        self.last_position = Some(self.screen.top_line());
+    }
+
     /// Execute a command with the given numeric count prefix.
     fn execute(&mut self, command: &Command, count: Option<usize>) -> Result<()> {
         let total = self.index.total_lines(&*self.buffer)?;
@@ -126,30 +264,36 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             }
             Command::PageForward => {
+                self.save_last_position();
                 self.screen
                     .scroll_forward(count.unwrap_or(self.screen.content_rows()), total);
                 self.repaint()?;
             }
             Command::PageBackward => {
+                self.save_last_position();
                 self.screen
                     .scroll_backward(count.unwrap_or(self.screen.content_rows()));
                 self.repaint()?;
             }
             Command::HalfPageForward => {
+                self.save_last_position();
                 self.screen
                     .scroll_forward(count.unwrap_or(self.screen.content_rows() / 2), total);
                 self.repaint()?;
             }
             Command::HalfPageBackward => {
+                self.save_last_position();
                 self.screen
                     .scroll_backward(count.unwrap_or(self.screen.content_rows() / 2));
                 self.repaint()?;
             }
             Command::GotoBeginning(n) => {
+                self.save_last_position();
                 self.screen.goto_line(count.or(n).unwrap_or(0), total);
                 self.repaint()?;
             }
             Command::GotoEnd(n) => {
+                self.save_last_position();
                 let default = total.saturating_sub(self.screen.content_rows());
                 self.screen.goto_line(count.or(n).unwrap_or(default), total);
                 self.repaint()?;
@@ -256,6 +400,18 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[must_use]
     pub fn screen(&self) -> &Screen {
         &self.screen
+    }
+
+    /// Access the mark store (for testing).
+    #[must_use]
+    pub fn marks(&self) -> &MarkStore {
+        &self.marks
+    }
+
+    /// Access the last saved position (for testing).
+    #[must_use]
+    pub fn last_position(&self) -> Option<usize> {
+        self.last_position
     }
 }
 
@@ -447,5 +603,194 @@ mod tests {
         // 'z' is unbound (Noop), should not change position.
         let pager = run_pager(b"jzq", &content);
         assert_eq!(pager.screen().top_line(), 1);
+    }
+
+    // ---- Mark setting tests ----
+
+    #[test]
+    fn test_dispatch_m_a_sets_mark_at_top_line() {
+        let content = make_test_content(50);
+        // Scroll to line 5, then set mark 'a' at the top displayed line.
+        let pager = run_pager(b"5jmaq", &content);
+        let mark = pager.marks().get('a').expect("mark 'a' should be set");
+        assert_eq!(mark.line, 5);
+    }
+
+    #[test]
+    fn test_dispatch_upper_m_a_sets_mark_at_bottom_line() {
+        let content = make_test_content(50);
+        // At top_line 0, content_rows = 23, so bottom = min(23, 50) - 1 = 22.
+        let pager = run_pager(b"Maq", &content);
+        let mark = pager.marks().get('a').expect("mark 'a' should be set");
+        assert_eq!(mark.line, 22);
+    }
+
+    #[test]
+    fn test_dispatch_m_invalid_char_does_not_crash() {
+        let content = make_test_content(50);
+        // Press 'm', '3' -> MarkStore rejects digits; should not crash.
+        let pager = run_pager(b"m3q", &content);
+        assert!(pager.marks().get('3').is_none());
+    }
+
+    // ---- Mark jumping tests ----
+
+    #[test]
+    fn test_dispatch_quote_a_jumps_to_mark() {
+        let content = make_test_content(100);
+        // Scroll to line 10, set mark 'a', scroll away to line 40, then jump back.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"10jma"); // scroll to 10, set mark 'a'
+        keys.extend_from_slice(b"30j"); // scroll to 40
+        keys.push(b'\''); // start goto mark
+        keys.push(b'a'); // mark 'a'
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 10);
+    }
+
+    #[test]
+    fn test_dispatch_quote_quote_returns_to_previous_position() {
+        let content = make_test_content(100);
+        // Start at 0, page forward (saves last_position=0), then '' returns to 0.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b' '); // page forward (saves position 0, moves to 23)
+        keys.push(b'\'');
+        keys.push(b'\''); // '' returns to previous
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_quote_caret_jumps_to_beginning() {
+        let content = make_test_content(100);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b" "); // page forward to line 23
+        keys.push(b'\'');
+        keys.push(b'^');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_quote_dollar_jumps_to_end() {
+        let content = make_test_content(100);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'\'');
+        keys.push(b'$');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // End: total(100) - content_rows(23) = 77
+        assert_eq!(pager.screen().top_line(), 77);
+    }
+
+    #[test]
+    fn test_dispatch_quote_unset_mark_does_nothing() {
+        let content = make_test_content(100);
+        // Scroll to line 5, then try to goto unset mark 'z'. Should stay at 5.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"5j");
+        keys.push(b'\'');
+        keys.push(b'z');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 5);
+    }
+
+    // ---- Mark clearing tests ----
+
+    #[test]
+    fn test_dispatch_esc_m_a_clears_mark() {
+        let content = make_test_content(50);
+        // Set mark 'a', then clear it with ESC-m a.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"ma"); // set mark 'a'
+        keys.push(0x1B); // ESC
+        keys.push(b'm'); // -> EscSeq('m')
+        keys.push(b'a'); // clear mark 'a'
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert!(pager.marks().get('a').is_none());
+    }
+
+    // ---- Multi-key sequence tests ----
+
+    #[test]
+    fn test_dispatch_pending_command_m_waits_for_letter() {
+        let content = make_test_content(50);
+        // Press 'm' alone, then 'q' — 'm' enters pending mode, 'q' resolves
+        // as the mark letter (not as quit, since it's consumed by pending).
+        // Then input is exhausted.
+        let pager = run_pager(b"mq", &content);
+        // 'q' was consumed as the mark letter, not as quit.
+        let mark = pager.marks().get('q').expect("mark 'q' should be set");
+        assert_eq!(mark.line, 0);
+    }
+
+    #[test]
+    fn test_dispatch_pending_command_cancelled_by_invalid_key() {
+        let content = make_test_content(50);
+        // Press 'm' then Up arrow (non-char key). Pending is cancelled, no mark set.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'm');
+        keys.extend_from_slice(&[0x1B, b'[', b'A']); // Up arrow
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Up arrow is not a char key, so no mark is set. Position unchanged.
+        assert_eq!(pager.screen().top_line(), 0);
+        assert!(pager.marks().list().is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_ctrl_x_ctrl_x_enters_goto_mark() {
+        let content = make_test_content(100);
+        // Set mark 'a' at line 10, scroll away, then ^X^X a to jump back.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"10jma"); // scroll to 10, set mark 'a'
+        keys.extend_from_slice(b"20j"); // scroll to 30
+        keys.push(0x18); // Ctrl+X (byte 0x18)
+        keys.push(0x18); // Ctrl+X (byte 0x18)
+        keys.push(b'a'); // mark 'a'
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 10);
+    }
+
+    // ---- Last position tracking tests ----
+
+    #[test]
+    fn test_dispatch_page_forward_saves_last_position() {
+        let content = make_test_content(100);
+        // Page forward saves position, then '' returns.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b' '); // page forward (saves 0, goes to 23)
+        keys.push(b'\'');
+        keys.push(b'\''); // '' returns to 0
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_goto_end_saves_last_position() {
+        let content = make_test_content(100);
+        // G goes to end, then '' returns to 0.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'G'); // goto end (saves 0, goes to 77)
+        keys.push(b'\'');
+        keys.push(b'\''); // '' returns to 0
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_scroll_forward_does_not_save_last_position() {
+        let content = make_test_content(100);
+        // 'j' (1 line scroll) does not update last_position.
+        let pager = run_pager(b"jq", &content);
+        assert!(pager.last_position().is_none());
     }
 }
