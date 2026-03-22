@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 pgr-core = { path = "../pgr-core" }
 thiserror = "2"
+unicode-width = "0.2"
