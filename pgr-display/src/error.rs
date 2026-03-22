@@ -12,6 +12,10 @@ pub enum DisplayError {
     /// A terminal operation failed.
     #[error("terminal error: {0}")]
     TerminalError(String),
+
+    /// An invalid color specification was provided.
+    #[error("invalid color specification: {0}")]
+    InvalidColor(String),
 }
 
 /// A specialized `Result` type for display operations.
