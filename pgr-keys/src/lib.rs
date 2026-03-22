@@ -7,6 +7,7 @@ pub mod error;
 pub mod key;
 pub mod key_reader;
 pub mod keymap;
+pub mod line_editor;
 pub mod terminal;
 
 pub use command::Command;
@@ -15,4 +16,5 @@ pub use error::{KeyError, Result};
 pub use key::Key;
 pub use key_reader::KeyReader;
 pub use keymap::Keymap;
+pub use line_editor::{LineEditResult, LineEditor};
 pub use terminal::RawTerminal;
