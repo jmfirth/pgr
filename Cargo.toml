@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "pgr-core",
+    "pgr-input",
+    "pgr-search",
+    "pgr-display",
+    "pgr-keys",
+    "pgr-syntax",
+    "pgr-agent",
+    "pgr-cli",
+]
