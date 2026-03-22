@@ -2,7 +2,7 @@
 
 A drop-in replacement for GNU `less`, written in Rust. Full behavioral conformance with less 668+, plus a structured agent interface (Pgr Protocol) and modern pager enhancements.
 
-See `SPECIFICATION.md` for the full design document. See `PROCESS.md` for the development workflow. See `PLAN.md` for the current project plan and task status.
+See `SPECIFICATION.md` for the full design document. See `PROCESS.md` for the development workflow. See `PLAN.md` for the current project plan and task status. See `CONVENTIONS.md` for coding conventions, style rules, and best practices — **read it before writing any code**.
 
 ---
 
@@ -48,6 +48,7 @@ Eight crates in a Cargo workspace (see SPECIFICATION.md §8):
 | `just check` | Format check + clippy |
 | `just test` | Fast test suite |
 | `just test-all` | Full test suite |
+| `just start` | Run pgr (pass-through args) |
 | `just build` | Debug build |
 | `just release` | Release build |
 | `just ci` | Full CI pipeline |
