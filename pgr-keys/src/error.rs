@@ -9,6 +9,10 @@ pub enum KeyError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A core buffer/index operation failed.
+    #[error("core error: {0}")]
+    Core(#[from] pgr_core::CoreError),
+
     /// A key binding specification was invalid.
     #[error("invalid binding: {0}")]
     InvalidBinding(String),
@@ -40,5 +44,19 @@ mod tests {
         let err: KeyError = KeyError::from(io_err);
         assert!(matches!(err, KeyError::Io(_)));
         assert_eq!(err.to_string(), "I/O error: terminal read failed");
+    }
+
+    #[test]
+    fn test_key_error_core_display_shows_message() {
+        let core_err = pgr_core::CoreError::Buffer("test failure".to_string());
+        let err = KeyError::Core(core_err);
+        assert_eq!(err.to_string(), "core error: buffer error: test failure");
+    }
+
+    #[test]
+    fn test_key_error_from_core_error_converts() {
+        let core_err = pgr_core::CoreError::Buffer("overflow".to_string());
+        let err: KeyError = KeyError::from(core_err);
+        assert!(matches!(err, KeyError::Core(_)));
     }
 }
