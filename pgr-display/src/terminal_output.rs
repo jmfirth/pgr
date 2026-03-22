@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use crate::render::{self, RawControlMode};
+use crate::render::{self, RenderConfig};
 use crate::screen::Screen;
 
 /// Paint the full screen content to the terminal.
@@ -24,8 +24,7 @@ pub fn paint_screen<W: Write>(
     writer: &mut W,
     screen: &Screen,
     lines: &[Option<String>],
-    raw_mode: RawControlMode,
-    tab_width: usize,
+    config: &RenderConfig,
 ) -> std::io::Result<()> {
     let (_, cols) = screen.dimensions();
     let content_rows = screen.content_rows();
@@ -41,7 +40,7 @@ pub fn paint_screen<W: Write>(
         }
 
         if let Some(Some(line_text)) = lines.get(row) {
-            let (rendered, _) = render::render_line(line_text, h_offset, cols, tab_width, raw_mode);
+            let (rendered, _) = render::render_line(line_text, h_offset, cols, config);
             writer.write_all(rendered.as_bytes())?;
         } else {
             // Beyond EOF: display tilde
@@ -158,7 +157,8 @@ mod tests {
             Some("line 3".to_string()),
         ];
 
-        let output = capture_output(|w| paint_screen(w, &screen, &lines, RawControlMode::Off, 8));
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let output_str = String::from_utf8_lossy(&output);
 
         // Should contain cursor positioning
@@ -176,7 +176,8 @@ mod tests {
         let screen = Screen::new(4, 80); // 3 content rows
         let lines: Vec<Option<String>> = vec![Some("only line".to_string()), None, None];
 
-        let output = capture_output(|w| paint_screen(w, &screen, &lines, RawControlMode::Off, 8));
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let output_str = String::from_utf8_lossy(&output);
 
         assert!(output_str.contains("only line"));
@@ -190,7 +191,8 @@ mod tests {
         let screen = Screen::new(3, 80); // 2 content rows
         let lines: Vec<Option<String>> = vec![None, None];
 
-        let output = capture_output(|w| paint_screen(w, &screen, &lines, RawControlMode::Off, 8));
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let output_str = String::from_utf8_lossy(&output);
 
         let tilde_count = output_str.matches('~').count();
@@ -202,7 +204,8 @@ mod tests {
         let screen = Screen::new(1, 80); // 0 content rows
         let lines: Vec<Option<String>> = vec![];
 
-        let output = capture_output(|w| paint_screen(w, &screen, &lines, RawControlMode::Off, 8));
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let output_str = String::from_utf8_lossy(&output);
 
         // Should still have cursor positioning to (1,1) but no content

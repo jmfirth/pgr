@@ -188,6 +188,139 @@ pub fn display_width_ansi(input: &str, tab_width: usize) -> usize {
     unicode::display_width(&stripped, tab_width)
 }
 
+/// Processing mode for backspace/overstrike sequences.
+///
+/// Matches less's `-u` and `-U` flags and `--proc-backspace` / `--PROC-BACKSPACE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverstrikeMode {
+    /// Default: interpret backspace sequences as formatting.
+    /// `char BS char` = bold, `_ BS char` = underline.
+    Interpret,
+    /// `-u`: show backspace + overstruck char as `^H` notation.
+    Show,
+    /// `-U`: pass backspace through raw, no interpretation.
+    Raw,
+}
+
+/// Process overstrike sequences in a line, converting them to ANSI equivalents.
+///
+/// - `char BS char` (same char twice with backspace between) becomes bold: `ESC[1m char ESC[0m`
+/// - `_ BS char` (underscore, backspace, char) becomes underline: `ESC[4m char ESC[0m`
+/// - Other backspace sequences are handled according to the mode.
+///
+/// Returns the processed line with ANSI escapes replacing overstrikes.
+#[must_use]
+pub fn process_overstrikes(line: &str, mode: OverstrikeMode) -> String {
+    match mode {
+        OverstrikeMode::Interpret => interpret_overstrikes(line),
+        OverstrikeMode::Show => show_overstrikes(line),
+        OverstrikeMode::Raw => line.to_string(),
+    }
+}
+
+/// Interpret overstrike sequences, converting to ANSI bold/underline.
+fn interpret_overstrikes(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < len {
+        // Check for overstrike pattern: char BS char (need at least 3 chars remaining)
+        if i + 2 < len && chars[i + 1] == '\x08' {
+            let before = chars[i];
+            let after = chars[i + 2];
+
+            if before == '_' {
+                // Underline: _ BS char
+                result.push_str("\x1b[4m");
+                result.push(after);
+                result.push_str("\x1b[0m");
+                i += 3;
+            } else if before == after {
+                // Bold: char BS char (same character)
+                result.push_str("\x1b[1m");
+                result.push(after);
+                result.push_str("\x1b[0m");
+                i += 3;
+            } else {
+                // Unrecognized overstrike pattern: emit first char, advance by 1
+                result.push(before);
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Show overstrike sequences as `^H` caret notation.
+fn show_overstrikes(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    for c in line.chars() {
+        if c == '\x08' {
+            result.push_str("^H");
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Tracks the active ANSI text attributes across lines.
+///
+/// When a line ends with an active SGR style (e.g., `ESC[31m` red text
+/// without a reset), the next line should start with that style active.
+#[derive(Debug, Clone, Default)]
+pub struct AnsiState {
+    /// The SGR parameters that are currently active, as a raw string.
+    active_sgr: Option<String>,
+}
+
+impl AnsiState {
+    /// Scan a line and update the tracked state.
+    /// Returns the final active SGR after processing the line.
+    pub fn process_line(&mut self, line: &str) {
+        let segments = parse_ansi(line);
+        for segment in segments {
+            if let Segment::Escape(esc) = segment {
+                // Check for CSI SGR sequences: ESC [ ... m
+                if is_sgr_sequence(esc) {
+                    if is_sgr_reset(esc) {
+                        self.active_sgr = None;
+                    } else {
+                        self.active_sgr = Some(esc.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return the SGR sequence to prepend to the next line, or empty if none.
+    #[must_use]
+    pub fn carry_forward(&self) -> &str {
+        match &self.active_sgr {
+            Some(sgr) => sgr.as_str(),
+            None => "",
+        }
+    }
+}
+
+/// Check if an escape sequence is a CSI SGR sequence (ends with 'm').
+fn is_sgr_sequence(esc: &str) -> bool {
+    let bytes = esc.as_bytes();
+    // CSI SGR: ESC [ <params> m
+    bytes.len() >= 3 && bytes[0] == 0x1B && bytes[1] == b'[' && bytes[bytes.len() - 1] == b'm'
+}
+
+/// Check if an SGR sequence is a reset (ESC[0m or ESC[m).
+fn is_sgr_reset(esc: &str) -> bool {
+    esc == "\x1b[0m" || esc == "\x1b[m"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +439,79 @@ mod tests {
     fn test_parse_ansi_empty_string_returns_empty_segments() {
         let segments = parse_ansi("");
         assert!(segments.is_empty());
+    }
+
+    // --- Overstrike tests ---
+
+    #[test]
+    fn test_process_overstrikes_bold_sequence() {
+        let input = "a\x08a";
+        let result = process_overstrikes(input, OverstrikeMode::Interpret);
+        assert_eq!(result, "\x1b[1ma\x1b[0m");
+    }
+
+    #[test]
+    fn test_process_overstrikes_underline_sequence() {
+        let input = "_\x08a";
+        let result = process_overstrikes(input, OverstrikeMode::Interpret);
+        assert_eq!(result, "\x1b[4ma\x1b[0m");
+    }
+
+    #[test]
+    fn test_process_overstrikes_multiple_in_line() {
+        let input = "a\x08ab\x08b";
+        let result = process_overstrikes(input, OverstrikeMode::Interpret);
+        assert_eq!(result, "\x1b[1ma\x1b[0m\x1b[1mb\x1b[0m");
+    }
+
+    #[test]
+    fn test_process_overstrikes_mixed_bold_and_underline() {
+        let input = "a\x08a_\x08b";
+        let result = process_overstrikes(input, OverstrikeMode::Interpret);
+        assert_eq!(result, "\x1b[1ma\x1b[0m\x1b[4mb\x1b[0m");
+    }
+
+    #[test]
+    fn test_process_overstrikes_no_overstrikes_passes_through() {
+        let input = "hello";
+        let result = process_overstrikes(input, OverstrikeMode::Interpret);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_process_overstrikes_show_mode_renders_caret_h() {
+        let input = "a\x08a";
+        let result = process_overstrikes(input, OverstrikeMode::Show);
+        assert_eq!(result, "a^Ha");
+    }
+
+    #[test]
+    fn test_process_overstrikes_raw_mode_passes_through() {
+        let input = "a\x08a";
+        let result = process_overstrikes(input, OverstrikeMode::Raw);
+        assert_eq!(result, "a\x08a");
+    }
+
+    // --- ANSI state tracking tests ---
+
+    #[test]
+    fn test_ansi_state_tracks_sgr_across_lines() {
+        let mut state = AnsiState::default();
+        state.process_line("hello \x1b[31m");
+        assert_eq!(state.carry_forward(), "\x1b[31m");
+    }
+
+    #[test]
+    fn test_ansi_state_reset_clears_state() {
+        let mut state = AnsiState::default();
+        state.process_line("\x1b[31mred text\x1b[0m");
+        assert_eq!(state.carry_forward(), "");
+    }
+
+    #[test]
+    fn test_ansi_state_multiple_sgr_last_wins() {
+        let mut state = AnsiState::default();
+        state.process_line("\x1b[31m\x1b[1m\x1b[4m");
+        assert_eq!(state.carry_forward(), "\x1b[4m");
     }
 }

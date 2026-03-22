@@ -7,7 +7,8 @@ use std::io::{Read, Write};
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    paint_prompt, paint_screen, render_prompt, PromptContext, PromptStyle, RawControlMode, Screen,
+    paint_prompt, paint_screen, render_prompt, OverstrikeMode, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, TabStops,
 };
 
 use crate::error::Result;
@@ -39,8 +40,7 @@ pub struct Pager<R: Read, W: Write> {
     screen: Screen,
     buffer: Box<dyn Buffer>,
     index: LineIndex,
-    raw_mode: RawControlMode,
-    tab_width: usize,
+    render_config: RenderConfig,
     filename: Option<String>,
     prompt_style: PromptStyle,
     /// Numeric prefix accumulator.
@@ -75,8 +75,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             screen: Screen::new(24, 80),
             buffer,
             index,
-            raw_mode: RawControlMode::Off,
-            tab_width: 8,
+            render_config: RenderConfig::default(),
             filename,
             prompt_style: PromptStyle::Short,
             pending_count: None,
@@ -326,13 +325,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
-        paint_screen(
-            &mut self.writer,
-            &self.screen,
-            &lines,
-            self.raw_mode,
-            self.tab_width,
-        )?;
+        paint_screen(&mut self.writer, &self.screen, &lines, &self.render_config)?;
 
         // Write the prompt on the last row.
         self.paint_status_prompt(total)?;
@@ -385,12 +378,22 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Set the raw control mode for rendering.
     pub fn set_raw_mode(&mut self, mode: RawControlMode) {
-        self.raw_mode = mode;
+        self.render_config.raw_mode = mode;
     }
 
     /// Set the tab stop width.
     pub fn set_tab_width(&mut self, width: usize) {
-        self.tab_width = width;
+        self.render_config.tab_stops = TabStops::regular(width);
+    }
+
+    /// Set the overstrike processing mode.
+    pub fn set_overstrike_mode(&mut self, mode: OverstrikeMode) {
+        self.render_config.overstrike_mode = mode;
+    }
+
+    /// Set the full render configuration.
+    pub fn set_render_config(&mut self, config: RenderConfig) {
+        self.render_config = config;
     }
 
     /// Set the terminal dimensions, delegating to the internal screen state.
