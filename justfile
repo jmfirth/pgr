@@ -6,7 +6,7 @@ check:
 
 # Fast test suite
 test:
-    cargo test --workspace --lib && cargo test --workspace --doc
+    cargo test --workspace --lib --bins && cargo test --workspace --doc
 
 # Full test suite
 test-all:
