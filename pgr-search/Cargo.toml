@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 pgr-core = { path = "../pgr-core" }
+regex = "1"
 thiserror = "2"
