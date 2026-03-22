@@ -6,7 +6,9 @@
 use std::io::{Read, Write};
 
 use pgr_core::{Buffer, LineIndex};
-use pgr_display::{paint_screen, RawControlMode, Screen};
+use pgr_display::{
+    paint_prompt, paint_screen, render_prompt, PromptContext, PromptStyle, RawControlMode, Screen,
+};
 
 use crate::error::Result;
 use crate::key::Key;
@@ -24,8 +26,8 @@ pub struct Pager<R: Read, W: Write> {
     index: LineIndex,
     raw_mode: RawControlMode,
     tab_width: usize,
-    #[allow(dead_code)] // Used by Task 014 prompt integration
     filename: Option<String>,
+    prompt_style: PromptStyle,
     /// Numeric prefix accumulator.
     pending_count: Option<usize>,
     /// Whether we should quit.
@@ -55,6 +57,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             raw_mode: RawControlMode::Off,
             tab_width: 8,
             filename,
+            prompt_style: PromptStyle::Short,
             pending_count: None,
             should_quit: false,
         }
@@ -187,23 +190,18 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.tab_width,
         )?;
 
-        // Write a minimal prompt on the last row.
-        self.paint_minimal_prompt(total)?;
+        // Write the prompt on the last row.
+        self.paint_status_prompt(total)?;
 
         Ok(())
     }
 
-    /// Write a minimal hardcoded prompt on the last row.
-    ///
-    /// Shows `:` normally, or `(END)` if at/past the last line, in reverse video.
-    fn paint_minimal_prompt(&mut self, total_lines: usize) -> Result<()> {
-        let (rows, _) = self.screen.dimensions();
+    /// Render and paint the status prompt on the last row.
+    fn paint_status_prompt(&mut self, total_lines: usize) -> Result<()> {
+        let (rows, cols) = self.screen.dimensions();
         if rows == 0 {
             return Ok(());
         }
-
-        // Move cursor to the last row, column 1.
-        write!(self.writer, "\x1b[{rows};1H")?;
 
         let at_eof = if total_lines == 0 {
             true
@@ -212,13 +210,46 @@ impl<R: Read, W: Write> Pager<R, W> {
             end >= total_lines
         };
 
-        let prompt_text = if at_eof { "(END)" } else { ":" };
+        let (start, end) = self.screen.visible_range();
+        let bottom_display = end.min(total_lines);
 
-        // Reverse video on, write prompt, reverse video off, clear rest of line.
-        write!(self.writer, "\x1b[7m{prompt_text}\x1b[0m\x1b[K")?;
-        self.writer.flush()?;
+        let ctx = PromptContext {
+            filename: self.filename.as_deref(),
+            top_line: start.saturating_add(1),
+            bottom_line: bottom_display,
+            total_lines: Some(total_lines),
+            total_bytes: self.buffer.len() as u64,
+            byte_offset: 0,
+            file_index: 0,
+            file_count: 1,
+            at_eof,
+            is_pipe: false,
+        };
+
+        let text = render_prompt(self.prompt_style, &ctx);
+        paint_prompt(&mut self.writer, &text, rows, cols)?;
 
         Ok(())
+    }
+
+    /// Set the raw control mode for rendering.
+    pub fn set_raw_mode(&mut self, mode: RawControlMode) {
+        self.raw_mode = mode;
+    }
+
+    /// Set the tab stop width.
+    pub fn set_tab_width(&mut self, width: usize) {
+        self.tab_width = width;
+    }
+
+    /// Set the terminal dimensions, delegating to the internal screen state.
+    pub fn set_dimensions(&mut self, rows: usize, cols: usize) {
+        self.screen.resize(rows, cols);
+    }
+
+    /// Set the prompt style used for the status line.
+    pub fn set_prompt_style(&mut self, style: PromptStyle) {
+        self.prompt_style = style;
     }
 
     /// Access the screen state (for testing).

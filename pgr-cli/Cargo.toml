@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 pgr-core = { path = "../pgr-core" }
 pgr-input = { path = "../pgr-input" }
 pgr-search = { path = "../pgr-search" }

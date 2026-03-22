@@ -72,6 +72,15 @@ impl LoadedFile {
     pub fn ensure_lines(&mut self, up_to: usize) -> crate::Result<bool> {
         Ok(self.index.ensure_line(up_to, &self.buffer)?)
     }
+
+    /// Consume this `LoadedFile` and return the buffer and line index separately.
+    ///
+    /// This is useful when handing ownership to a `Pager`, which needs the
+    /// buffer and index as independent values.
+    #[must_use]
+    pub fn into_parts(self) -> (Box<dyn Buffer>, LineIndex) {
+        (Box::new(self.buffer) as Box<dyn Buffer>, self.index)
+    }
 }
 
 #[cfg(test)]
@@ -187,5 +196,18 @@ mod tests {
         let f = make_temp_file(b"a\nb\n");
         let mut loaded = LoadedFile::open(f.path()).expect("open failed");
         assert!(!loaded.ensure_lines(10).unwrap());
+    }
+
+    // ── into_parts returns usable buffer and index ──────────────────
+
+    #[test]
+    fn test_into_parts_returns_functional_buffer_and_index() {
+        let f = make_temp_file(b"hello\nworld\n");
+        let loaded = LoadedFile::open(f.path()).expect("open failed");
+        let (buffer, mut index) = loaded.into_parts();
+        let total = index.total_lines(&*buffer).expect("total_lines failed");
+        assert_eq!(total, 2);
+        let line = index.get_line(0, &*buffer).expect("get_line failed");
+        assert_eq!(line.as_deref(), Some("hello"));
     }
 }
