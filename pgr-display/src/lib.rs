@@ -12,7 +12,7 @@ pub mod unicode;
 
 pub use color::{Color, ColorConfig, ColorSelector, ColorSpec};
 pub use error::{DisplayError, Result};
-pub use prompt::{paint_prompt, render_prompt, PromptContext, PromptStyle};
+pub use prompt::{eval_prompt, paint_prompt, render_prompt, PromptContext, PromptStyle};
 pub use render::{render_line, RawControlMode};
 pub use screen::Screen;
 pub use terminal_output::paint_screen;
