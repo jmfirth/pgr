@@ -25,6 +25,40 @@ pub enum Command {
     Quit,
     /// No operation; the key has no binding.
     Noop,
+    /// Scroll right N characters (default: half screen width).
+    /// ESC-) or RIGHT arrow.
+    ScrollRight,
+    /// Scroll left N characters (default: half screen width).
+    /// ESC-( or LEFT arrow.
+    ScrollLeft,
+    /// Scroll right to end of longest displayed line. ESC-} or Ctrl+RIGHT.
+    ScrollRightEnd,
+    /// Scroll left to first column. ESC-{ or Ctrl+LEFT.
+    ScrollLeftHome,
+    /// Go to N percent through file. `p` or `%`.
+    GotoPercent,
+    /// Go to byte offset N. `P`.
+    GotoByteOffset,
+    /// Like `PageForward` but works even at EOF. ESC-SPACE.
+    ForwardForceEof,
+    /// Like `PageBackward` but works even at beginning. ESC-b.
+    BackwardForceBeginning,
+    /// Set window size to N and scroll forward. `z`.
+    WindowForward,
+    /// Set window size to N and scroll backward. `w`.
+    WindowBackward,
+    /// Enter follow mode (tail -f). `F`.
+    FollowMode,
+    /// Repaint with buffer refresh (reload). `R`.
+    RepaintRefresh,
+    /// Scroll forward N file lines (ignoring long wrapped lines). ESC-j.
+    FileLineForward,
+    /// Scroll backward N file lines. ESC-k.
+    FileLineBackward,
+    /// Like `ScrollForward` but works beyond EOF. `J`.
+    ScrollForwardForce(usize),
+    /// Like `ScrollBackward` but works beyond beginning. `K` or `Y`.
+    ScrollBackwardForce(usize),
 }
 
 #[cfg(test)]

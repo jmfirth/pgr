@@ -12,7 +12,7 @@ pub struct Keymap {
 }
 
 impl Keymap {
-    /// Create the default keymap matching the `less` pager's Phase 0 keybindings.
+    /// Create the default keymap matching the `less` pager keybindings.
     #[must_use]
     pub fn default_less() -> Self {
         let bindings = vec![
@@ -63,6 +63,36 @@ impl Keymap {
             (Key::Char('r'), Command::Repaint),
             (Key::Ctrl('r'), Command::Repaint),
             (Key::Ctrl('l'), Command::Repaint),
+            // Horizontal scroll
+            (Key::Right, Command::ScrollRight),
+            (Key::EscSeq(')'), Command::ScrollRight),
+            (Key::Left, Command::ScrollLeft),
+            (Key::EscSeq('('), Command::ScrollLeft),
+            (Key::CtrlRight, Command::ScrollRightEnd),
+            (Key::EscSeq('}'), Command::ScrollRightEnd),
+            (Key::CtrlLeft, Command::ScrollLeftHome),
+            (Key::EscSeq('{'), Command::ScrollLeftHome),
+            // Percent and byte navigation
+            (Key::Char('p'), Command::GotoPercent),
+            (Key::Char('%'), Command::GotoPercent),
+            (Key::Char('P'), Command::GotoByteOffset),
+            // Force scroll past boundaries
+            (Key::EscSeq(' '), Command::ForwardForceEof),
+            (Key::EscSeq('b'), Command::BackwardForceBeginning),
+            // Window sizing
+            (Key::Char('z'), Command::WindowForward),
+            (Key::Char('w'), Command::WindowBackward),
+            // Follow mode
+            (Key::Char('F'), Command::FollowMode),
+            // Repaint with refresh
+            (Key::Char('R'), Command::RepaintRefresh),
+            // File line navigation
+            (Key::EscSeq('j'), Command::FileLineForward),
+            (Key::EscSeq('k'), Command::FileLineBackward),
+            // Force scroll (unclamped)
+            (Key::Char('J'), Command::ScrollForwardForce(1)),
+            (Key::Char('K'), Command::ScrollBackwardForce(1)),
+            (Key::Char('Y'), Command::ScrollBackwardForce(1)),
         ];
 
         Self { bindings }
@@ -131,7 +161,7 @@ mod tests {
     #[test]
     fn test_lookup_unbound_key_returns_noop() {
         let keymap = Keymap::default_less();
-        assert_eq!(keymap.lookup(&Key::Char('z')), Command::Noop);
+        assert_eq!(keymap.lookup(&Key::Char('x')), Command::Noop);
     }
 
     #[test]
@@ -171,5 +201,116 @@ mod tests {
             keymap.lookup(&Key::EscSeq('<')),
             Command::GotoBeginning(None)
         );
+    }
+
+    #[test]
+    fn test_keymap_right_arrow_maps_to_scroll_right() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Right), Command::ScrollRight);
+    }
+
+    #[test]
+    fn test_keymap_left_arrow_maps_to_scroll_left() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Left), Command::ScrollLeft);
+    }
+
+    #[test]
+    fn test_keymap_percent_maps_to_goto_percent() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('%')), Command::GotoPercent);
+    }
+
+    #[test]
+    fn test_keymap_upper_f_maps_to_follow_mode() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('F')), Command::FollowMode);
+    }
+
+    #[test]
+    fn test_keymap_upper_r_maps_to_repaint_refresh() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('R')), Command::RepaintRefresh);
+    }
+
+    #[test]
+    fn test_keymap_p_maps_to_goto_percent() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('p')), Command::GotoPercent);
+    }
+
+    #[test]
+    fn test_keymap_upper_p_maps_to_goto_byte_offset() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('P')), Command::GotoByteOffset);
+    }
+
+    #[test]
+    fn test_keymap_z_maps_to_window_forward() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('z')), Command::WindowForward);
+    }
+
+    #[test]
+    fn test_keymap_w_maps_to_window_backward() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('w')), Command::WindowBackward);
+    }
+
+    #[test]
+    fn test_keymap_upper_j_maps_to_scroll_forward_force() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('J')),
+            Command::ScrollForwardForce(1)
+        );
+    }
+
+    #[test]
+    fn test_keymap_upper_k_maps_to_scroll_backward_force() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('K')),
+            Command::ScrollBackwardForce(1)
+        );
+    }
+
+    #[test]
+    fn test_keymap_upper_y_maps_to_scroll_backward_force() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('Y')),
+            Command::ScrollBackwardForce(1)
+        );
+    }
+
+    #[test]
+    fn test_keymap_ctrl_right_maps_to_scroll_right_end() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::CtrlRight), Command::ScrollRightEnd);
+    }
+
+    #[test]
+    fn test_keymap_ctrl_left_maps_to_scroll_left_home() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::CtrlLeft), Command::ScrollLeftHome);
+    }
+
+    #[test]
+    fn test_keymap_esc_space_maps_to_forward_force_eof() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq(' ')), Command::ForwardForceEof);
+    }
+
+    #[test]
+    fn test_keymap_esc_j_maps_to_file_line_forward() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('j')), Command::FileLineForward);
+    }
+
+    #[test]
+    fn test_keymap_esc_k_maps_to_file_line_backward() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('k')), Command::FileLineBackward);
     }
 }

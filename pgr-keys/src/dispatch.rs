@@ -32,6 +32,10 @@ pub struct Pager<R: Read, W: Write> {
     pending_count: Option<usize>,
     /// Whether we should quit.
     should_quit: bool,
+    /// Sticky half-page scroll size. Set by `d`/`u` with a count.
+    sticky_half_page: Option<usize>,
+    /// Custom window size. Set by `z`/`w` with a count.
+    custom_window_size: Option<usize>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -60,6 +64,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             prompt_style: PromptStyle::Short,
             pending_count: None,
             should_quit: false,
+            sticky_half_page: None,
+            custom_window_size: None,
         }
     }
 
@@ -113,6 +119,7 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Execute a command with the given numeric count prefix.
+    #[allow(clippy::too_many_lines)] // dispatch table is inherently large
     fn execute(&mut self, command: &Command, count: Option<usize>) -> Result<()> {
         let total = self.index.total_lines(&*self.buffer)?;
 
@@ -126,23 +133,37 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             }
             Command::PageForward => {
-                self.screen
-                    .scroll_forward(count.unwrap_or(self.screen.content_rows()), total);
+                let window = self
+                    .custom_window_size
+                    .unwrap_or(self.screen.content_rows());
+                self.screen.scroll_forward(count.unwrap_or(window), total);
                 self.repaint()?;
             }
             Command::PageBackward => {
-                self.screen
-                    .scroll_backward(count.unwrap_or(self.screen.content_rows()));
+                let window = self
+                    .custom_window_size
+                    .unwrap_or(self.screen.content_rows());
+                self.screen.scroll_backward(count.unwrap_or(window));
                 self.repaint()?;
             }
             Command::HalfPageForward => {
-                self.screen
-                    .scroll_forward(count.unwrap_or(self.screen.content_rows() / 2), total);
+                if let Some(c) = count {
+                    self.sticky_half_page = Some(c);
+                }
+                let amount = self
+                    .sticky_half_page
+                    .unwrap_or(self.screen.content_rows() / 2);
+                self.screen.scroll_forward(amount, total);
                 self.repaint()?;
             }
             Command::HalfPageBackward => {
-                self.screen
-                    .scroll_backward(count.unwrap_or(self.screen.content_rows() / 2));
+                if let Some(c) = count {
+                    self.sticky_half_page = Some(c);
+                }
+                let amount = self
+                    .sticky_half_page
+                    .unwrap_or(self.screen.content_rows() / 2);
+                self.screen.scroll_backward(amount);
                 self.repaint()?;
             }
             Command::GotoBeginning(n) => {
@@ -161,8 +182,141 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.should_quit = true;
             }
             Command::Noop => {}
+            Command::ScrollRight => {
+                let cols = self.screen.cols();
+                let amount = count.unwrap_or(cols / 2);
+                let h = self.screen.horizontal_offset();
+                self.screen.set_horizontal_offset(h.saturating_add(amount));
+                self.repaint()?;
+            }
+            Command::ScrollLeft => {
+                let cols = self.screen.cols();
+                let amount = count.unwrap_or(cols / 2);
+                let h = self.screen.horizontal_offset();
+                self.screen.set_horizontal_offset(h.saturating_sub(amount));
+                self.repaint()?;
+            }
+            Command::ScrollRightEnd => {
+                // Find max line width among visible lines and set offset to show rightmost content.
+                let (start, end) = self.screen.visible_range();
+                let cols = self.screen.cols();
+                let mut max_width: usize = 0;
+                for line_num in start..end.min(total) {
+                    if let Some(content) = self.index.get_line(line_num, &*self.buffer)? {
+                        max_width = max_width.max(content.len());
+                    }
+                }
+                let new_offset = max_width.saturating_sub(cols);
+                self.screen.set_horizontal_offset(new_offset);
+                self.repaint()?;
+            }
+            Command::ScrollLeftHome => {
+                self.screen.set_horizontal_offset(0);
+                self.repaint()?;
+            }
+            Command::GotoPercent => {
+                let pct = count.unwrap_or(0).min(100);
+                let target = if total == 0 {
+                    0
+                } else {
+                    pct.saturating_mul(total) / 100
+                };
+                self.screen.goto_line(target, total);
+                self.repaint()?;
+            }
+            Command::GotoByteOffset => {
+                let byte_offset = count.unwrap_or(0) as u64;
+                let line = self
+                    .index
+                    .line_at_offset(byte_offset, &*self.buffer)?
+                    .unwrap_or(total.saturating_sub(1));
+                self.screen.goto_line(line, total);
+                self.repaint()?;
+            }
+            Command::ForwardForceEof => {
+                let window = self
+                    .custom_window_size
+                    .unwrap_or(self.screen.content_rows());
+                self.screen
+                    .scroll_forward_unclamped(count.unwrap_or(window));
+                self.repaint()?;
+            }
+            Command::BackwardForceBeginning => {
+                let window = self
+                    .custom_window_size
+                    .unwrap_or(self.screen.content_rows());
+                // scroll_backward already clamps at 0, which is the correct behavior
+                self.screen.scroll_backward(count.unwrap_or(window));
+                self.repaint()?;
+            }
+            Command::WindowForward => {
+                if let Some(c) = count {
+                    self.custom_window_size = Some(c);
+                }
+                let window = self
+                    .custom_window_size
+                    .unwrap_or(self.screen.content_rows());
+                self.screen.scroll_forward(window, total);
+                self.repaint()?;
+            }
+            Command::WindowBackward => {
+                if let Some(c) = count {
+                    self.custom_window_size = Some(c);
+                }
+                let window = self
+                    .custom_window_size
+                    .unwrap_or(self.screen.content_rows());
+                self.screen.scroll_backward(window);
+                self.repaint()?;
+            }
+            Command::FollowMode => {
+                self.follow_mode()?;
+            }
+            Command::RepaintRefresh => {
+                self.buffer.refresh()?;
+                let new_len = self.buffer.len() as u64;
+                self.index = LineIndex::new(new_len);
+                self.repaint()?;
+            }
+            Command::FileLineForward => {
+                // Equivalent to ScrollForward for now; differentiation comes with word-wrap.
+                self.screen.scroll_forward(count.unwrap_or(1), total);
+                self.repaint()?;
+            }
+            Command::FileLineBackward => {
+                // Equivalent to ScrollBackward for now; differentiation comes with word-wrap.
+                self.screen.scroll_backward(count.unwrap_or(1));
+                self.repaint()?;
+            }
+            Command::ScrollForwardForce(n) => {
+                self.screen.scroll_forward_unclamped(count.unwrap_or(n));
+                self.repaint()?;
+            }
+            Command::ScrollBackwardForce(n) => {
+                // scroll_backward already clamps at 0
+                self.screen.scroll_backward(count.unwrap_or(n));
+                self.repaint()?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Enter basic follow mode: scroll to end and exit immediately.
+    ///
+    /// A full follow mode with `inotify`/`kqueue` polling and non-blocking key
+    /// reading is deferred to Phase 2. This stub scrolls to the end of the
+    /// buffer and returns, which satisfies the basic "F scrolls to bottom"
+    /// contract.
+    fn follow_mode(&mut self) -> Result<()> {
+        self.buffer.refresh()?;
+        let new_len = self.buffer.len() as u64;
+        self.index = LineIndex::new(new_len);
+        self.index.index_all(&*self.buffer)?;
+        let total = self.index.lines_indexed();
+        let default = total.saturating_sub(self.screen.content_rows());
+        self.screen.goto_line(default, total);
+        self.repaint()?;
         Ok(())
     }
 
@@ -256,6 +410,18 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[must_use]
     pub fn screen(&self) -> &Screen {
         &self.screen
+    }
+
+    /// Return the sticky half-page size, if set by a counted `d`/`u` command.
+    #[must_use]
+    pub fn sticky_half_page(&self) -> Option<usize> {
+        self.sticky_half_page
+    }
+
+    /// Return the custom window size, if set by a counted `z`/`w` command.
+    #[must_use]
+    pub fn custom_window_size(&self) -> Option<usize> {
+        self.custom_window_size
     }
 }
 
@@ -444,8 +610,206 @@ mod tests {
     #[test]
     fn test_dispatch_noop_key_does_not_change_position() {
         let content = make_test_content(50);
-        // 'z' is unbound (Noop), should not change position.
-        let pager = run_pager(b"jzq", &content);
+        // 'x' is unbound (Noop), should not change position.
+        let pager = run_pager(b"jxq", &content);
         assert_eq!(pager.screen().top_line(), 1);
+    }
+
+    // ── Horizontal scrolling ─────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_scroll_right_increases_horizontal_offset() {
+        let content = make_test_content(50);
+        // RIGHT arrow is ESC [ C
+        let mut keys = Vec::new();
+        keys.extend_from_slice(&[0x1B, b'[', b'C']); // Right arrow
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Default scroll: cols/2 = 80/2 = 40
+        assert_eq!(pager.screen().horizontal_offset(), 40);
+    }
+
+    #[test]
+    fn test_dispatch_scroll_left_decreases_horizontal_offset() {
+        let content = make_test_content(50);
+        // Two rights, then one left
+        let mut keys = Vec::new();
+        keys.extend_from_slice(&[0x1B, b'[', b'C']); // Right
+        keys.extend_from_slice(&[0x1B, b'[', b'C']); // Right
+        keys.extend_from_slice(&[0x1B, b'[', b'D']); // Left
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // 40 + 40 - 40 = 40
+        assert_eq!(pager.screen().horizontal_offset(), 40);
+    }
+
+    #[test]
+    fn test_dispatch_scroll_left_clamps_at_zero() {
+        let content = make_test_content(50);
+        // Left arrow at offset 0 should stay at 0
+        let mut keys = Vec::new();
+        keys.extend_from_slice(&[0x1B, b'[', b'D']); // Left
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().horizontal_offset(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_scroll_left_home_resets_to_zero() {
+        let content = make_test_content(50);
+        // Right, then CtrlLeft (ESC [ 1 ; 5 D)
+        let mut keys = Vec::new();
+        keys.extend_from_slice(&[0x1B, b'[', b'C']); // Right
+        keys.extend_from_slice(&[0x1B, b'[', b'1', b';', b'5', b'D']); // CtrlLeft
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().horizontal_offset(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_scroll_right_with_count() {
+        let content = make_test_content(50);
+        // "20" then RIGHT arrow -> scroll right 20
+        let mut keys: Vec<u8> = b"20".to_vec();
+        keys.extend_from_slice(&[0x1B, b'[', b'C']); // Right
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().horizontal_offset(), 20);
+    }
+
+    // ── Percent and byte navigation ──────────────────────────────────
+
+    #[test]
+    fn test_dispatch_goto_percent_50_goes_to_middle() {
+        let content = make_test_content(100);
+        // "50p" -> goto 50% of 100 lines = line 50
+        let pager = run_pager(b"50pq", &content);
+        assert_eq!(pager.screen().top_line(), 50);
+    }
+
+    #[test]
+    fn test_dispatch_goto_percent_0_goes_to_beginning() {
+        let content = make_test_content(100);
+        // Scroll forward first, then "0p" -> goto beginning
+        let pager = run_pager(b"  0pq", &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_goto_percent_100_goes_to_end() {
+        let content = make_test_content(100);
+        let pager = run_pager(b"100pq", &content);
+        // 100 * 100 / 100 = 100, clamped to 99 (total_lines - 1)
+        assert_eq!(pager.screen().top_line(), 99);
+    }
+
+    #[test]
+    fn test_dispatch_goto_byte_offset_finds_correct_line() {
+        // "line 0\n" is 7 bytes, "line 1\n" is 7 bytes, etc.
+        // Byte offset 7 is start of line 1.
+        let content = make_test_content(50);
+        let pager = run_pager(b"7Pq", &content);
+        assert_eq!(pager.screen().top_line(), 1);
+    }
+
+    // ── Sticky half-page ─────────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_half_page_forward_with_count_sets_sticky() {
+        let content = make_test_content(100);
+        // "10d" sets sticky to 10 and scrolls 10. Then "d" uses sticky 10.
+        let pager = run_pager(b"10ddq", &content);
+        // 10 + 10 = 20
+        assert_eq!(pager.screen().top_line(), 20);
+        assert_eq!(pager.sticky_half_page(), Some(10));
+    }
+
+    #[test]
+    fn test_dispatch_half_page_backward_with_count_sets_sticky() {
+        let content = make_test_content(100);
+        // Scroll forward by 30 first, then "5u" sets sticky to 5 and scrolls back 5
+        let pager = run_pager(b"30j5uq", &content);
+        assert_eq!(pager.screen().top_line(), 25);
+        assert_eq!(pager.sticky_half_page(), Some(5));
+    }
+
+    // ── Window sizing ────────────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_z_with_count_sets_window_and_scrolls() {
+        let content = make_test_content(100);
+        // "15z" sets window to 15 and scrolls forward 15
+        let pager = run_pager(b"15zq", &content);
+        assert_eq!(pager.screen().top_line(), 15);
+        assert_eq!(pager.custom_window_size(), Some(15));
+    }
+
+    #[test]
+    fn test_dispatch_w_with_count_sets_window_and_scrolls_back() {
+        let content = make_test_content(100);
+        // Scroll forward 30, then "10w" sets window to 10 and scrolls back 10
+        let pager = run_pager(b"30j10wq", &content);
+        assert_eq!(pager.screen().top_line(), 20);
+        assert_eq!(pager.custom_window_size(), Some(10));
+    }
+
+    // ── Force-scroll commands ────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_esc_space_scrolls_forward_even_at_eof() {
+        let content = make_test_content(100);
+        // Navigate to end with G, then ESC-SPACE scrolls forward unclamped.
+        // G -> total(100) - content_rows(23) = 77. Then ESC-SPACE scrolls 23 more -> 100.
+        let mut keys = Vec::new();
+        keys.push(b'G');
+        keys.extend_from_slice(&[0x1B, b' ']); // ESC-SPACE
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // G -> 77, ESC-SPACE -> 77 + 23 = 100 (beyond total_lines - 1 = 99)
+        assert_eq!(pager.screen().top_line(), 100);
+    }
+
+    #[test]
+    fn test_dispatch_upper_j_scrolls_forward_beyond_eof() {
+        let content = make_test_content(100);
+        // Navigate to end with G, then J scrolls 1 line beyond.
+        // G -> 77 (total 100 - content_rows 23), then J -> 78... but that's clamped.
+        // Actually J is unclamped, so from 77 it goes to 78.
+        // Let's scroll to the very last line first, then J.
+        let pager = run_pager(b"99jJq", &content);
+        // 99j -> scroll_forward clamped at 99. J -> unclamped 100.
+        assert_eq!(pager.screen().top_line(), 100);
+    }
+
+    // ── Follow mode ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_follow_mode_scrolls_to_end() {
+        let content = make_test_content(100);
+        let pager = run_pager(b"Fq", &content);
+        // Follow mode scrolls to end: total(100) - content_rows(23) = 77
+        assert_eq!(pager.screen().top_line(), 77);
+    }
+
+    // ── Repaint refresh ──────────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_upper_r_refreshes_buffer() {
+        let content = make_test_content(50);
+        // R refreshes and repaints without moving
+        let pager = run_pager(b"jjRq", &content);
+        // Position should remain at line 2 after refresh + repaint
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    // ── Window forward/backward affects page commands ────────────────
+
+    #[test]
+    fn test_dispatch_window_size_affects_subsequent_page_forward() {
+        let content = make_test_content(100);
+        // "10z" sets window to 10, then SPACE uses that window
+        let pager = run_pager(b"10z q", &content);
+        // 10z -> scrolls 10, SPACE -> scrolls 10 more = 20
+        assert_eq!(pager.screen().top_line(), 20);
     }
 }

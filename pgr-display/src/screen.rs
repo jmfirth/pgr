@@ -51,6 +51,14 @@ impl Screen {
         self.top_line
     }
 
+    /// Scroll forward (down) by `n` lines without clamping at `total_lines`.
+    ///
+    /// Allows scrolling beyond the end of the file. Returns the new `top_line`.
+    pub fn scroll_forward_unclamped(&mut self, n: usize) -> usize {
+        self.top_line = self.top_line.saturating_add(n);
+        self.top_line
+    }
+
     /// Scroll backward (up) by `n` lines, clamping at line 0.
     ///
     /// Returns the new `top_line` value.
@@ -91,6 +99,12 @@ impl Screen {
     #[must_use]
     pub fn content_rows(&self) -> usize {
         self.content_rows
+    }
+
+    /// Return the number of columns.
+    #[must_use]
+    pub fn cols(&self) -> usize {
+        self.cols
     }
 
     /// Return the current horizontal scroll offset in columns.
@@ -230,5 +244,26 @@ mod tests {
         let mut screen = Screen::new(25, 80);
         screen.set_chop_mode(true);
         assert!(screen.chop_mode());
+    }
+
+    #[test]
+    fn test_screen_cols_returns_column_count() {
+        let screen = Screen::new(25, 80);
+        assert_eq!(screen.cols(), 80);
+    }
+
+    #[test]
+    fn test_screen_scroll_forward_unclamped_goes_beyond_total() {
+        let mut screen = Screen::new(25, 80);
+        let top = screen.scroll_forward_unclamped(200);
+        assert_eq!(top, 200);
+    }
+
+    #[test]
+    fn test_screen_scroll_forward_unclamped_from_existing_position() {
+        let mut screen = Screen::new(25, 80);
+        screen.scroll_forward(50, 100);
+        let top = screen.scroll_forward_unclamped(100);
+        assert_eq!(top, 150);
     }
 }
