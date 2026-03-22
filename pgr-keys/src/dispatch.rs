@@ -224,9 +224,16 @@ impl<R: Read, W: Write> Pager<R, W> {
             file_count: 1,
             at_eof,
             is_pipe: false,
+            column: 1,
+            page_number: None,
+            input_line: None,
+            pipe_size: None,
+            search_active: false,
+            line_numbers_enabled: false,
+            marks_set: false,
         };
 
-        let text = render_prompt(self.prompt_style, &ctx);
+        let text = render_prompt(&self.prompt_style, &ctx);
         paint_prompt(&mut self.writer, &text, rows, cols)?;
 
         Ok(())
