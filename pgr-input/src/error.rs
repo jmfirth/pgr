@@ -12,6 +12,10 @@ pub enum InputError {
     /// A generic input error.
     #[error("{0}")]
     Message(String),
+
+    /// An error propagated from pgr-core.
+    #[error("core error: {0}")]
+    Core(#[from] pgr_core::CoreError),
 }
 
 /// A specialized `Result` type for input operations.
@@ -32,6 +36,20 @@ mod tests {
     fn test_input_error_message_display_shows_text() {
         let err = InputError::Message("unexpected EOF".to_string());
         assert_eq!(err.to_string(), "unexpected EOF");
+    }
+
+    #[test]
+    fn test_input_error_core_display_shows_message() {
+        let core_err = pgr_core::CoreError::Buffer("test failure".to_string());
+        let err = InputError::Core(core_err);
+        assert_eq!(err.to_string(), "core error: buffer error: test failure");
+    }
+
+    #[test]
+    fn test_input_error_from_core_error_converts() {
+        let core_err = pgr_core::CoreError::Buffer("conversion test".to_string());
+        let err: InputError = InputError::from(core_err);
+        assert!(matches!(err, InputError::Core(_)));
     }
 
     #[test]
