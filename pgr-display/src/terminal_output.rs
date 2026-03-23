@@ -77,6 +77,7 @@ pub fn paint_screen_with_options<W: Write>(
     let (_, cols) = screen.dimensions();
     let content_rows = screen.content_rows();
     let h_offset = screen.horizontal_offset();
+    let chop_mode = screen.chop_mode();
 
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
@@ -106,8 +107,16 @@ pub fn paint_screen_with_options<W: Write>(
                 let formatted = line_numbers::format_line_number(line_num, ln_width);
                 writer.write_all(formatted.as_bytes())?;
             }
-            let (rendered, _) = render::render_line(line_text, h_offset, content_cols, config);
-            writer.write_all(rendered.as_bytes())?;
+            let (rendered, width) = render::render_line(line_text, h_offset, content_cols, config);
+            if chop_mode && content_cols > 0 {
+                let full_width = render::line_display_width(line_text, config);
+                let truncated_right = full_width > h_offset + content_cols;
+                let (chopped, _) =
+                    render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
+                writer.write_all(chopped.as_bytes())?;
+            } else {
+                writer.write_all(rendered.as_bytes())?;
+            }
         } else if !options.suppress_tildes {
             // Beyond EOF: display tilde (unless suppressed by --tilde)
             writer.write_all(b"~")?;
@@ -140,6 +149,7 @@ pub fn paint_screen_mapped<W: Write>(
     let (_, cols) = screen.dimensions();
     let content_rows = screen.content_rows();
     let h_offset = screen.horizontal_offset();
+    let chop_mode = screen.chop_mode();
 
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
@@ -167,8 +177,17 @@ pub fn paint_screen_mapped<W: Write>(
                     let formatted = line_numbers::format_line_number(sl.line_number, ln_width);
                     writer.write_all(formatted.as_bytes())?;
                 }
-                let (rendered, _) = render::render_line(line_text, h_offset, content_cols, config);
-                writer.write_all(rendered.as_bytes())?;
+                let (rendered, width) =
+                    render::render_line(line_text, h_offset, content_cols, config);
+                if chop_mode && content_cols > 0 {
+                    let full_width = render::line_display_width(line_text, config);
+                    let truncated_right = full_width > h_offset + content_cols;
+                    let (chopped, _) =
+                        render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
+                    writer.write_all(chopped.as_bytes())?;
+                } else {
+                    writer.write_all(rendered.as_bytes())?;
+                }
             } else if !options.suppress_tildes {
                 // Beyond EOF: display tilde (unless suppressed)
                 writer.write_all(b"~")?;
@@ -577,6 +596,110 @@ mod tests {
         assert!(
             output_str.contains("\x1b[2K"),
             "missing line clear: {output_str}"
+        );
+    }
+
+    // --- Chop mode truncation marker tests ---
+
+    #[test]
+    fn test_paint_screen_chop_mode_adds_right_marker() {
+        let mut screen = Screen::new(2, 10); // 1 content row, 10 cols
+        screen.set_chop_mode(true);
+        // Line longer than 10 cols
+        let lines: Vec<Option<String>> = vec![Some("abcdefghijklmno".to_string())];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // Should contain `>` at the right edge
+        assert!(
+            output_str.contains('>'),
+            "missing right truncation marker: {output_str}"
+        );
+        // The rendered text should be 10 chars with `>` as the last one
+        assert!(
+            output_str.contains("abcdefghi>"),
+            "expected 'abcdefghi>' in output: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_chop_mode_no_marker_for_short_line() {
+        let mut screen = Screen::new(2, 80); // 1 content row, 80 cols
+        screen.set_chop_mode(true);
+        let lines: Vec<Option<String>> = vec![Some("short line".to_string())];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // No markers needed
+        assert!(
+            !output_str.contains('>'),
+            "unexpected right marker: {output_str}"
+        );
+        assert!(
+            !output_str.contains('<'),
+            "unexpected left marker: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_chop_mode_left_marker_when_scrolled() {
+        let mut screen = Screen::new(2, 10); // 1 content row, 10 cols
+        screen.set_chop_mode(true);
+        screen.set_horizontal_offset(5);
+        // Line: "abcdefghijklmno" (15 chars). At h_offset=5, shows "fghijklmno"
+        // full_width=15, h_offset+cols=15, so not truncated right. Just left marker.
+        let lines: Vec<Option<String>> = vec![Some("abcdefghijklmno".to_string())];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(
+            output_str.contains('<'),
+            "missing left marker: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_chop_mode_both_markers() {
+        let mut screen = Screen::new(2, 10); // 1 content row, 10 cols
+        screen.set_chop_mode(true);
+        screen.set_horizontal_offset(5);
+        // "abcdefghijklmnopqrst" (20 chars). h_offset=5, shows cols 5-14.
+        // full_width=20 > 5+10=15, so truncated right too.
+        let lines: Vec<Option<String>> = vec![Some("abcdefghijklmnopqrst".to_string())];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(
+            output_str.contains('<'),
+            "missing left marker: {output_str}"
+        );
+        assert!(
+            output_str.contains('>'),
+            "missing right marker: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_no_chop_mode_no_markers() {
+        let screen = Screen::new(2, 10); // chop mode is OFF by default
+        let lines: Vec<Option<String>> = vec![Some("abcdefghijklmno".to_string())];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // Even though line is truncated, chop mode is off so no markers
+        assert!(
+            !output_str.contains('>'),
+            "unexpected right marker when chop off: {output_str}"
         );
     }
 }

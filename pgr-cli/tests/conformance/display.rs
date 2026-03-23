@@ -218,7 +218,7 @@ fn test_conformance_display_line_numbers_after_scroll() {
 ///
 /// With `-N -S`, line numbers should not interfere with chopped content.
 #[test]
-#[ignore = "pgr -S chop missing truncation marker (>) that less shows"]
+#[ignore = "pgr -N -S: chop markers work but line numbers not shown via CLI flag"]
 fn test_conformance_display_line_numbers_with_chop() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
@@ -274,7 +274,7 @@ fn test_conformance_display_squeeze_at_file_start() {
 /// With `-S`, lines longer than the terminal width are truncated rather than
 /// wrapped.
 #[test]
-#[ignore = "pgr -S chop missing truncation marker (>) that less shows"]
+#[ignore = "conformance: PTY-based, requires GNU less"]
 fn test_conformance_display_chop_long_lines() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
@@ -287,7 +287,7 @@ fn test_conformance_display_chop_long_lines() {
 /// With `-S` and a right arrow keypress, the view should shift horizontally,
 /// revealing content beyond the terminal width.
 #[test]
-#[ignore = "pgr horizontal scroll and -S chop not fully implemented"]
+#[ignore = "less 581 maps right arrow differently than less 668+; chop markers work"]
 fn test_conformance_display_chop_with_horizontal_scroll() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");

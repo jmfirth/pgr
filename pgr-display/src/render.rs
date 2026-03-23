@@ -359,6 +359,157 @@ fn raw_char_width(c: char) -> usize {
     }
 }
 
+/// Compute the full display width of a line after tab expansion and control
+/// character notation, using the same rules as [`render_line`].
+///
+/// ANSI escape sequences are stripped (zero width). Overstrikes are processed
+/// if `config.overstrike_mode` is set. This is used to determine whether a
+/// line extends beyond the visible viewport for chop mode truncation markers.
+#[must_use]
+pub fn line_display_width(line: &str, config: &RenderConfig) -> usize {
+    // Pre-process overstrikes to match render_line behavior
+    let processed;
+    let effective_line = if config.overstrike_mode == OverstrikeMode::Interpret {
+        processed = ansi::process_overstrikes(line, OverstrikeMode::Interpret);
+        &processed
+    } else if config.overstrike_mode == OverstrikeMode::Show {
+        processed = ansi::process_overstrikes(line, OverstrikeMode::Show);
+        &processed
+    } else {
+        line
+    };
+
+    match config.raw_mode {
+        RawControlMode::Off | RawControlMode::AnsiOnly => {
+            let stripped = ansi::strip_ansi(effective_line);
+            compute_display_width(&stripped, &config.tab_stops)
+        }
+        RawControlMode::All => {
+            // In raw mode, best-effort: count printable char widths
+            let mut width: usize = 0;
+            for c in effective_line.chars() {
+                width += raw_char_width(c);
+            }
+            width
+        }
+    }
+}
+
+/// Compute display width of text (no ANSI) with tab expansion and control char notation.
+fn compute_display_width(text: &str, tab_stops: &TabStops) -> usize {
+    let mut col: usize = 0;
+    for c in text.chars() {
+        col += expanded_width(c, col, tab_stops);
+    }
+    col
+}
+
+/// Apply chop mode truncation markers to a rendered line.
+///
+/// In `less -S` (chop) mode:
+/// - If the line extends beyond the visible area (right-truncated), the last
+///   visible character is replaced with `>`.
+/// - If `h_offset > 0` (scrolled right) and the line has content to the left,
+///   the first visible character is replaced with `<`.
+///
+/// The `rendered` string may contain ANSI escape sequences; this function
+/// correctly skips them when locating the first/last visible characters.
+///
+/// Returns the modified rendered string and its display width.
+#[must_use]
+pub fn apply_chop_markers(
+    rendered: &str,
+    display_width: usize,
+    h_offset: usize,
+    truncated_right: bool,
+) -> (String, usize) {
+    if display_width == 0 {
+        return (rendered.to_string(), 0);
+    }
+
+    let needs_left = h_offset > 0 && display_width > 0;
+    let needs_right = truncated_right && display_width > 0;
+
+    if !needs_left && !needs_right {
+        return (rendered.to_string(), display_width);
+    }
+
+    // Build a new string with markers applied.
+    // We track visible character positions to know when to substitute.
+    let mut result = String::with_capacity(rendered.len());
+    let mut visible_col: usize = 0;
+    let bytes = rendered.as_bytes();
+    let len = bytes.len();
+    let mut i: usize = 0;
+
+    // Determine the column position where we place the `>` marker.
+    // It replaces the last visible column (display_width - 1).
+    let right_marker_col = if needs_right {
+        display_width.saturating_sub(1)
+    } else {
+        usize::MAX
+    };
+
+    while i < len {
+        // Check for ANSI escape sequence
+        if bytes[i] == b'\x1b' && i + 1 < len && bytes[i + 1] == b'[' {
+            // Find the end of the escape sequence
+            let start = i;
+            i += 2; // skip ESC [
+            while i < len && !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'm') {
+                i += 1;
+            }
+            if i < len {
+                i += 1; // skip the terminator
+            }
+            // Pass through the escape sequence
+            if !needs_right || visible_col < display_width {
+                result.push_str(&rendered[start..i]);
+            }
+            continue;
+        }
+
+        // This is a visible character
+        let c = rendered[i..].chars().next().unwrap_or(' ');
+        let char_len = c.len_utf8();
+        let char_w = UnicodeWidthChar::width(c).unwrap_or(1).max(1);
+
+        if visible_col == 0 && needs_left {
+            // Replace first visible character with `<`
+            result.push('<');
+            visible_col += char_w;
+            i += char_len;
+        } else if visible_col == right_marker_col && needs_right {
+            // Replace last visible character with `>`
+            result.push('>');
+            i += char_len;
+            // Collect any trailing ANSI resets
+            while i < len {
+                if bytes[i] == b'\x1b' && i + 1 < len && bytes[i + 1] == b'[' {
+                    let start = i;
+                    i += 2;
+                    while i < len && !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'm') {
+                        i += 1;
+                    }
+                    if i < len {
+                        i += 1;
+                    }
+                    result.push_str(&rendered[start..i]);
+                } else {
+                    break;
+                }
+            }
+            break;
+        } else {
+            result.push(c);
+            visible_col += char_w;
+            i += char_len;
+        }
+    }
+
+    (result, display_width)
+}
+
 /// ANSI escape sequence for standout (reverse video) mode.
 const STANDOUT_ON: &str = "\x1b[7m";
 /// ANSI escape sequence to reset all attributes.
@@ -1133,5 +1284,115 @@ mod tests {
         let config = default_config();
         let (rendered, _) = render_line_marked("hello", 0, 80, &config, Some(""));
         assert_eq!(rendered, "hello");
+    }
+
+    // --- line_display_width tests ---
+
+    #[test]
+    fn test_line_display_width_plain_ascii() {
+        let config = default_config();
+        assert_eq!(line_display_width("hello world", &config), 11);
+    }
+
+    #[test]
+    fn test_line_display_width_with_tabs() {
+        let config = default_config();
+        // Tab at col 0 -> 8 spaces, then "hi" = 2
+        assert_eq!(line_display_width("\thi", &config), 10);
+    }
+
+    #[test]
+    fn test_line_display_width_with_ansi() {
+        let config = default_config();
+        // ANSI escapes have zero width
+        assert_eq!(line_display_width("\x1b[31mred\x1b[0m", &config), 3);
+    }
+
+    #[test]
+    fn test_line_display_width_with_control_chars() {
+        let config = default_config();
+        // ^A = 2 display cols
+        assert_eq!(line_display_width("a\x01b", &config), 4);
+    }
+
+    #[test]
+    fn test_line_display_width_empty() {
+        let config = default_config();
+        assert_eq!(line_display_width("", &config), 0);
+    }
+
+    // --- apply_chop_markers tests ---
+
+    #[test]
+    fn test_chop_markers_no_markers_needed() {
+        let (result, width) = apply_chop_markers("hello", 5, 0, false);
+        assert_eq!(result, "hello");
+        assert_eq!(width, 5);
+    }
+
+    #[test]
+    fn test_chop_markers_right_truncation_adds_gt() {
+        // "hello worl" rendered at 10 cols, truncated on right
+        let (result, width) = apply_chop_markers("hello worl", 10, 0, true);
+        assert_eq!(result, "hello wor>");
+        assert_eq!(width, 10);
+    }
+
+    #[test]
+    fn test_chop_markers_left_marker_when_scrolled_right() {
+        // Scrolled right (h_offset=5), showing "world" (5 cols, not truncated right)
+        let (result, width) = apply_chop_markers("world", 5, 5, false);
+        assert_eq!(result, "<orld");
+        assert_eq!(width, 5);
+    }
+
+    #[test]
+    fn test_chop_markers_both_markers() {
+        // Scrolled right and truncated: both < and >
+        let (result, width) = apply_chop_markers("ello worl", 9, 5, true);
+        assert_eq!(result, "<llo wor>");
+        assert_eq!(width, 9);
+    }
+
+    #[test]
+    fn test_chop_markers_empty_string_no_crash() {
+        let (result, width) = apply_chop_markers("", 0, 0, false);
+        assert_eq!(result, "");
+        assert_eq!(width, 0);
+    }
+
+    #[test]
+    fn test_chop_markers_single_char_right_truncation() {
+        let (result, width) = apply_chop_markers("a", 1, 0, true);
+        assert_eq!(result, ">");
+        assert_eq!(width, 1);
+    }
+
+    #[test]
+    fn test_chop_markers_single_char_left_marker() {
+        let (result, width) = apply_chop_markers("a", 1, 1, false);
+        assert_eq!(result, "<");
+        assert_eq!(width, 1);
+    }
+
+    #[test]
+    fn test_chop_markers_with_ansi_escapes_right_truncation() {
+        // Rendered text with ANSI color: "\x1b[31mhello\x1b[0m" (5 visible cols)
+        let input = "\x1b[31mhello\x1b[0m";
+        let (result, width) = apply_chop_markers(input, 5, 0, true);
+        // The last visible char 'o' should be replaced with '>'
+        assert!(result.contains('>'));
+        assert_eq!(width, 5);
+        // ANSI escapes should be preserved before the marker
+        assert!(result.contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn test_chop_markers_with_ansi_escapes_left_marker() {
+        let input = "\x1b[31mworld\x1b[0m";
+        let (result, width) = apply_chop_markers(input, 5, 5, false);
+        // First visible char 'w' should be replaced with '<'
+        assert!(result.starts_with("\x1b[31m<"));
+        assert_eq!(width, 5);
     }
 }

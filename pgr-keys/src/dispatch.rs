@@ -1895,8 +1895,12 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Set the full runtime options state.
+    ///
+    /// Also synchronizes render-affecting flags (chop mode, raw mode,
+    /// tab stops) to the screen and render config.
     pub fn set_runtime_options(&mut self, opts: RuntimeOptions) {
         self.runtime_options = opts;
+        self.sync_runtime_to_render();
     }
 
     /// Access the runtime options (for testing).
