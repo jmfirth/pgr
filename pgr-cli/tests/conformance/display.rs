@@ -219,7 +219,7 @@ fn test_conformance_display_line_numbers_after_scroll() {
 ///
 /// With `-N -S`, line numbers should not interfere with chopped content.
 #[test]
-#[ignore = "pgr -N -S: chop markers work but line numbers not shown via CLI flag"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_line_numbers_with_chop() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
