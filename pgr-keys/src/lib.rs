@@ -8,6 +8,7 @@ pub mod key;
 pub mod key_reader;
 pub mod keymap;
 pub mod line_editor;
+pub mod shell;
 pub mod terminal;
 
 pub use command::Command;

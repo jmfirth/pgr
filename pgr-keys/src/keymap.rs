@@ -93,6 +93,12 @@ impl Keymap {
             (Key::Char('J'), Command::ScrollForwardForce(1)),
             (Key::Char('K'), Command::ScrollBackwardForce(1)),
             (Key::Char('Y'), Command::ScrollBackwardForce(1)),
+            // Shell and pipe commands
+            (Key::Char('!'), Command::ShellCommand),
+            (Key::Char('#'), Command::ShellCommandExpand),
+            (Key::Char('|'), Command::PipeToCommand),
+            (Key::Char('v'), Command::EditFile),
+            (Key::Char('s'), Command::SavePipeInput),
         ];
 
         Self { bindings }
@@ -312,5 +318,40 @@ mod tests {
     fn test_keymap_esc_k_maps_to_file_line_backward() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::EscSeq('k')), Command::FileLineBackward);
+    }
+
+    // Test 1: ! key maps to ShellCommand
+    #[test]
+    fn test_keymap_bang_maps_to_shell_command() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('!')), Command::ShellCommand);
+    }
+
+    // Test: # key maps to ShellCommandExpand
+    #[test]
+    fn test_keymap_hash_maps_to_shell_command_expand() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('#')), Command::ShellCommandExpand);
+    }
+
+    // Test: | key maps to PipeToCommand
+    #[test]
+    fn test_keymap_pipe_maps_to_pipe_to_command() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('|')), Command::PipeToCommand);
+    }
+
+    // Test 2: v key maps to EditFile
+    #[test]
+    fn test_keymap_v_maps_to_edit_file() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('v')), Command::EditFile);
+    }
+
+    // Test 3: s key maps to SavePipeInput
+    #[test]
+    fn test_keymap_s_maps_to_save_pipe_input() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('s')), Command::SavePipeInput);
     }
 }
