@@ -12,6 +12,9 @@ use pgr_display::{
     RawControlMode, RenderConfig, Screen, TabStops,
 };
 
+use crate::help;
+use crate::info;
+
 use crate::error::Result;
 use crate::file_list::{FileEntry, FileList};
 use crate::filename::expand_filename;
@@ -22,6 +25,43 @@ use crate::line_editor::{LineEditResult, LineEditor};
 use crate::runtime_options::RuntimeOptions;
 use crate::shell;
 use crate::Command;
+
+/// A read-only buffer backed by a static byte slice, used for the help screen.
+struct HelpBuffer {
+    data: Vec<u8>,
+}
+
+impl HelpBuffer {
+    fn new(data: &[u8]) -> Self {
+        Self {
+            data: data.to_vec(),
+        }
+    }
+}
+
+impl Buffer for HelpBuffer {
+    fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> pgr_core::Result<usize> {
+        if offset >= self.data.len() {
+            return Ok(0);
+        }
+        let available = &self.data[offset..];
+        let to_copy = available.len().min(buf.len());
+        buf[..to_copy].copy_from_slice(&available[..to_copy]);
+        Ok(to_copy)
+    }
+
+    fn is_growable(&self) -> bool {
+        false
+    }
+
+    fn refresh(&mut self) -> pgr_core::Result<usize> {
+        Ok(self.data.len())
+    }
+}
 
 /// A partially-entered multi-key command awaiting its argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +310,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('d') => self.execute(&Command::RemoveFile, count)?,
                     Key::Char('q') => self.execute(&Command::Quit, count)?,
                     Key::Char('e') => self.execute(&Command::Examine, count)?,
+                    Key::Char('f') => self.execute(&Command::FileInfo, count)?,
                     _ => {} // Unknown colon command: ignore.
                 }
                 return Ok(!self.should_quit);
@@ -582,6 +623,15 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::Examine | Command::ExamineAlt => {
                 self.examine_prompt()?;
+            }
+            Command::FileInfo => {
+                self.display_file_info()?;
+            }
+            Command::Help => {
+                self.display_help()?;
+            }
+            Command::Version => {
+                self.display_version()?;
             }
         }
 
@@ -969,6 +1019,131 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Display file information on the status line (the `=` / `^G` / `:f` command).
+    ///
+    /// Shows file name, line range, byte offset, and percentage, matching
+    /// GNU less's format. The info persists until the next keypress.
+    fn display_file_info(&mut self) -> Result<()> {
+        self.index.index_all(&*self.buffer)?;
+        let total_lines = self.index.lines_indexed();
+        let (start, end) = self.screen.visible_range();
+        let bottom_display = end.min(total_lines);
+
+        let (file_index, file_count) = self
+            .file_list
+            .as_ref()
+            .map_or((0, 1), |fl| (fl.current_index(), fl.file_count()));
+
+        let text = info::format_file_info(
+            self.filename.as_deref(),
+            start.saturating_add(1),
+            bottom_display,
+            Some(total_lines),
+            self.buffer.len() as u64, // byte offset approximation: total file size at top
+            self.buffer.len() as u64,
+            file_index,
+            file_count,
+            false, // TODO: pipe detection deferred to Phase 2
+        );
+
+        let (rows, cols) = self.screen.dimensions();
+        paint_prompt(&mut self.writer, &text, rows, cols)?;
+        Ok(())
+    }
+
+    /// Display the help screen as a navigable file.
+    ///
+    /// Creates a synthetic buffer from the help text constant and temporarily
+    /// replaces the current view. The user can scroll through it and pressing
+    /// `q` returns to the previous file.
+    fn display_help(&mut self) -> Result<()> {
+        // Save current state
+        let saved_buffer = std::mem::replace(
+            &mut self.buffer,
+            Box::new(HelpBuffer::new(help::HELP_TEXT.as_bytes())),
+        );
+        let saved_index = std::mem::replace(
+            &mut self.index,
+            LineIndex::new(help::HELP_TEXT.len() as u64),
+        );
+        let saved_filename = self.filename.take();
+        let saved_top_line = self.screen.top_line();
+        let saved_h_offset = self.screen.horizontal_offset();
+        let saved_prompt_style = self.prompt_style.clone();
+
+        self.filename = Some("HELP -- Press q when done".to_string());
+        self.prompt_style = PromptStyle::Short;
+        self.screen.goto_line(0, usize::MAX);
+        self.screen.set_horizontal_offset(0);
+        self.repaint()?;
+
+        // Run a sub-loop for the help screen
+        loop {
+            match self.reader.read_key() {
+                Ok(key) => {
+                    if key == Key::Char('q') || key == Key::Char('Q') || key == Key::Ctrl('c') {
+                        break;
+                    }
+                    // Allow scrolling within help
+                    let command = self.keymap.lookup(&key);
+                    match command {
+                        Command::Quit => break,
+                        Command::Help => {} // Don't nest help screens
+                        _ => {
+                            // Process digit prefixes for scroll commands
+                            if let Key::Char(c) = key {
+                                if c.is_ascii_digit() {
+                                    let digit = u32::from(c) - u32::from('0');
+                                    #[allow(clippy::cast_possible_truncation)] // digit is 0..=9
+                                    let digit = digit as usize;
+                                    self.pending_count = Some(
+                                        self.pending_count
+                                            .unwrap_or(0)
+                                            .saturating_mul(10)
+                                            .saturating_add(digit),
+                                    );
+                                    continue;
+                                }
+                            }
+                            let count = self.pending_count.take();
+                            self.execute(&command, count)?;
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    // Restore state before returning error
+                    self.buffer = saved_buffer;
+                    self.index = saved_index;
+                    self.filename = saved_filename;
+                    self.screen.goto_line(saved_top_line, usize::MAX);
+                    self.screen.set_horizontal_offset(saved_h_offset);
+                    self.prompt_style = saved_prompt_style;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        // Restore previous state
+        self.buffer = saved_buffer;
+        self.index = saved_index;
+        self.filename = saved_filename;
+        self.screen.goto_line(saved_top_line, usize::MAX);
+        self.screen.set_horizontal_offset(saved_h_offset);
+        self.prompt_style = saved_prompt_style;
+        self.repaint()?;
+
+        Ok(())
+    }
+
+    /// Display version information on the status line.
+    fn display_version(&mut self) -> Result<()> {
+        let text = help::version_string();
+        let (rows, cols) = self.screen.dimensions();
+        paint_prompt(&mut self.writer, &text, rows, cols)?;
         Ok(())
     }
 

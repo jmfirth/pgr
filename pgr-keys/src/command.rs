@@ -87,6 +87,12 @@ pub enum Command {
     Examine,
     /// Same as Examine (alternative bindings: `^X^V`, `E`).
     ExamineAlt,
+    /// Display file information (`=`, `^G`, `:f`).
+    FileInfo,
+    /// Display the help screen (`h`, `H`).
+    Help,
+    /// Display version information (`V`).
+    Version,
 }
 
 #[cfg(test)]
