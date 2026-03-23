@@ -12,6 +12,12 @@ test:
 test-all:
     cargo test --workspace -- --include-ignored
 
+# Conformance tests only (PTY comparison against GNU less)
+# Set LESS_BIN to point to a specific less binary, e.g.:
+#   LESS_BIN=/opt/homebrew/Cellar/less/692/bin/less just conformance
+conformance:
+    LESS_BIN="${LESS_BIN:-less}" cargo test -p pgr-cli --test conformance -- --include-ignored
+
 # Debug build
 build:
     cargo build --workspace

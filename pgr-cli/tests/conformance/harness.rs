@@ -77,7 +77,8 @@ impl PagerSession {
         let rows = rows as u16;
         let cols = cols as u16;
 
-        let mut cmd = Command::new("less");
+        let less_bin = std::env::var("LESS_BIN").unwrap_or_else(|_| "less".to_string());
+        let mut cmd = Command::new(&less_bin);
         for arg in args {
             cmd.arg(arg);
         }
@@ -111,7 +112,8 @@ impl PagerSession {
         let rows = rows as u16;
         let cols = cols as u16;
 
-        let mut cmd = Command::new("less");
+        let less_bin = std::env::var("LESS_BIN").unwrap_or_else(|_| "less".to_string());
+        let mut cmd = Command::new(&less_bin);
         for arg in args {
             cmd.arg(arg);
         }
