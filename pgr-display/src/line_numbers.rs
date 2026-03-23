@@ -41,8 +41,8 @@ pub fn line_number_width_custom(total_lines: usize, min_width: usize) -> usize {
 /// Format a line number for display.
 ///
 /// Right-aligned within `width` columns, followed by a space.
-/// Line numbers are 1-based: pass the 0-based line index and this
-/// function will add 1 internally.
+/// Line numbers are 1-based: the caller is responsible for converting
+/// 0-based buffer indices before calling.
 #[must_use]
 pub fn format_line_number(line_number: usize, width: usize) -> String {
     // width includes the trailing space, so the number occupies width-1 chars
@@ -117,8 +117,7 @@ mod tests {
     #[test]
     fn test_format_line_number_right_aligned() {
         let formatted = format_line_number(42, 7);
-        // Should be "     42 " — 5 chars for number (right-aligned), 1 space
-        // Wait: width=7, num_width=6, so "    42 "
+        // width=7, num_width=6: "    42 " (right-aligned in 6 chars + trailing space)
         assert_eq!(formatted, "    42 ");
         assert_eq!(formatted.len(), 7);
     }
