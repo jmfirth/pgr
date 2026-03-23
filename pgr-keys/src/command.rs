@@ -83,6 +83,10 @@ pub enum Command {
     EditFile,
     /// Save pipe input to a file (`s filename`).
     SavePipeInput,
+    /// Examine (open) a new file. `:e [filename]`.
+    Examine,
+    /// Same as Examine (alternative bindings: `^X^V`, `E`).
+    ExamineAlt,
 }
 
 #[cfg(test)]

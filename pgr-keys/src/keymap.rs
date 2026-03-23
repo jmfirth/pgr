@@ -104,6 +104,8 @@ impl Keymap {
             (Key::Char('|'), Command::PipeToCommand),
             (Key::Char('v'), Command::EditFile),
             (Key::Char('s'), Command::SavePipeInput),
+            // Examine (open new file) — alternative binding
+            (Key::Char('E'), Command::ExamineAlt),
         ];
 
         Self { bindings }
