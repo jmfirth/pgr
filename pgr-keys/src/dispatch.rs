@@ -375,7 +375,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             PendingCommand::QueryOption => {
                 if let Key::Char(c) = *key {
-                    self.handle_query_option(c);
+                    self.handle_query_option(c)?;
                 }
             }
         }
@@ -1910,8 +1910,12 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Handle a toggle option command (`-<flag>`).
+    ///
+    /// Toggles the option and displays a status message describing the new
+    /// state, matching GNU less behavior.
     fn handle_toggle_option(&mut self, flag: char) -> Result<()> {
-        if self.runtime_options.toggle(flag).is_ok() {
+        if let Ok(msg) = self.runtime_options.toggle(flag) {
+            self.status_message = Some(msg);
             // Sync render-affecting options to the screen/render_config.
             self.sync_runtime_to_render();
             self.repaint()?;
@@ -1920,10 +1924,15 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Handle a query option command (`_<flag>`).
-    fn handle_query_option(&mut self, flag: char) {
-        // Query is display-only; we just invoke it to get the message.
-        // Full prompt display of the result is Phase 2.
-        let _result = self.runtime_options.query(flag);
+    ///
+    /// Displays the current state of the option on the status line
+    /// without changing it, matching GNU less `_` behavior.
+    fn handle_query_option(&mut self, flag: char) -> Result<()> {
+        if let Ok(msg) = self.runtime_options.query(flag) {
+            self.status_message = Some(msg);
+            self.repaint()?;
+        }
+        Ok(())
     }
 
     /// Synchronize runtime options to render config and screen state.
@@ -2905,6 +2914,84 @@ mod tests {
         // Toggle i on, then off.
         let pager = run_pager(b"-i-iq", &content);
         assert!(!pager.runtime_options().case_insensitive);
+    }
+
+    // ── Task 137: Option toggle/query status message tests ──────────
+
+    #[test]
+    fn test_dispatch_dash_i_toggle_shows_status_message_in_output() {
+        let content = make_test_content(50);
+        // `-i` toggles case_insensitive on; output should contain the message.
+        let pager = run_pager(b"-iq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Case-insensitive search is ON"),
+            "Expected 'Case-insensitive search is ON' in output: {output}"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_dash_s_upper_toggle_shows_status_message_in_output() {
+        let content = make_test_content(50);
+        // `-S` toggles chop_long_lines on; output should contain the message.
+        let pager = run_pager(b"-Sq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Chop long lines is ON"),
+            "Expected 'Chop long lines is ON' in output: {output}"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_dash_n_upper_toggle_shows_status_message_in_output() {
+        let content = make_test_content(50);
+        // `-N` toggles line_numbers on; output should contain the message.
+        let pager = run_pager(b"-Nq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Line numbers is ON"),
+            "Expected 'Line numbers is ON' in output: {output}"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_underscore_i_query_shows_status_message_in_output() {
+        let content = make_test_content(50);
+        // `_i` queries case_insensitive (default OFF); output should show state.
+        let pager = run_pager(b"_iq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Case-insensitive search is OFF"),
+            "Expected 'Case-insensitive search is OFF' in output: {output}"
+        );
+        // Should NOT have changed the option state.
+        assert!(!pager.runtime_options().case_insensitive);
+    }
+
+    #[test]
+    fn test_dispatch_underscore_query_after_toggle_shows_new_state() {
+        let content = make_test_content(50);
+        // Toggle `-i` (ON), then `_i` queries and should show ON.
+        let pager = run_pager(b"-i_iq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        // The query output should contain "ON" (the toggled state).
+        assert!(
+            output.contains("Case-insensitive search is ON"),
+            "Expected 'Case-insensitive search is ON' in output after query: {output}"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_dash_toggle_off_shows_off_message() {
+        let content = make_test_content(50);
+        // Toggle twice: on then off. The second toggle should show OFF.
+        let pager = run_pager(b"-i-iq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        // The last status message rendered should be the OFF message.
+        assert!(
+            output.contains("Case-insensitive search is OFF"),
+            "Expected 'Case-insensitive search is OFF' in output: {output}"
+        );
     }
 
     #[test]
