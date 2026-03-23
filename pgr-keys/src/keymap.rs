@@ -96,6 +96,15 @@ impl Keymap {
             // Option toggling and query
             (Key::Char('-'), Command::ToggleOption),
             (Key::Char('_'), Command::QueryOption),
+            // Search
+            (Key::Char('/'), Command::SearchForward),
+            (Key::Char('?'), Command::SearchBackward),
+            (Key::Char('n'), Command::RepeatSearch),
+            (Key::Char('N'), Command::RepeatSearchReverse),
+            (Key::EscSeq('u'), Command::ToggleHighlight),
+            // Phase 1: ESC-n/ESC-N behave the same as n/N (cross-file in Phase 2)
+            (Key::EscSeq('n'), Command::RepeatSearch),
+            (Key::EscSeq('N'), Command::RepeatSearchReverse),
         ];
 
         Self { bindings }
@@ -331,5 +340,52 @@ mod tests {
     fn test_keymap_underscore_maps_to_query_option() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::Char('_')), Command::QueryOption);
+    }
+
+    // ── Task 113: Search command key bindings ──
+
+    #[test]
+    fn test_keymap_slash_maps_to_search_forward() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('/')), Command::SearchForward);
+    }
+
+    #[test]
+    fn test_keymap_question_maps_to_search_backward() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('?')), Command::SearchBackward);
+    }
+
+    #[test]
+    fn test_keymap_n_maps_to_repeat_search() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('n')), Command::RepeatSearch);
+    }
+
+    #[test]
+    fn test_keymap_upper_n_maps_to_repeat_search_reverse() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('N')), Command::RepeatSearchReverse);
+    }
+
+    #[test]
+    fn test_keymap_esc_u_maps_to_toggle_highlight() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('u')), Command::ToggleHighlight);
+    }
+
+    #[test]
+    fn test_keymap_esc_n_maps_to_repeat_search() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('n')), Command::RepeatSearch);
+    }
+
+    #[test]
+    fn test_keymap_esc_upper_n_maps_to_repeat_search_reverse() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::EscSeq('N')),
+            Command::RepeatSearchReverse
+        );
     }
 }

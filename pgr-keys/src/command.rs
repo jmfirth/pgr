@@ -71,6 +71,16 @@ pub enum Command {
     ToggleOption,
     /// Display current option value (`_` prefix).
     QueryOption,
+    /// Enter forward search mode: prompt for pattern, search forward.
+    SearchForward,
+    /// Enter backward search mode: prompt for pattern, search backward.
+    SearchBackward,
+    /// Repeat last search in the same direction.
+    RepeatSearch,
+    /// Repeat last search in the opposite direction.
+    RepeatSearchReverse,
+    /// Toggle search highlighting (ESC-u).
+    ToggleHighlight,
 }
 
 #[cfg(test)]

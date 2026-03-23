@@ -16,6 +16,10 @@ pub enum KeyError {
     /// A key binding specification was invalid.
     #[error("invalid binding: {0}")]
     InvalidBinding(String),
+
+    /// A search operation failed.
+    #[error("search error: {0}")]
+    Search(#[from] pgr_search::SearchError),
 }
 
 /// A specialized `Result` type for key operations.

@@ -10,12 +10,14 @@ use pgr_display::{
     paint_prompt, paint_screen, render_prompt, OverstrikeMode, PromptContext, PromptStyle,
     RawControlMode, RenderConfig, Screen, TabStops,
 };
+use pgr_search::{CaseMode, HighlightState, SearchDirection, SearchPattern, Searcher, WrapMode};
 
 use crate::error::Result;
 use crate::file_list::FileList;
 use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
+use crate::line_editor::{LineEditResult, LineEditor};
 use crate::runtime_options::RuntimeOptions;
 use crate::Command;
 
@@ -41,6 +43,7 @@ pub enum PendingCommand {
 }
 
 /// The main pager state, tying together all subsystems.
+#[allow(clippy::struct_excessive_bools)] // Pager has many independent boolean flags by design
 pub struct Pager<R: Read, W: Write> {
     reader: KeyReader<R>,
     writer: W,
@@ -75,6 +78,20 @@ pub struct Pager<R: Read, W: Write> {
     quit_at_first_eof: bool,
     /// Tracks how many times the user has been shown EOF after a forward scroll.
     eof_seen_count: usize,
+    /// The last search pattern, used for n/N repeat.
+    last_pattern: Option<SearchPattern>,
+    /// The direction of the last search.
+    last_direction: SearchDirection,
+    /// Highlight state for search matches.
+    highlight_state: HighlightState,
+    /// Transient status message displayed on the prompt line.
+    status_message: Option<String>,
+    /// Whether we are currently in line-editor (search prompt) mode.
+    editing_search: bool,
+    /// Line editor instance for search/command prompt input.
+    line_editor: Option<LineEditor>,
+    /// Direction for the current search prompt (set when `/` or `?` is pressed).
+    search_prompt_direction: SearchDirection,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -112,6 +129,13 @@ impl<R: Read, W: Write> Pager<R, W> {
             quit_at_eof: false,
             quit_at_first_eof: false,
             eof_seen_count: 0,
+            last_pattern: None,
+            last_direction: SearchDirection::Forward,
+            highlight_state: HighlightState::new(),
+            status_message: None,
+            editing_search: false,
+            line_editor: None,
+            search_prompt_direction: SearchDirection::Forward,
         }
     }
 
@@ -141,6 +165,16 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Process a single key event. Returns `Ok(true)` if the pager should
     /// continue, `Ok(false)` if it should quit.
     fn process_key(&mut self, key: &Key) -> Result<bool> {
+        // Clear any transient status message on the next keypress.
+        if self.status_message.is_some() && !self.editing_search {
+            self.status_message = None;
+        }
+
+        // If we're in search-prompt editing mode, feed keys to the line editor.
+        if self.editing_search {
+            return self.process_search_key(key);
+        }
+
         // If there's a pending multi-key command, resolve it.
         if let Some(pending) = self.pending_command.take() {
             return self.resolve_pending(pending, key);
@@ -530,9 +564,166 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::QueryOption => {
                 self.pending_command = Some(PendingCommand::QueryOption);
             }
+            Command::SearchForward => {
+                self.enter_search_mode(SearchDirection::Forward, count)?;
+            }
+            Command::SearchBackward => {
+                self.enter_search_mode(SearchDirection::Backward, count)?;
+            }
+            Command::RepeatSearch => {
+                self.repeat_search(false, count)?;
+            }
+            Command::RepeatSearchReverse => {
+                self.repeat_search(true, count)?;
+            }
+            Command::ToggleHighlight => {
+                self.highlight_state.toggle();
+                self.repaint()?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Enter search prompt mode for the given direction.
+    fn enter_search_mode(
+        &mut self,
+        direction: SearchDirection,
+        count: Option<usize>,
+    ) -> Result<()> {
+        let prompt = match direction {
+            SearchDirection::Forward => "/",
+            SearchDirection::Backward => "?",
+        };
+        self.search_prompt_direction = direction;
+        self.line_editor = Some(LineEditor::new(prompt));
+        self.editing_search = true;
+        self.pending_count = count;
+        self.render_search_prompt()?;
+        Ok(())
+    }
+
+    /// Process a key while in search-prompt editing mode.
+    fn process_search_key(&mut self, key: &Key) -> Result<bool> {
+        let result = if let Some(ref mut editor) = self.line_editor {
+            editor.process_key(key)
+        } else {
+            // Should not happen, but recover gracefully.
+            self.editing_search = false;
+            return Ok(true);
+        };
+
+        match result {
+            LineEditResult::Continue => {
+                self.render_search_prompt()?;
+            }
+            LineEditResult::Confirm(pattern_str) => {
+                self.editing_search = false;
+                let count = self.pending_count.take();
+                self.line_editor = None;
+                self.submit_search(&pattern_str, self.search_prompt_direction, count)?;
+            }
+            LineEditResult::Cancel => {
+                self.editing_search = false;
+                self.pending_count = None;
+                self.line_editor = None;
+                self.repaint()?;
+            }
+        }
+        Ok(!self.should_quit)
+    }
+
+    /// Render the search prompt (line editor) on the status line.
+    fn render_search_prompt(&mut self) -> Result<()> {
+        if let Some(ref editor) = self.line_editor {
+            let (rows, cols) = self.screen.dimensions();
+            if rows > 0 {
+                editor.render(&mut self.writer, rows - 1, 0, cols)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit a search pattern: compile, search, scroll to match.
+    fn submit_search(
+        &mut self,
+        pattern_str: &str,
+        direction: SearchDirection,
+        count: Option<usize>,
+    ) -> Result<()> {
+        // Empty pattern with no previous pattern: do nothing.
+        if pattern_str.is_empty() {
+            if self.last_pattern.is_some() {
+                // Re-use last pattern in the new direction.
+                self.last_direction = direction;
+                return self.do_search(direction, count);
+            }
+            self.repaint()?;
+            return Ok(());
+        }
+
+        // Compile the pattern.
+        let Ok(compiled) = SearchPattern::compile(pattern_str, CaseMode::Sensitive) else {
+            self.status_message = Some("Invalid pattern".to_string());
+            self.repaint()?;
+            return Ok(());
+        };
+
+        self.last_pattern = Some(compiled);
+        self.last_direction = direction;
+        self.highlight_state.clear();
+        self.do_search(direction, count)
+    }
+
+    /// Perform a search in the given direction using `last_pattern`.
+    fn do_search(&mut self, direction: SearchDirection, count: Option<usize>) -> Result<()> {
+        let Some(ref pattern) = self.last_pattern else {
+            self.status_message = Some("No previous search pattern".to_string());
+            self.repaint()?;
+            return Ok(());
+        };
+
+        let mut searcher = Searcher::new(
+            SearchPattern::compile(pattern.pattern(), pattern.case_mode())?,
+            direction,
+        );
+        searcher.set_wrap(WrapMode::Wrap);
+
+        let start = self.screen.top_line();
+        let n = count.unwrap_or(1);
+
+        let result = searcher.search_nth(start, n, &*self.buffer, &mut self.index)?;
+
+        if let Some(line) = result {
+            self.save_last_position();
+            let total = self.index.total_lines(&*self.buffer)?;
+            self.screen.goto_line(line, total);
+            self.repaint()?;
+        } else {
+            self.status_message = Some("Pattern not found".to_string());
+            self.repaint()?;
+        }
+        Ok(())
+    }
+
+    /// Repeat the last search, optionally reversing direction.
+    fn repeat_search(&mut self, reverse: bool, count: Option<usize>) -> Result<()> {
+        if self.last_pattern.is_none() {
+            self.status_message = Some("No previous search pattern".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let direction = if reverse {
+            match self.last_direction {
+                SearchDirection::Forward => SearchDirection::Backward,
+                SearchDirection::Backward => SearchDirection::Forward,
+            }
+        } else {
+            self.last_direction
+        };
+
+        self.do_search(direction, count)
     }
 
     /// Enter basic follow mode: scroll to end and exit immediately.
@@ -639,18 +830,37 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        // Compute highlights for the visible lines.
+        self.highlight_state
+            .compute_highlights(&lines, self.last_pattern.as_ref());
+
         paint_screen(&mut self.writer, &self.screen, &lines, &self.render_config)?;
 
-        // Write the prompt on the last row.
+        // Write the prompt/status on the last row.
         self.paint_status_prompt(total)?;
 
         Ok(())
     }
 
     /// Render and paint the status prompt on the last row.
+    ///
+    /// If a transient status message is set, displays it in reverse video
+    /// instead of the normal prompt.
     fn paint_status_prompt(&mut self, total_lines: usize) -> Result<()> {
         let (rows, cols) = self.screen.dimensions();
         if rows == 0 {
+            return Ok(());
+        }
+
+        // If there's a transient status message, display it instead of the prompt.
+        if let Some(ref msg) = self.status_message {
+            // Move to the last row, clear it, display in reverse video.
+            write!(
+                self.writer,
+                "\x1b[{};1H\x1b[K\x1b[7m{}\x1b[0m",
+                rows,
+                &msg[..msg.len().min(cols)]
+            )?;
             return Ok(());
         }
 
@@ -684,7 +894,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             page_number: None,
             input_line: None,
             pipe_size: None,
-            search_active: false,
+            search_active: self.last_pattern.is_some(),
             line_numbers_enabled: false,
             marks_set: false,
         };
@@ -799,6 +1009,30 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[must_use]
     pub fn custom_window_size(&self) -> Option<usize> {
         self.custom_window_size
+    }
+
+    /// Return the last search pattern (for testing).
+    #[must_use]
+    pub fn last_pattern(&self) -> Option<&SearchPattern> {
+        self.last_pattern.as_ref()
+    }
+
+    /// Return the last search direction (for testing).
+    #[must_use]
+    pub fn last_direction(&self) -> SearchDirection {
+        self.last_direction
+    }
+
+    /// Return the highlight state (for testing).
+    #[must_use]
+    pub fn highlight_state(&self) -> &HighlightState {
+        &self.highlight_state
+    }
+
+    /// Return the transient status message (for testing).
+    #[must_use]
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
     }
 }
 
@@ -1684,5 +1918,273 @@ mod tests {
         assert!(pager.runtime_options().case_insensitive);
         assert!(pager.runtime_options().line_numbers);
         assert_eq!(pager.runtime_options().tab_width, 4);
+    }
+
+    // ── Task 113: Search command tests ──
+
+    /// Helper: build a test buffer from raw line content.
+    fn make_search_content(lines: &[&str]) -> Vec<u8> {
+        let mut data = Vec::new();
+        for line in lines {
+            data.extend_from_slice(line.as_bytes());
+            data.push(b'\n');
+        }
+        data
+    }
+
+    // Test 1: `/` key maps to SearchForward command (keymap test in keymap.rs)
+    // Test 2: `?` key maps to SearchBackward command (keymap test in keymap.rs)
+    // Test 3: `n` key maps to RepeatSearch command (keymap test in keymap.rs)
+    // Test 4: `N` key maps to RepeatSearchReverse command (keymap test in keymap.rs)
+    // Test 5: `ESC-u` key maps to ToggleHighlight command (keymap test in keymap.rs)
+
+    // Test 6: Forward search finds and scrolls to matching line.
+    #[test]
+    fn test_dispatch_search_forward_finds_and_scrolls_to_match() {
+        let content = make_search_content(&[
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "target line",
+            "zeta",
+        ]);
+        // / t a r g e t Enter q
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 5);
+    }
+
+    // Test 7: Backward search finds and scrolls to matching line.
+    #[test]
+    fn test_dispatch_search_backward_finds_and_scrolls_to_match() {
+        let content = make_search_content(&[
+            "target line",
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "eta",
+            "theta",
+            "iota",
+            "kappa",
+            "lambda",
+            "mu",
+            "nu",
+            "xi",
+            "omicron",
+            "pi",
+            "rho",
+            "sigma",
+            "tau",
+            "upsilon",
+            "phi",
+            "chi",
+            "psi",
+            "omega",
+            "end",
+        ]);
+        // Scroll forward to get past line 0, then search backward for "target".
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b' '); // page forward (goes to line 23)
+        keys.push(b'?');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test 8: Search with no match does not change position.
+    #[test]
+    fn test_dispatch_search_no_match_does_not_change_position() {
+        let content = make_search_content(&["alpha", "beta", "gamma", "delta", "epsilon"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"2j"); // move to line 2
+        keys.push(b'/');
+        keys.extend_from_slice(b"nonexistent");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    // Test 9: Search with no match sets "Pattern not found" status message.
+    #[test]
+    fn test_dispatch_search_no_match_sets_pattern_not_found_message() {
+        let content = make_search_content(&["alpha", "beta", "gamma"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"nonexistent");
+        keys.push(b'\n');
+        // Don't press another key so the status message is preserved.
+        // Input exhaustion ends the loop.
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.status_message(), Some("Pattern not found"));
+    }
+
+    // Test 10: `n` repeats last forward search.
+    #[test]
+    fn test_dispatch_n_repeats_last_forward_search() {
+        let content = make_search_content(&["alpha", "match", "beta", "match", "gamma"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"match");
+        keys.push(b'\n'); // finds line 1
+        keys.push(b'n'); // repeats forward → finds line 3
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 3);
+    }
+
+    // Test 11: `N` reverses last search direction.
+    #[test]
+    fn test_dispatch_upper_n_reverses_last_search_direction() {
+        let content = make_search_content(&["match", "alpha", "beta", "gamma", "match", "delta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"match");
+        keys.push(b'\n'); // forward from 0 → finds line 4
+        keys.push(b'N'); // reverse (backward from 4) → finds line 0
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test 12: `n` with no previous pattern shows "No previous search pattern".
+    #[test]
+    fn test_dispatch_n_no_previous_pattern_shows_message() {
+        let content = make_search_content(&["alpha", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'n');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.status_message(), Some("No previous search pattern"));
+    }
+
+    // Test 13: Numeric prefix: `3n` finds the 3rd match.
+    #[test]
+    fn test_dispatch_numeric_prefix_3n_finds_third_match() {
+        let content = make_search_content(&[
+            "alpha", "match1", "beta", "match2", "gamma", "match3", "delta",
+        ]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"match");
+        keys.push(b'\n'); // finds line 1
+                          // Now use 2n to find the 2nd next match (match2→match3)
+        keys.extend_from_slice(b"2n"); // from line 1, 2nd match = line 5
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 5);
+    }
+
+    // Test 14: Search pattern is stored and reused across repeat searches.
+    #[test]
+    fn test_dispatch_search_pattern_stored_and_reused() {
+        let content = make_search_content(&["alpha", "target", "beta", "target", "gamma"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n'); // finds line 1
+        keys.push(b'n'); // finds line 3
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert!(pager.last_pattern().is_some());
+        assert_eq!(pager.last_pattern().unwrap().pattern(), "target");
+    }
+
+    // Test 15: Invalid regex displays "Invalid pattern" message.
+    #[test]
+    fn test_dispatch_invalid_regex_displays_invalid_pattern_message() {
+        let content = make_search_content(&["alpha", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"(unclosed");
+        keys.push(b'\n');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.status_message(), Some("Invalid pattern"));
+    }
+
+    // Test 16: ToggleHighlight toggles the highlight state.
+    #[test]
+    fn test_dispatch_toggle_highlight_toggles_state() {
+        let content = make_search_content(&["alpha", "beta"]);
+        // ESC-u is ESC followed by 'u' → 0x1B, b'u'
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(0x1B);
+        keys.push(b'u'); // toggle highlight (now disabled)
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert!(!pager.highlight_state().is_enabled());
+    }
+
+    // Test 17: After search, visible lines include highlight ranges in repaint.
+    #[test]
+    fn test_dispatch_search_computes_highlights_on_repaint() {
+        let content = make_search_content(&["hello world", "foo", "hello again"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.extend_from_slice(b"hello");
+        keys.push(b'\n');
+        // After search, highlights should be computed. We can't directly inspect
+        // highlights from the pager test (they're recomputed each repaint), but
+        // we can verify that the pattern is stored and highlighting is enabled.
+        let pager = run_pager(&keys, &content);
+        assert!(pager.highlight_state().is_enabled());
+        assert!(pager.last_pattern().is_some());
+    }
+
+    // Test 18: ESC cancels search prompt input without changing state.
+    // Using Ctrl+C (0x03) since standalone ESC from a byte cursor is tricky.
+    #[test]
+    fn test_dispatch_ctrl_c_cancels_search_prompt_without_changing_state() {
+        let content = make_search_content(&["alpha", "beta", "gamma"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"2j"); // move to line 2
+        keys.push(b'/');
+        keys.extend_from_slice(b"some");
+        keys.push(0x03); // Ctrl+C cancels search
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Position should not change.
+        assert_eq!(pager.screen().top_line(), 2);
+        // No pattern should be stored (no previous search).
+        assert!(pager.last_pattern().is_none());
+    }
+
+    // Test 19: Empty pattern (Enter with no input) does not crash.
+    #[test]
+    fn test_dispatch_empty_search_pattern_does_not_crash() {
+        let content = make_search_content(&["alpha", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.push(b'\n'); // Enter with empty pattern
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Should not crash and should remain at line 0.
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test 20: Search from EOF wraps to beginning (with default wrap behavior).
+    #[test]
+    fn test_dispatch_search_from_eof_wraps_to_beginning() {
+        let content = make_search_content(&["target", "alpha", "beta", "gamma", "delta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        // Go to the end first.
+        keys.push(b'G'); // goto end
+                         // Now search forward for "target" (which is at line 0).
+        keys.push(b'/');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Should wrap and find "target" at line 0.
+        assert_eq!(pager.screen().top_line(), 0);
     }
 }

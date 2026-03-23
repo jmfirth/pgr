@@ -7,4 +7,5 @@ edition = "2021"
 libc = "0.2"
 pgr-core = { path = "../pgr-core" }
 pgr-display = { path = "../pgr-display" }
+pgr-search = { path = "../pgr-search" }
 thiserror = "2"
