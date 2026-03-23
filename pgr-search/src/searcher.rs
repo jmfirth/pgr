@@ -30,24 +30,39 @@ pub struct Searcher {
     pattern: SearchPattern,
     direction: SearchDirection,
     wrap: WrapMode,
+    /// When `true`, matches are inverted: lines that do NOT match the
+    /// pattern are considered hits.
+    inverted: bool,
 }
 
 impl Searcher {
     /// Create a new searcher with the given compiled pattern and direction.
     ///
-    /// Wrap mode defaults to [`WrapMode::NoWrap`].
+    /// Wrap mode defaults to [`WrapMode::NoWrap`]; inverted defaults to `false`.
     #[must_use]
     pub fn new(pattern: SearchPattern, direction: SearchDirection) -> Self {
         Self {
             pattern,
             direction,
             wrap: WrapMode::NoWrap,
+            inverted: false,
         }
     }
 
     /// Set whether searches wrap around at buffer boundaries.
     pub fn set_wrap(&mut self, wrap: WrapMode) {
         self.wrap = wrap;
+    }
+
+    /// Set whether the match is inverted (find lines that do NOT match).
+    pub fn set_inverted(&mut self, inverted: bool) {
+        self.inverted = inverted;
+    }
+
+    /// Return whether the searcher is in inverted mode.
+    #[must_use]
+    pub fn is_inverted(&self) -> bool {
+        self.inverted
     }
 
     /// Return the current search direction.
@@ -195,6 +210,9 @@ impl Searcher {
     }
 
     /// Check if a single line matches the pattern.
+    ///
+    /// When `self.inverted` is `true`, returns `true` for lines that do
+    /// NOT match the pattern.
     fn line_matches(
         &self,
         line: usize,
@@ -202,7 +220,8 @@ impl Searcher {
         index: &mut LineIndex,
     ) -> Result<bool> {
         let content = index.get_line(line, buffer)?;
-        Ok(content.is_some_and(|text| self.pattern.is_match(&text)))
+        let matched = content.is_some_and(|text| self.pattern.is_match(&text));
+        Ok(if self.inverted { !matched } else { matched })
     }
 }
 
@@ -452,5 +471,39 @@ mod tests {
         let searcher = Searcher::new(pattern("match"), SearchDirection::Backward);
         let result = searcher.search_nth(5, 2, &buf, &mut idx).unwrap();
         assert_eq!(result, Some(2));
+    }
+
+    // ── Inverted search ──────────────────────────────────────────────
+
+    #[test]
+    fn test_search_forward_inverted_finds_non_matching_lines() {
+        let (buf, mut idx) = make_buffer(&["match", "match", "other", "match"]);
+        let mut searcher = Searcher::new(pattern("match"), SearchDirection::Forward);
+        searcher.set_inverted(true);
+        // Starting at line 0, inverted search should find line 2 ("other").
+        let result = searcher.search_forward(0, &buf, &mut idx).unwrap();
+        assert_eq!(result, Some(2));
+    }
+
+    #[test]
+    fn test_search_backward_inverted_finds_non_matching_lines() {
+        let (buf, mut idx) = make_buffer(&["other", "match", "match", "match"]);
+        let mut searcher = Searcher::new(pattern("match"), SearchDirection::Backward);
+        searcher.set_inverted(true);
+        let result = searcher.search_backward(3, &buf, &mut idx).unwrap();
+        assert_eq!(result, Some(0));
+    }
+
+    #[test]
+    fn test_searcher_is_inverted_default_false() {
+        let searcher = Searcher::new(pattern("x"), SearchDirection::Forward);
+        assert!(!searcher.is_inverted());
+    }
+
+    #[test]
+    fn test_searcher_set_inverted_changes_flag() {
+        let mut searcher = Searcher::new(pattern("x"), SearchDirection::Forward);
+        searcher.set_inverted(true);
+        assert!(searcher.is_inverted());
     }
 }

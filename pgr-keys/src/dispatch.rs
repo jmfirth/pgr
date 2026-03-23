@@ -12,7 +12,9 @@ use pgr_display::{
     RawControlMode, RenderConfig, Screen, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT,
     DEFAULT_SHORT_PROMPT,
 };
-use pgr_search::{CaseMode, HighlightState, SearchDirection, SearchPattern, Searcher, WrapMode};
+use pgr_search::{
+    CaseMode, HighlightState, SearchDirection, SearchModifiers, SearchPattern, Searcher, WrapMode,
+};
 
 use crate::help;
 use crate::info;
@@ -148,6 +150,8 @@ pub struct Pager<R: Read, W: Write> {
     line_editor: Option<LineEditor>,
     /// Direction for the current search prompt (set when `/` or `?` is pressed).
     search_prompt_direction: SearchDirection,
+    /// The modifiers from the last search, used for repeat-search commands.
+    last_modifiers: SearchModifiers,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -198,6 +202,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             editing_search: false,
             line_editor: None,
             search_prompt_direction: SearchDirection::Forward,
+            last_modifiers: SearchModifiers::new(),
         }
     }
 
@@ -956,19 +961,32 @@ impl<R: Read, W: Write> Pager<R, W> {
         direction: SearchDirection,
         count: Option<usize>,
     ) -> Result<()> {
+        // Parse modifier prefixes from the pattern string.
+        let (modifiers, raw_pattern) = SearchModifiers::parse(pattern_str);
+
         // Empty pattern with no previous pattern: do nothing.
-        if pattern_str.is_empty() {
+        if raw_pattern.is_empty() {
             if self.last_pattern.is_some() {
-                // Re-use last pattern in the new direction.
+                // Re-use last pattern in the new direction, but apply new modifiers.
                 self.last_direction = direction;
+                if !modifiers.is_empty() {
+                    self.last_modifiers = modifiers;
+                }
                 return self.do_search(direction, count);
             }
             self.repaint()?;
             return Ok(());
         }
 
+        // If literal mode, escape regex metacharacters.
+        let compile_pattern = if modifiers.literal {
+            SearchPattern::escape(raw_pattern)
+        } else {
+            raw_pattern.to_string()
+        };
+
         // Compile the pattern.
-        let Ok(compiled) = SearchPattern::compile(pattern_str, CaseMode::Sensitive) else {
+        let Ok(compiled) = SearchPattern::compile(&compile_pattern, CaseMode::Sensitive) else {
             self.status_message = Some("Invalid pattern".to_string());
             self.repaint()?;
             return Ok(());
@@ -976,6 +994,7 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.last_pattern = Some(compiled);
         self.last_direction = direction;
+        self.last_modifiers = modifiers;
         self.highlight_state.clear();
         self.do_search(direction, count)
     }
@@ -992,18 +1011,40 @@ impl<R: Read, W: Write> Pager<R, W> {
             SearchPattern::compile(pattern.pattern(), pattern.case_mode())?,
             direction,
         );
+
+        // Apply modifier flags.
+        // Interactive search always wraps by default. The ^W modifier
+        // forces wrapping even when --no-search-wrap is set (not yet
+        // implemented). For now, always wrap.
         searcher.set_wrap(WrapMode::Wrap);
+        searcher.set_inverted(self.last_modifiers.invert);
 
-        let start = self.screen.top_line();
+        // Determine start line. If from_first is set, start from the boundary.
+        let start = if self.last_modifiers.from_first {
+            match direction {
+                SearchDirection::Forward => 0,
+                SearchDirection::Backward => {
+                    let total = self.index.total_lines(&*self.buffer)?;
+                    total.saturating_sub(1)
+                }
+            }
+        } else {
+            self.screen.top_line()
+        };
+
         let n = count.unwrap_or(1);
-
         let result = searcher.search_nth(start, n, &*self.buffer, &mut self.index)?;
 
         if let Some(line) = result {
-            self.save_last_position();
-            let total = self.index.total_lines(&*self.buffer)?;
-            self.screen.goto_line(line, total);
-            self.repaint()?;
+            // If keep_position is set, update highlights but don't scroll.
+            if self.last_modifiers.keep_position {
+                self.repaint()?;
+            } else {
+                self.save_last_position();
+                let total = self.index.total_lines(&*self.buffer)?;
+                self.screen.goto_line(line, total);
+                self.repaint()?;
+            }
         } else {
             self.status_message = Some("Pattern not found".to_string());
             self.repaint()?;

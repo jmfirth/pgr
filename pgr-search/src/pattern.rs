@@ -69,6 +69,28 @@ impl SearchPattern {
         })
     }
 
+    /// Compile a literal (non-regex) pattern by escaping metacharacters.
+    ///
+    /// The `pattern` string is treated as literal text: all regex
+    /// metacharacters are escaped before compilation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SearchError::InvalidPattern` if compilation fails
+    /// (should not happen with escaped input).
+    pub fn compile_literal(pattern: &str, case_mode: CaseMode) -> crate::Result<Self> {
+        let escaped = regex::escape(pattern);
+        Self::compile(&escaped, case_mode)
+    }
+
+    /// Escape regex metacharacters in a pattern string.
+    ///
+    /// Useful when the `^R` (literal) modifier is active.
+    #[must_use]
+    pub fn escape(pattern: &str) -> String {
+        regex::escape(pattern)
+    }
+
     /// Find all non-overlapping matches in the given line.
     ///
     /// Returns byte-offset ranges into `line`. Returns an empty vec
@@ -272,5 +294,20 @@ mod tests {
         let m = matches[0];
         // Verify the byte offsets slice back to the correct substring
         assert_eq!(&line[m.start..m.end], "match");
+    }
+
+    #[test]
+    fn test_compile_literal_escapes_metacharacters() {
+        // "foo.*bar" as a literal should only match the literal string "foo.*bar"
+        let pat = SearchPattern::compile_literal("foo.*bar", CaseMode::Sensitive).unwrap();
+        assert!(pat.is_match("foo.*bar"));
+        assert!(!pat.is_match("fooXbar"));
+    }
+
+    #[test]
+    fn test_escape_returns_escaped_string() {
+        assert_eq!(SearchPattern::escape("foo.*bar"), r"foo\.\*bar");
+        assert_eq!(SearchPattern::escape("hello"), "hello");
+        assert_eq!(SearchPattern::escape("[a-z]+"), r"\[a\-z\]\+");
     }
 }
