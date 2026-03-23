@@ -67,6 +67,12 @@ pub enum Command {
     FirstFile,
     /// Remove the current file from the list. `:d`.
     RemoveFile,
+    /// Display file information (`=`, `^G`, `:f`).
+    FileInfo,
+    /// Display the help screen (`h`, `H`).
+    Help,
+    /// Display version information (`V`).
+    Version,
 }
 
 #[cfg(test)]

@@ -93,6 +93,12 @@ impl Keymap {
             (Key::Char('J'), Command::ScrollForwardForce(1)),
             (Key::Char('K'), Command::ScrollBackwardForce(1)),
             (Key::Char('Y'), Command::ScrollBackwardForce(1)),
+            // Info and help
+            (Key::Char('='), Command::FileInfo),
+            (Key::Ctrl('g'), Command::FileInfo),
+            (Key::Char('h'), Command::Help),
+            (Key::Char('H'), Command::Help),
+            (Key::Char('V'), Command::Version),
         ];
 
         Self { bindings }
@@ -312,5 +318,42 @@ mod tests {
     fn test_keymap_esc_k_maps_to_file_line_backward() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::EscSeq('k')), Command::FileLineBackward);
+    }
+
+    // ── Task 118: Info and help command key bindings ──
+
+    // Test 1: `=` key maps to FileInfo command
+    #[test]
+    fn test_keymap_equals_maps_to_file_info() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('=')), Command::FileInfo);
+    }
+
+    // Test 2: `^G` key maps to FileInfo command
+    #[test]
+    fn test_keymap_ctrl_g_maps_to_file_info() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Ctrl('g')), Command::FileInfo);
+    }
+
+    // Test 3: `h` key maps to Help command
+    #[test]
+    fn test_keymap_h_maps_to_help() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('h')), Command::Help);
+    }
+
+    // Test 3b: `H` key maps to Help command
+    #[test]
+    fn test_keymap_upper_h_maps_to_help() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('H')), Command::Help);
+    }
+
+    // Test 4: `V` key maps to Version command
+    #[test]
+    fn test_keymap_upper_v_maps_to_version() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('V')), Command::Version);
     }
 }
