@@ -315,15 +315,16 @@ impl Options {
     /// Derive the prompt style from the `-m` / `-M` / `-P` flags.
     ///
     /// When `-P` is specified, the custom prompt template takes priority.
+    /// GNU less supports an optional prefix on `-P` values (`s` for short,
+    /// `m` for medium, `M` for long) which selects which prompt to customize.
+    /// We strip the prefix and use the rest as a custom prompt template.
     /// Otherwise falls back to `-M` (long), `-m` (medium), or short.
-    ///
-    /// Note: `PromptStyle::Custom` is not yet available in the enum;
-    /// once Task 103 adds it, this method will return `Custom(template)`.
-    /// Until then, custom prompts fall through to the standard hierarchy.
     #[must_use]
     pub fn prompt_style(&self) -> PromptStyle {
-        // TODO(task-103): return PromptStyle::Custom(template.clone()) when variant exists
-        if self.long_prompt {
+        if let Some(ref raw) = self.custom_prompt {
+            let template = strip_prompt_prefix(raw);
+            PromptStyle::Custom(template.to_string())
+        } else if self.long_prompt {
             PromptStyle::Long
         } else if self.medium_prompt {
             PromptStyle::Medium
@@ -355,6 +356,22 @@ impl Options {
         } else {
             CaseMode::Sensitive
         }
+    }
+}
+
+/// Strip an optional GNU less prompt prefix from a `-P` value.
+///
+/// GNU less allows the `-P` value to start with `s` (short), `m` (medium),
+/// `M` (long), `h` (help), `=` (status), or `w` (waiting/EOF message) to
+/// select which prompt to customize. The prefix is stripped and the remainder
+/// is the template string.
+///
+/// If no recognized prefix is present, the entire string is the template.
+fn strip_prompt_prefix(raw: &str) -> &str {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some('s' | 'm' | 'M' | 'h' | '=' | 'w') => chars.as_str(),
+        _ => raw,
     }
 }
 
@@ -632,8 +649,37 @@ mod tests {
         let opts = Options::parse_from(["pgr", "-P", "%f:%l", "file.txt"]);
         assert!(opts.custom_prompt.is_some());
         assert_eq!(opts.custom_prompt.as_deref(), Some("%f:%l"));
-        // Once PromptStyle::Custom exists (Task 103), prompt_style() will
-        // return Custom(template). For now, verify the field is stored.
+        assert_eq!(
+            opts.prompt_style(),
+            PromptStyle::Custom(String::from("%f:%l"))
+        );
+    }
+
+    #[test]
+    fn test_options_prompt_style_custom_with_prefix_strip() {
+        // `-Ps"page %d"` — the `s` prefix selects the short prompt and is stripped.
+        let opts = Options::parse_from(["pgr", "-P", "s\"page %d\"", "file.txt"]);
+        assert_eq!(
+            opts.prompt_style(),
+            PromptStyle::Custom(String::from("\"page %d\""))
+        );
+    }
+
+    #[test]
+    fn test_strip_prompt_prefix_known_prefixes() {
+        assert_eq!(strip_prompt_prefix("s%f"), "%f");
+        assert_eq!(strip_prompt_prefix("m%f:%l"), "%f:%l");
+        assert_eq!(strip_prompt_prefix("M%f lines"), "%f lines");
+        assert_eq!(strip_prompt_prefix("h(help)"), "(help)");
+        assert_eq!(strip_prompt_prefix("=status"), "status");
+        assert_eq!(strip_prompt_prefix("wwaiting"), "waiting");
+    }
+
+    #[test]
+    fn test_strip_prompt_prefix_no_prefix() {
+        assert_eq!(strip_prompt_prefix("%f:%l"), "%f:%l");
+        assert_eq!(strip_prompt_prefix(""), "");
+        assert_eq!(strip_prompt_prefix("page %d"), "page %d");
     }
 
     #[test]

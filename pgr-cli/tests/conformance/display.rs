@@ -15,12 +15,12 @@ use super::helpers::{
 
 // ── Prompt rendering ────────────────────────────────────────────────────────
 
-/// Test 1: Default short prompt displays `:` when more content is below.
+/// Test 1: Default short prompt displays filename when more content is below.
 ///
-/// With the default prompt, less and pgr show `:` at the bottom when there is
-/// more content to scroll. We compare the prompt line directly.
+/// With the default prompt, less shows the filename on the initial display.
+/// We compare the prompt line directly.
 #[test]
-#[ignore = "pgr default prompt shows : not filename"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_default_short_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -32,7 +32,7 @@ fn test_conformance_display_default_short_prompt() {
 ///
 /// After scrolling to the end of file with `G`, the prompt should display `(END)`.
 #[test]
-#[ignore]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_short_prompt_at_eof() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -44,7 +44,7 @@ fn test_conformance_display_short_prompt_at_eof() {
 ///
 /// With `-m`, the prompt includes the filename and a percentage indicator.
 #[test]
-#[ignore = "pgr -m prompt percentage calculation differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_medium_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -56,7 +56,7 @@ fn test_conformance_display_medium_prompt() {
 ///
 /// With `-M`, the prompt includes detailed file information.
 #[test]
-#[ignore = "pgr -M prompt format differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_long_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -66,9 +66,10 @@ fn test_conformance_display_long_prompt() {
 
 /// Test 5: Custom prompt (`-P`) renders the custom format string.
 ///
-/// With `-Ps"custom %f %l"`, the prompt should use the custom format.
+/// With `-Ps"page %d"`, the `s` prefix selects the short prompt style and
+/// the rest is the custom template.
 #[test]
-#[ignore = "pgr -P custom prompt not fully conformant"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_custom_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -80,7 +81,7 @@ fn test_conformance_display_custom_prompt() {
 ///
 /// With `-M` and two files, the prompt should indicate "file N of M".
 #[test]
-#[ignore = "pgr -M multi-file prompt format differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_prompt_multiple_files() {
     skip_if_no_less!();
     let file1 = generate_numbered_file(50);

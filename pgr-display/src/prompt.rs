@@ -12,24 +12,24 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
 
-/// Short prompt template: shows filename (if any) then `(END)` at EOF, otherwise `:`.
+/// Short prompt template: shows `(END)` at EOF, filename when known, otherwise `:`.
 ///
-/// Matches the default less short prompt: filename followed by `(END)` at EOF,
-/// filename followed by `:` when more content is available.
-pub const DEFAULT_SHORT_PROMPT: &str = "?f%f .?e(END):\\:.";
+/// Matches the default less short prompt: at EOF show `(END)`, otherwise show
+/// the filename if known, otherwise show `:`.
+pub const DEFAULT_SHORT_PROMPT: &str = "?e(END):?f%f:\\:.";
 
 /// Medium prompt template (`-m`): filename and percent, `(END)` at EOF.
 ///
-/// Derived from less's default medium prompt, simplified for Phase 1.
+/// Matches less's default medium prompt: filename (if known), then `(END)` at
+/// EOF or byte-based percentage otherwise.
 pub const DEFAULT_MEDIUM_PROMPT: &str = "?f%f .?e(END) :?pB%pB\\%..";
 
 /// Long prompt template (`-M`): filename, line numbers, byte offset, percent.
 ///
-/// Derived from less's default long prompt, simplified for Phase 1.
-/// Each section is wrapped in a conditional so dots act as terminators
-/// rather than literals.
+/// Matches less's default long prompt: filename, multi-file indicator, line
+/// range, byte offset and size, then `(END)` at EOF or percentage.
 pub const DEFAULT_LONG_PROMPT: &str =
-    "?f%f .?ltlines %lt-%lb?L/%L. .?bbyte %bB?s/%s. .?e(END) :?pB%pB\\%..";
+    "?f%f .?n?m(file %i of %m) ..?ltlines %lt-%lb?L/%L. .?bbyte %bB?s/%s. .?e(END) :?pB%pB\\%..";
 
 /// Prompt style, matching less's `-m` / `-M` flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +265,34 @@ fn evaluate_condition(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>) 
     }
 }
 
+/// Skip a condition flag character and any optional modifier.
+///
+/// Mirrors the flag consumption in [`evaluate_condition`] so that the skip
+/// functions advance past the same number of characters as evaluation would.
+/// This is critical for multi-character conditions like `?lt`, `?lb`, `?pB`.
+fn skip_condition_flag(chars: &[char], pos: &mut usize) {
+    if *pos >= chars.len() {
+        return;
+    }
+    let flag = chars[*pos];
+    *pos += 1;
+    match flag {
+        'l' => {
+            // Optional modifier: `t` (top line) or `b` (bottom line)
+            if *pos < chars.len() && (chars[*pos] == 't' || chars[*pos] == 'b') {
+                *pos += 1;
+            }
+        }
+        'p' | 'P' => {
+            // Optional `B` modifier (byte-based percent)
+            if *pos < chars.len() && chars[*pos] == 'B' {
+                *pos += 1;
+            }
+        }
+        _ => {} // Single-character flags: a, b, B, e, f, L, m, n, s, S, t, u, x
+    }
+}
+
 /// Skip past a conditional's true branch to either a `:` (else) or `.` (end).
 ///
 /// When the condition was false, we need to skip the true branch. If we
@@ -281,10 +309,7 @@ fn skip_to_colon_or_dot(chars: &[char], pos: &mut usize) -> bool {
         match chars[*pos] {
             '?' => {
                 *pos += 1;
-                // Skip the flag character after `?`
-                if *pos < chars.len() {
-                    *pos += 1;
-                }
+                skip_condition_flag(chars, pos);
                 nesting += 1;
             }
             ':' if nesting == 1 => {
@@ -325,9 +350,7 @@ fn skip_to_dot(chars: &[char], pos: &mut usize) {
         match chars[*pos] {
             '?' => {
                 *pos += 1;
-                if *pos < chars.len() {
-                    *pos += 1;
-                }
+                skip_condition_flag(chars, pos);
                 nesting += 1;
             }
             '.' => {
@@ -633,18 +656,18 @@ mod tests {
 
     // ===== render_prompt tests (template-based) =====
 
-    /// Task 121 test 1: Short prompt renders ":" when not at EOF.
+    /// Task 132 test 1: Short prompt renders filename when not at EOF.
     #[test]
-    fn test_render_prompt_short_not_eof_returns_filename_colon() {
+    fn test_render_prompt_short_not_eof_returns_filename() {
         let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
-        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "test.txt :");
+        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "test.txt");
     }
 
-    /// Task 121 test 2: Short prompt renders "filename (END)" at EOF.
+    /// Task 132 test 2: Short prompt renders "(END)" at EOF.
     #[test]
-    fn test_render_prompt_short_at_eof_returns_filename_end() {
+    fn test_render_prompt_short_at_eof_returns_end() {
         let ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
-        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "test.txt (END)");
+        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "(END)");
     }
 
     /// Task 121 test 3: Medium prompt includes filename and percent.
@@ -1183,14 +1206,11 @@ mod tests {
     #[test]
     fn test_default_short_prompt_template_via_eval() {
         let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
-        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &ctx), "test.txt :");
+        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &ctx), "test.txt");
 
         let mut eof_ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
         eof_ctx.at_eof = true;
-        assert_eq!(
-            eval_prompt(DEFAULT_SHORT_PROMPT, &eof_ctx),
-            "test.txt (END)"
-        );
+        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &eof_ctx), "(END)");
     }
 
     /// Default medium prompt template constant works through eval_prompt.
