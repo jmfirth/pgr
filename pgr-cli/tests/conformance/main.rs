@@ -4,6 +4,7 @@
 
 mod compare;
 mod display;
+mod file_misc;
 mod harness;
 mod helpers;
 mod navigation;
