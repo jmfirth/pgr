@@ -392,7 +392,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::Quit => {
                 self.should_quit = true;
             }
-            Command::Noop => {}
+            // Filter mode requires LineEditor for the `&` prompt.
+            // The actual prompt/compile/apply flow is integrated in a
+            // downstream task. For now, the command is wired but inert.
+            Command::Noop | Command::Filter => {}
             Command::ScrollRight => {
                 let cols = self.screen.cols();
                 let amount = count.unwrap_or(cols / 2);
@@ -690,7 +693,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         let text = render_prompt(&self.prompt_style, &ctx);
-        paint_prompt(&mut self.writer, &text, rows, cols)?;
+        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
 
         Ok(())
     }

@@ -96,6 +96,8 @@ impl Keymap {
             // Option toggling and query
             (Key::Char('-'), Command::ToggleOption),
             (Key::Char('_'), Command::QueryOption),
+            // Filter mode
+            (Key::Char('&'), Command::Filter),
         ];
 
         Self { bindings }
@@ -331,5 +333,12 @@ mod tests {
     fn test_keymap_underscore_maps_to_query_option() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::Char('_')), Command::QueryOption);
+    }
+
+    // ── Test 14: & key maps to Filter command ───────────────────────
+    #[test]
+    fn test_keymap_ampersand_maps_to_filter() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('&')), Command::Filter);
     }
 }

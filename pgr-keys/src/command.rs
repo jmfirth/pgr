@@ -71,6 +71,8 @@ pub enum Command {
     ToggleOption,
     /// Display current option value (`_` prefix).
     QueryOption,
+    /// Enter filter mode: prompt for pattern (`&` command).
+    Filter,
 }
 
 #[cfg(test)]
