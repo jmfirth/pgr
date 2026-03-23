@@ -390,6 +390,7 @@ name = "pgr-search"
 version = "0.1.0"
 dependencies = [
  "pgr-core",
+ "regex",
  "thiserror",
 ]
 
