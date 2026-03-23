@@ -750,6 +750,22 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Process a key while in search-prompt editing mode.
     fn process_search_key(&mut self, key: &Key) -> Result<bool> {
+        // Intercept search modifier keys (^N, ^R) and inject their raw
+        // control-character bytes into the line editor buffer so that
+        // `SearchModifiers::parse` can extract them later.
+        if matches!(key, Key::Ctrl('n' | 'r')) {
+            if let Some(ref mut editor) = self.line_editor {
+                let ch = match key {
+                    Key::Ctrl('n') => '\x0e',
+                    Key::Ctrl('r') => '\x12',
+                    _ => unreachable!(),
+                };
+                editor.insert(ch);
+                self.render_search_prompt()?;
+                return Ok(true);
+            }
+        }
+
         let result = if let Some(ref mut editor) = self.line_editor {
             editor.process_key(key)
         } else {
@@ -985,6 +1001,21 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
     }
 
+    /// Determine the effective case mode from runtime options.
+    ///
+    /// `-I` (`case_insensitive_always`) forces case-insensitive regardless of
+    /// pattern content. `-i` (`case_insensitive`) enables smart case. Otherwise
+    /// the default is case-sensitive.
+    fn effective_case_mode(&self) -> CaseMode {
+        if self.runtime_options.case_insensitive_always {
+            CaseMode::Insensitive
+        } else if self.runtime_options.case_insensitive {
+            CaseMode::Smart
+        } else {
+            CaseMode::Sensitive
+        }
+    }
+
     /// Submit a search pattern: compile, search, scroll to match.
     fn submit_search(
         &mut self,
@@ -1016,8 +1047,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             raw_pattern.to_string()
         };
 
-        // Compile the pattern.
-        let Ok(compiled) = SearchPattern::compile(&compile_pattern, CaseMode::Sensitive) else {
+        // Compile the pattern with runtime case mode.
+        let case_mode = self.effective_case_mode();
+        let Ok(compiled) = SearchPattern::compile(&compile_pattern, case_mode) else {
             self.status_message = Some("Invalid pattern".to_string());
             self.repaint()?;
             return Ok(());
@@ -1038,8 +1070,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             return Ok(());
         };
 
+        // Re-compile with current runtime case mode so that toggling -i/-I
+        // between searches takes effect immediately.
+        let case_mode = self.effective_case_mode();
         let mut searcher = Searcher::new(
-            SearchPattern::compile(pattern.pattern(), pattern.case_mode())?,
+            SearchPattern::compile(pattern.pattern(), case_mode)?,
             direction,
         );
 
@@ -1051,6 +1086,8 @@ impl<R: Read, W: Write> Pager<R, W> {
         searcher.set_inverted(self.last_modifiers.invert);
 
         // Determine start line. If from_first is set, start from the boundary.
+        // For backward search, less starts from the bottom of the visible screen,
+        // not the top. Forward search starts from top_line as before.
         let start = if self.last_modifiers.from_first {
             match direction {
                 SearchDirection::Forward => 0,
@@ -1060,7 +1097,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
             }
         } else {
-            self.screen.top_line()
+            match direction {
+                SearchDirection::Forward => self.screen.top_line(),
+                SearchDirection::Backward => {
+                    self.screen.top_line() + self.screen.content_rows() - 1
+                }
+            }
         };
 
         let n = count.unwrap_or(1);
@@ -3685,5 +3727,239 @@ mod tests {
         let pager = run_pager(b"jjjjj&MATCH\nq", &content);
         assert!(pager.filter.is_active());
         assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // ── Task 139: Search edge case conformance tests ──
+
+    // Test: Backward search starts from bottom of visible screen, not top.
+    // With a file larger than one screen, backward search should find a
+    // match that is visible on screen but below top_line.
+    #[test]
+    fn test_dispatch_backward_search_starts_from_bottom_of_screen() {
+        // Build a file large enough to scroll. 50 lines, 23 content rows.
+        // Place "target" at line 15 — visible when top_line is 0 (lines 0-22).
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..50 {
+            if i == 15 {
+                lines.push("target here".to_string());
+            } else {
+                lines.push(format!("line {i}"));
+            }
+        }
+        let content = make_search_content(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+        // Start at top (line 0). Backward search should start from
+        // top_line + content_rows - 1 = 0 + 23 - 1 = 22, scanning backward
+        // from line 22. "target" at line 15 is below top_line but above
+        // the bottom of the screen, so it should be found.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'?');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // "target" found at line 15 → goto_line(15, 50). max_top = 50-23 = 27.
+        // 15 < 27, so top_line = 15.
+        assert_eq!(pager.screen().top_line(), 15);
+    }
+
+    // Test: Backward search wraps from top to end of file.
+    #[test]
+    fn test_dispatch_backward_search_wraps_from_top_to_end() {
+        // Place "target" at the last line (line 49) of a 50-line file.
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..50 {
+            if i == 49 {
+                lines.push("target here".to_string());
+            } else {
+                lines.push(format!("line {i}"));
+            }
+        }
+        let content = make_search_content(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+        // From top (line 0), backward search with wrap should find the
+        // target at line 49 (wrapping around from the beginning to the end).
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'?');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // max_top = 50-23 = 27. goto_line(49, 50) clamps to 27.
+        assert_eq!(pager.screen().top_line(), 27);
+    }
+
+    // Test: -I case-insensitive-always mode makes search case insensitive.
+    #[test]
+    fn test_dispatch_case_insensitive_always_finds_mixed_case() {
+        let content = make_search_content(&[
+            "alpha",
+            "beta",
+            "gamma",
+            "delta",
+            "epsilon",
+            "zeta",
+            "eta",
+            "theta",
+            "iota",
+            "kappa",
+            "lambda",
+            "mu",
+            "nu",
+            "xi",
+            "omicron",
+            "pi",
+            "rho",
+            "sigma",
+            "tau",
+            "upsilon",
+            "phi",
+            "chi",
+            "psi",
+            "omega",
+            "Error on this line",
+            "more text",
+            "more text",
+            "more text",
+            "more text",
+            "more text",
+        ]);
+
+        // Toggle -I on, then search for "ERROR" (all caps). Should match "Error"
+        // at line 24 thanks to case insensitive mode.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'-');
+        keys.push(b'I');
+        keys.push(b'/');
+        keys.extend_from_slice(b"ERROR");
+        keys.push(b'\n');
+        keys.push(b'q');
+
+        let reader = KeyReader::new(Cursor::new(keys));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        let _ = pager.run();
+
+        // "Error" is at line 24. max_top = 30 - 23 = 7. goto_line(24) clamps to 7.
+        assert_eq!(pager.screen().top_line(), 7);
+        // Should NOT show "Pattern not found" — the search succeeded.
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            !output.contains("Pattern not found"),
+            "Search should have found 'Error' with -I mode"
+        );
+    }
+
+    // Test: ^R literal modifier escapes regex metacharacters.
+    #[test]
+    fn test_dispatch_ctrl_r_literal_search_escapes_regex() {
+        let content = make_search_content(&["fooXbar", "foo.bar", "foozbar"]);
+        // Search with ^R prefix: the pattern "foo.bar" should be treated
+        // as literal, matching only "foo.bar" (line 1), not "fooXbar" (line 0).
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.push(0x12); // ^R modifier
+        keys.extend_from_slice(b"foo.bar");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // With literal search, only line 1 "foo.bar" matches.
+        // 3 lines < 23 content_rows, so top_line stays 0.
+        assert_eq!(pager.screen().top_line(), 0);
+        // The stored pattern should be the escaped version.
+        assert!(pager.last_pattern().is_some());
+        // Verify the pattern doesn't match "fooXbar" (which "foo.bar" regex would).
+        let pat = pager.last_pattern().unwrap();
+        assert!(!pat.is_match("fooXbar"));
+        assert!(pat.is_match("foo.bar"));
+    }
+
+    // Test: ^N inverted search modifier finds non-matching lines.
+    #[test]
+    fn test_dispatch_ctrl_n_inverted_search_finds_non_matching() {
+        // Build a file with "error" on some lines, other content on others.
+        // ^N modifier should find the first line NOT matching "error".
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..50 {
+            if i < 5 {
+                lines.push("error on this line".to_string());
+            } else {
+                lines.push(format!("normal line {i}"));
+            }
+        }
+        let content = make_search_content(&lines.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.push(0x0E); // ^N modifier (invert)
+        keys.extend_from_slice(b"error");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // The first non-"error" line is line 5. 50 lines, max_top = 50-23=27.
+        // goto_line(5, 50) = 5 (< 27).
+        assert_eq!(pager.screen().top_line(), 5);
+    }
+
+    // Test: effective_case_mode returns correct mode based on runtime options.
+    #[test]
+    fn test_dispatch_effective_case_mode_defaults_to_sensitive() {
+        let content = make_test_content(10);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let pager = Pager::new(reader, writer, buffer, index, None);
+        assert_eq!(pager.effective_case_mode(), CaseMode::Sensitive);
+    }
+
+    #[test]
+    fn test_dispatch_effective_case_mode_with_dash_i() {
+        let content = make_test_content(10);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.runtime_options.case_insensitive = true;
+        assert_eq!(pager.effective_case_mode(), CaseMode::Smart);
+    }
+
+    #[test]
+    fn test_dispatch_effective_case_mode_with_dash_cap_i() {
+        let content = make_test_content(10);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.runtime_options.case_insensitive_always = true;
+        assert_eq!(pager.effective_case_mode(), CaseMode::Insensitive);
+    }
+
+    #[test]
+    fn test_dispatch_effective_case_mode_cap_i_overrides_i() {
+        let content = make_test_content(10);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.runtime_options.case_insensitive = true;
+        pager.runtime_options.case_insensitive_always = true;
+        // -I takes precedence over -i
+        assert_eq!(pager.effective_case_mode(), CaseMode::Insensitive);
     }
 }
