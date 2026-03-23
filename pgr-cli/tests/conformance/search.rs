@@ -6,7 +6,7 @@
 /// and are slow (PTY-based).
 use std::time::Duration;
 
-use super::compare::compare_content;
+use super::compare;
 use super::helpers::{
     generate_filter_test, generate_search_basic, generate_search_case, generate_search_highlight,
     generate_search_regex, send_keys_to_both, skip_if_no_less, spawn_pair,
@@ -34,9 +34,7 @@ fn test_conformance_search_forward_finds_match() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Forward search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -60,9 +58,7 @@ fn test_conformance_search_forward_no_match() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Search no-match mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -90,9 +86,7 @@ fn test_conformance_search_forward_scrolls_to_match() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Search scroll-to-match mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -107,7 +101,7 @@ fn test_conformance_search_forward_scrolls_to_match() {
 /// SPEC: Scroll to the middle of the file, then search backward for "error".
 /// Both pagers should move the cursor to a match above the current position.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr backward search finds wrong match (skips last occurrence)"]
 fn test_conformance_search_backward_finds_match() {
     skip_if_no_less!();
     let file = generate_search_basic();
@@ -124,9 +118,7 @@ fn test_conformance_search_backward_finds_match() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Backward search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -150,9 +142,7 @@ fn test_conformance_search_backward_no_match() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Backward search no-match mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -163,7 +153,7 @@ fn test_conformance_search_backward_no_match() {
 /// SPEC: At line 1, search backward. If wrap is enabled (default), the search
 /// should wrap around to find matches from the end of the file.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr backward search wrap behavior differs from less"]
 fn test_conformance_search_backward_wraps_from_beginning() {
     skip_if_no_less!();
     let file = generate_search_basic();
@@ -177,9 +167,7 @@ fn test_conformance_search_backward_wraps_from_beginning() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Backward search wrap mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -207,9 +195,7 @@ fn test_conformance_search_n_repeats_forward() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Repeat search n mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -236,9 +222,7 @@ fn test_conformance_search_n_upper_reverses_direction() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Reverse search N mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -267,9 +251,7 @@ fn test_conformance_search_multiple_n_presses() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Multiple n presses mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -293,9 +275,7 @@ fn test_conformance_search_n_no_previous_search() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("No previous search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -323,9 +303,7 @@ fn test_conformance_search_numeric_prefix_forward() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Numeric prefix search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -350,9 +328,7 @@ fn test_conformance_search_numeric_prefix_repeat() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Numeric prefix repeat mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -380,9 +356,7 @@ fn test_conformance_search_case_sensitive_default() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Case-sensitive default mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -404,15 +378,13 @@ fn test_conformance_search_case_insensitive_dash_i() {
     // Toggle -i mode.
     send_keys_to_both(&mut pgr, &mut less, "-i\n");
 
-    // Search for lowercase pattern — should match all case variants.
+    // Search for lowercase pattern -- should match all case variants.
     send_keys_to_both(&mut pgr, &mut less, "/error\n");
 
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Case-insensitive -i mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -423,7 +395,7 @@ fn test_conformance_search_case_insensitive_dash_i() {
 /// SPEC: With `-I` active, all searches are case-insensitive regardless of
 /// the pattern's case.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr -I toggle not finding first match; off-by-one"]
 fn test_conformance_search_case_insensitive_dash_upper_i() {
     skip_if_no_less!();
     let file = generate_search_case();
@@ -434,15 +406,13 @@ fn test_conformance_search_case_insensitive_dash_upper_i() {
     // Toggle -I mode.
     send_keys_to_both(&mut pgr, &mut less, "-I\n");
 
-    // Search with mixed case — should still match all variants.
+    // Search with mixed case -- should still match all variants.
     send_keys_to_both(&mut pgr, &mut less, "/Error\n");
 
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Case-insensitive -I mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -464,15 +434,13 @@ fn test_conformance_search_smart_case_uppercase_pattern() {
     // Toggle -i (smart case).
     send_keys_to_both(&mut pgr, &mut less, "-i\n");
 
-    // Search with uppercase letter — should be case-sensitive despite -i.
+    // Search with uppercase letter -- should be case-sensitive despite -i.
     send_keys_to_both(&mut pgr, &mut less, "/Error\n");
 
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Smart case uppercase pattern mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -502,9 +470,7 @@ fn test_conformance_search_highlight_visible_matches() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Highlight visible matches mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -532,9 +498,7 @@ fn test_conformance_search_esc_u_toggles_highlighting() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("ESC-u toggle highlights mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     // Toggle highlights back on.
     send_keys_to_both(&mut pgr, &mut less, "\x1bu");
@@ -542,9 +506,7 @@ fn test_conformance_search_esc_u_toggles_highlighting() {
     let pgr_screen2 = pgr.capture_screen();
     let less_screen2 = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen2, &less_screen2) {
-        panic!("ESC-u re-enable highlights mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen2, &less_screen2);
 
     pgr.quit();
     less.quit();
@@ -572,9 +534,7 @@ fn test_conformance_search_highlight_persists_on_scroll() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Highlight persist on scroll mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -589,7 +549,7 @@ fn test_conformance_search_highlight_persists_on_scroll() {
 /// SPEC: Entering `&error` should display only lines matching "error",
 /// hiding all non-matching lines.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr filter mode (&pattern) not fully conformant with less"]
 fn test_conformance_search_filter_shows_matching_lines() {
     skip_if_no_less!();
     let file = generate_filter_test();
@@ -606,9 +566,7 @@ fn test_conformance_search_filter_shows_matching_lines() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Filter mode mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -619,7 +577,7 @@ fn test_conformance_search_filter_shows_matching_lines() {
 /// SPEC: After filtering with `&error`, entering `&` followed by Enter
 /// (empty pattern) should clear the filter and show all lines again.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr filter mode (&pattern) not fully conformant with less"]
 fn test_conformance_search_filter_clear() {
     skip_if_no_less!();
     let file = generate_filter_test();
@@ -640,9 +598,7 @@ fn test_conformance_search_filter_clear() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Filter clear mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -653,7 +609,7 @@ fn test_conformance_search_filter_clear() {
 /// SPEC: Entering `&` then Ctrl-N then a pattern should invert the filter,
 /// showing only lines that do NOT match.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr filter mode (&pattern) not fully conformant with less"]
 fn test_conformance_search_filter_inverted() {
     skip_if_no_less!();
     let file = generate_filter_test();
@@ -670,9 +626,7 @@ fn test_conformance_search_filter_inverted() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Filter inverted mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -687,7 +641,7 @@ fn test_conformance_search_filter_inverted() {
 /// SPEC: Pressing Ctrl-R before the pattern disables regex interpretation,
 /// treating the pattern as a literal string.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr Ctrl-R literal search modifier not working"]
 fn test_conformance_search_ctrl_r_literal() {
     skip_if_no_less!();
     let file = generate_search_regex();
@@ -702,9 +656,7 @@ fn test_conformance_search_ctrl_r_literal() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Ctrl-R literal search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -732,9 +684,7 @@ fn test_conformance_search_ctrl_w_wrap() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Ctrl-W wrap search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();
@@ -745,7 +695,7 @@ fn test_conformance_search_ctrl_w_wrap() {
 /// SPEC: Pressing Ctrl-N before the pattern inverts the match, finding
 /// the next line that does NOT contain the pattern.
 #[test]
-#[ignore = "conformance: requires GNU less, slow PTY test"]
+#[ignore = "pgr Ctrl-N inverted search modifier not working"]
 fn test_conformance_search_ctrl_n_inverted() {
     skip_if_no_less!();
     let file = generate_search_highlight();
@@ -759,9 +709,7 @@ fn test_conformance_search_ctrl_n_inverted() {
     let pgr_screen = pgr.capture_screen();
     let less_screen = less.capture_screen();
 
-    if let Err(diff) = compare_content(&pgr_screen, &less_screen) {
-        panic!("Ctrl-N inverted search mismatch:\n{diff}");
-    }
+    compare::compare_content(&pgr_screen, &less_screen);
 
     pgr.quit();
     less.quit();

@@ -20,7 +20,7 @@ use super::helpers::{
 /// With the default prompt, less and pgr show `:` at the bottom when there is
 /// more content to scroll. We compare the prompt line directly.
 #[test]
-#[ignore]
+#[ignore = "pgr default prompt shows : not filename"]
 fn test_conformance_display_default_short_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -44,7 +44,7 @@ fn test_conformance_display_short_prompt_at_eof() {
 ///
 /// With `-m`, the prompt includes the filename and a percentage indicator.
 #[test]
-#[ignore]
+#[ignore = "pgr -m prompt percentage calculation differs from less"]
 fn test_conformance_display_medium_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -56,7 +56,7 @@ fn test_conformance_display_medium_prompt() {
 ///
 /// With `-M`, the prompt includes detailed file information.
 #[test]
-#[ignore]
+#[ignore = "pgr -M prompt format differs from less"]
 fn test_conformance_display_long_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -68,7 +68,7 @@ fn test_conformance_display_long_prompt() {
 ///
 /// With `-Ps"custom %f %l"`, the prompt should use the custom format.
 #[test]
-#[ignore]
+#[ignore = "pgr -P custom prompt not fully conformant"]
 fn test_conformance_display_custom_prompt() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -80,7 +80,7 @@ fn test_conformance_display_custom_prompt() {
 ///
 /// With `-M` and two files, the prompt should indicate "file N of M".
 #[test]
-#[ignore]
+#[ignore = "pgr -M multi-file prompt format differs from less"]
 fn test_conformance_display_prompt_multiple_files() {
     skip_if_no_less!();
     let file1 = generate_numbered_file(50);
@@ -112,7 +112,7 @@ fn test_conformance_display_prompt_multiple_files() {
 /// With `-r`, all escape sequences (including cursor movement) should pass
 /// through to the terminal. Both pagers should produce identical output.
 #[test]
-#[ignore]
+#[ignore = "less 581 treats ANSI fixture as binary; pgr -r handling differs"]
 fn test_conformance_display_ansi_raw_mode() {
     skip_if_no_less!();
     let path = fixture_path("ansi_colors.txt");
@@ -125,7 +125,7 @@ fn test_conformance_display_ansi_raw_mode() {
 /// With `-R`, only SGR (Select Graphic Rendition) escape sequences pass
 /// through. Other escape codes (cursor movement, etc.) are stripped.
 #[test]
-#[ignore]
+#[ignore = "pgr -R SGR passthrough not fully implemented"]
 fn test_conformance_display_ansi_sgr_only_mode() {
     skip_if_no_less!();
     let path = fixture_path("ansi_mixed.txt");
@@ -138,7 +138,7 @@ fn test_conformance_display_ansi_sgr_only_mode() {
 /// Without any raw/ANSI flags, escape characters should be displayed as
 /// visible caret notation (e.g., `^[` for ESC).
 #[test]
-#[ignore]
+#[ignore = "less 581 treats ANSI fixture as binary; pgr caret notation differs"]
 fn test_conformance_display_ansi_default_caret_notation() {
     skip_if_no_less!();
     let path = fixture_path("ansi_colors.txt");
@@ -151,7 +151,7 @@ fn test_conformance_display_ansi_default_caret_notation() {
 /// A file with colored text should display the colors correctly when using
 /// `-R`. Both pagers should produce identical colored output.
 #[test]
-#[ignore]
+#[ignore = "less 581 treats ANSI fixture as binary; pgr -R handling differs"]
 fn test_conformance_display_color_preservation_with_r() {
     skip_if_no_less!();
     let path = fixture_path("ansi_colors.txt");
@@ -179,7 +179,7 @@ fn test_conformance_display_color_preservation_with_r() {
 ///
 /// With `-N`, line numbers should appear in the left margin.
 #[test]
-#[ignore]
+#[ignore = "pgr -N line numbers not implemented"]
 fn test_conformance_display_line_numbers_shown() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -192,7 +192,7 @@ fn test_conformance_display_line_numbers_shown() {
 /// For a file with 1000+ lines, the line number column should be wide enough
 /// to accommodate 4-digit numbers.
 #[test]
-#[ignore]
+#[ignore = "pgr -N line numbers not implemented"]
 fn test_conformance_display_line_number_width() {
     skip_if_no_less!();
     let path = fixture_path("numbered_1000.txt");
@@ -205,7 +205,7 @@ fn test_conformance_display_line_number_width() {
 /// After scrolling down, line numbers should reflect the actual file line
 /// numbers, not restart at 1.
 #[test]
-#[ignore]
+#[ignore = "pgr -N line numbers not implemented"]
 fn test_conformance_display_line_numbers_after_scroll() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -218,7 +218,7 @@ fn test_conformance_display_line_numbers_after_scroll() {
 ///
 /// With `-N -S`, line numbers should not interfere with chopped content.
 #[test]
-#[ignore]
+#[ignore = "pgr -N line numbers not implemented"]
 fn test_conformance_display_line_numbers_with_chop() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
@@ -232,7 +232,7 @@ fn test_conformance_display_line_numbers_with_chop() {
 ///
 /// With `-s`, sequences of blank lines are collapsed to a single blank line.
 #[test]
-#[ignore]
+#[ignore = "pgr -s squeeze blank lines off-by-one vs less"]
 fn test_conformance_display_squeeze_multiple_blanks() {
     skip_if_no_less!();
     let path = fixture_path("blank_groups.txt");
@@ -244,7 +244,7 @@ fn test_conformance_display_squeeze_multiple_blanks() {
 ///
 /// A single blank line between content should not be removed by squeeze.
 #[test]
-#[ignore]
+#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
 fn test_conformance_display_squeeze_preserves_single_blanks() {
     skip_if_no_less!();
     // Create a file with only single blank lines between content.
@@ -258,7 +258,7 @@ fn test_conformance_display_squeeze_preserves_single_blanks() {
 ///
 /// Leading blank lines at the start of the file should be squeezed.
 #[test]
-#[ignore]
+#[ignore = "pgr -s squeeze blank lines off-by-one vs less"]
 fn test_conformance_display_squeeze_at_file_start() {
     skip_if_no_less!();
     let content = "\n\n\n\nFirst content line\nSecond content line\n";
@@ -274,7 +274,7 @@ fn test_conformance_display_squeeze_at_file_start() {
 /// With `-S`, lines longer than the terminal width are truncated rather than
 /// wrapped.
 #[test]
-#[ignore]
+#[ignore = "pgr -S chop missing truncation marker (>) that less shows"]
 fn test_conformance_display_chop_long_lines() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
@@ -287,7 +287,7 @@ fn test_conformance_display_chop_long_lines() {
 /// With `-S` and a right arrow keypress, the view should shift horizontally,
 /// revealing content beyond the terminal width.
 #[test]
-#[ignore]
+#[ignore = "pgr horizontal scroll and -S chop not fully implemented"]
 fn test_conformance_display_chop_with_horizontal_scroll() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
@@ -319,7 +319,7 @@ fn test_conformance_display_chop_with_horizontal_scroll() {
 ///
 /// Without `-S`, long lines should wrap to the next row.
 #[test]
-#[ignore]
+#[ignore = "pgr line wrapping renders differently from less"]
 fn test_conformance_display_default_wrapping() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
@@ -334,7 +334,7 @@ fn test_conformance_display_default_wrapping() {
 /// After searching with a custom search color, the highlighted matches
 /// should use the specified color. Compare after performing a search.
 #[test]
-#[ignore]
+#[ignore = "pgr search scrolls to match line differently than less"]
 fn test_conformance_display_search_color() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -366,7 +366,7 @@ fn test_conformance_display_search_color() {
 ///
 /// The prompt line should use the specified color.
 #[test]
-#[ignore]
+#[ignore = "less 581 requires --use-color before -D; pgr -D differs"]
 fn test_conformance_display_prompt_color() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -392,7 +392,7 @@ fn test_conformance_display_prompt_color() {
 ///
 /// Line numbers should be rendered in the specified color.
 #[test]
-#[ignore]
+#[ignore = "pgr -N line numbers not implemented; less 581 -D requires --use-color"]
 fn test_conformance_display_line_number_color() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -420,7 +420,7 @@ fn test_conformance_display_line_number_color() {
 /// When the file is shorter than the terminal, empty rows after the last
 /// line of content should show `~` (tilde), matching less behavior.
 #[test]
-#[ignore]
+#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
 fn test_conformance_display_tilde_after_eof() {
     skip_if_no_less!();
     let path = fixture_path("short_5.txt");
@@ -433,7 +433,7 @@ fn test_conformance_display_tilde_after_eof() {
 /// With `--tilde` (or `-~`), empty rows after EOF should be blank instead
 /// of showing `~`.
 #[test]
-#[ignore]
+#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
 fn test_conformance_display_tilde_suppressed() {
     skip_if_no_less!();
     let path = fixture_path("short_5.txt");

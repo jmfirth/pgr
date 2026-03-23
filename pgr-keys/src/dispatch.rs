@@ -464,9 +464,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if let Some(c) = count {
                     self.sticky_half_page = Some(c);
                 }
+                // less uses (screen_height / 2) not (content_rows / 2)
                 let amount = self
                     .sticky_half_page
-                    .unwrap_or(self.screen.content_rows() / 2);
+                    .unwrap_or(self.screen.content_rows().div_ceil(2));
                 self.screen.scroll_forward(amount, total);
                 self.repaint()?;
                 self.check_eof_quit(total);
@@ -476,21 +477,26 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if let Some(c) = count {
                     self.sticky_half_page = Some(c);
                 }
+                // less uses (screen_height / 2) not (content_rows / 2)
                 let amount = self
                     .sticky_half_page
-                    .unwrap_or(self.screen.content_rows() / 2);
+                    .unwrap_or(self.screen.content_rows().div_ceil(2));
                 self.screen.scroll_backward(amount);
                 self.repaint()?;
             }
             Command::GotoBeginning(n) => {
                 self.save_last_position();
-                self.screen.goto_line(count.or(n).unwrap_or(0), total);
+                // ng uses 1-based line numbers; convert to 0-based index
+                let target = count.or(n).map_or(0, |line| line.saturating_sub(1));
+                self.screen.goto_line(target, total);
                 self.repaint()?;
             }
             Command::GotoEnd(n) => {
                 self.save_last_position();
                 let default = total.saturating_sub(self.screen.content_rows());
-                self.screen.goto_line(count.or(n).unwrap_or(default), total);
+                // nG uses 1-based line numbers; convert to 0-based index
+                let target = count.or(n).map_or(default, |line| line.saturating_sub(1));
+                self.screen.goto_line(target, total);
                 self.repaint()?;
                 self.check_eof_quit(total);
             }
@@ -1839,8 +1845,8 @@ mod tests {
     fn test_dispatch_numeric_prefix_10_upper_g_goes_to_line_10() {
         let content = make_test_content(100);
         let pager = run_pager(b"10Gq", &content);
-        // 10G: goto_line(10, 100) = min(10, 99) = 10
-        assert_eq!(pager.screen().top_line(), 10);
+        // 10G: go to line 10 (1-based) = index 9 (0-based)
+        assert_eq!(pager.screen().top_line(), 9);
     }
 
     #[test]

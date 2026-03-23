@@ -55,8 +55,11 @@ pub struct PagerSession {
 
 impl PagerSession {
     /// Spawn pgr with the given arguments and input file.
-    pub fn spawn_pgr(args: &[&str], input_file: &str, rows: u16, cols: u16) -> Self {
+    #[allow(clippy::cast_possible_truncation)] // Terminal dimensions are always < u16::MAX
+    pub fn spawn_pgr(args: &[&str], input_file: &str, rows: usize, cols: usize) -> Self {
         ensure_binary_built();
+        let rows = rows as u16;
+        let cols = cols as u16;
 
         let bin = binary_path();
         let mut cmd = Command::new(&bin);
@@ -65,6 +68,62 @@ impl PagerSession {
         }
         cmd.arg(input_file);
 
+        Self::spawn_command("pgr", cmd, rows, cols)
+    }
+
+    /// Spawn GNU less with the given arguments and input file.
+    #[allow(clippy::cast_possible_truncation)] // Terminal dimensions are always < u16::MAX
+    pub fn spawn_less(args: &[&str], input_file: &str, rows: usize, cols: usize) -> Self {
+        let rows = rows as u16;
+        let cols = cols as u16;
+
+        let mut cmd = Command::new("less");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        cmd.arg(input_file);
+
+        Self::spawn_command("less", cmd, rows, cols)
+    }
+
+    /// Spawn pgr with multiple input files.
+    #[allow(clippy::cast_possible_truncation)] // Terminal dimensions are always < u16::MAX
+    pub fn spawn_pgr_files(args: &[&str], input_files: &[&str], rows: usize, cols: usize) -> Self {
+        ensure_binary_built();
+        let rows = rows as u16;
+        let cols = cols as u16;
+
+        let bin = binary_path();
+        let mut cmd = Command::new(&bin);
+        for arg in args {
+            cmd.arg(arg);
+        }
+        for file in input_files {
+            cmd.arg(file);
+        }
+
+        Self::spawn_command("pgr", cmd, rows, cols)
+    }
+
+    /// Spawn GNU less with multiple input files.
+    #[allow(clippy::cast_possible_truncation)] // Terminal dimensions are always < u16::MAX
+    pub fn spawn_less_files(args: &[&str], input_files: &[&str], rows: usize, cols: usize) -> Self {
+        let rows = rows as u16;
+        let cols = cols as u16;
+
+        let mut cmd = Command::new("less");
+        for arg in args {
+            cmd.arg(arg);
+        }
+        for file in input_files {
+            cmd.arg(file);
+        }
+
+        Self::spawn_command("less", cmd, rows, cols)
+    }
+
+    /// Internal: spawn a command in a PTY with the given dimensions.
+    fn spawn_command(name: &str, mut cmd: Command, rows: u16, cols: u16) -> Self {
         // Set TERM so the pager knows it has a terminal.
         cmd.env("TERM", "xterm-256color");
         // Clear env vars that might interfere with conformance comparison.
@@ -75,56 +134,19 @@ impl PagerSession {
         cmd.env_remove("LESSKEY");
 
         let mut session =
-            expectrl::Session::spawn(cmd).unwrap_or_else(|e| panic!("failed to spawn pgr: {e}"));
+            expectrl::Session::spawn(cmd).unwrap_or_else(|e| panic!("failed to spawn {name}: {e}"));
         session.set_expect_timeout(Some(Duration::from_secs(5)));
 
         // Set terminal size via the PTY.
         session
             .get_process_mut()
             .set_window_size(cols, rows)
-            .expect("failed to set pgr window size");
+            .unwrap_or_else(|e| panic!("failed to set {name} window size: {e}"));
 
         let parser = vt100::Parser::new(rows, cols, 0);
 
         Self {
-            name: "pgr".to_string(),
-            session,
-            parser,
-            rows,
-            cols,
-        }
-    }
-
-    /// Spawn GNU less with the given arguments and input file.
-    pub fn spawn_less(args: &[&str], input_file: &str, rows: u16, cols: u16) -> Self {
-        let mut cmd = Command::new("less");
-        for arg in args {
-            cmd.arg(arg);
-        }
-        cmd.arg(input_file);
-
-        // Match the same environment as pgr.
-        cmd.env("TERM", "xterm-256color");
-        cmd.env_remove("LESS");
-        cmd.env_remove("LESSOPEN");
-        cmd.env_remove("LESSCLOSE");
-        cmd.env_remove("LESSSECURE");
-        cmd.env_remove("LESSKEY");
-
-        let mut session =
-            expectrl::Session::spawn(cmd).unwrap_or_else(|e| panic!("failed to spawn less: {e}"));
-        session.set_expect_timeout(Some(Duration::from_secs(5)));
-
-        // Set terminal size via the PTY.
-        session
-            .get_process_mut()
-            .set_window_size(cols, rows)
-            .expect("failed to set less window size");
-
-        let parser = vt100::Parser::new(rows, cols, 0);
-
-        Self {
-            name: "less".to_string(),
+            name: name.to_string(),
             session,
             parser,
             rows,
@@ -194,6 +216,11 @@ impl PagerSession {
             .get_stream_mut()
             .set_blocking(true)
             .expect("failed to restore blocking");
+    }
+
+    /// Wait and read output for the given duration (alias for settle).
+    pub fn wait_and_read(&mut self, timeout: Duration) {
+        self.settle(timeout);
     }
 
     /// Capture the current screen state from the vt100 parser.
