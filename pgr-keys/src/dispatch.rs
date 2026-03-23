@@ -492,7 +492,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 // less uses (screen_height / 2) not (content_rows / 2)
                 let amount = self
                     .sticky_half_page
-                    .unwrap_or(self.screen.content_rows().div_ceil(2));
+                    .unwrap_or(self.screen.content_rows() / 2);
                 self.screen.scroll_forward(amount, total);
                 self.repaint()?;
                 self.check_eof_quit(total);
@@ -505,7 +505,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 // less uses (screen_height / 2) not (content_rows / 2)
                 let amount = self
                     .sticky_half_page
-                    .unwrap_or(self.screen.content_rows().div_ceil(2));
+                    .unwrap_or(self.screen.content_rows() / 2);
                 self.screen.scroll_backward(amount);
                 self.repaint()?;
             }
@@ -1770,23 +1770,33 @@ impl<R: Read, W: Write> Pager<R, W> {
             .as_ref()
             .map_or((0, 1), |fl| (fl.current_index(), fl.file_count()));
 
+        // Compute byte offset of the end of the last visible line (for %b and %p).
+        // `bottom_display` is 1-based; line_range takes 0-based line numbers.
+        let byte_offset = if bottom_display > 0 {
+            self.index
+                .line_range(bottom_display.saturating_sub(1))
+                .map_or(0, |(_, end)| end)
+        } else {
+            0
+        };
+
         PromptContext {
             filename: self.filename.as_deref(),
             top_line: top_line_0.saturating_add(1),
             bottom_line: bottom_display,
             total_lines: Some(total_lines),
             total_bytes: self.buffer.len() as u64,
-            byte_offset: 0,
+            byte_offset,
             file_index,
             file_count,
             at_eof,
-            is_pipe: false,
+            is_pipe: self.is_pipe,
             column: self.screen.horizontal_offset().saturating_add(1),
             page_number: None,
             input_line: None,
             pipe_size: None,
             search_active: self.last_pattern.is_some(),
-            search_pattern: None,
+            search_pattern: self.last_pattern.as_ref().map(SearchPattern::pattern),
             line_numbers_enabled: self.runtime_options.line_numbers,
             marks_set: self.marks.has_any(),
             filter_active: self.filter.is_active(),
@@ -2485,6 +2495,15 @@ mod tests {
         let pager = run_pager(b"30j5uq", &content);
         assert_eq!(pager.screen().top_line(), 25);
         assert_eq!(pager.sticky_half_page(), Some(5));
+    }
+
+    #[test]
+    fn test_dispatch_half_page_default_amount_matches_less() {
+        // 24-row terminal: content_rows = 23, default half = 23 / 2 = 11 (floor).
+        // less uses (screen_height - 1) / 2 = 11.
+        let content = make_test_content(100);
+        let pager = run_pager(b"dq", &content);
+        assert_eq!(pager.screen().top_line(), 11);
     }
 
     // ── Window sizing ────────────────────────────────────────────────

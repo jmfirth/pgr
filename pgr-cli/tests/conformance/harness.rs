@@ -181,9 +181,6 @@ impl PagerSession {
             .expect("failed to set non-blocking");
 
         loop {
-            if start.elapsed() > timeout {
-                break;
-            }
             match self.session.get_stream_mut().read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -191,10 +188,16 @@ impl PagerSession {
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No more data available right now.
-                    // Sleep briefly and retry until timeout expires.
+                    if start.elapsed() > timeout {
+                        break;
+                    }
+                    // Sleep briefly then retry — pager may still be rendering.
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(_) => break,
+            }
+            if start.elapsed() > timeout {
+                break;
             }
         }
 
