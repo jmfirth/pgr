@@ -179,7 +179,7 @@ fn test_conformance_display_color_preservation_with_r() {
 ///
 /// With `-N`, line numbers should appear in the left margin.
 #[test]
-#[ignore = "pgr -N line numbers not implemented"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_line_numbers_shown() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -192,7 +192,7 @@ fn test_conformance_display_line_numbers_shown() {
 /// For a file with 1000+ lines, the line number column should be wide enough
 /// to accommodate 4-digit numbers.
 #[test]
-#[ignore = "pgr -N line numbers not implemented"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_line_number_width() {
     skip_if_no_less!();
     let path = fixture_path("numbered_1000.txt");
@@ -205,7 +205,7 @@ fn test_conformance_display_line_number_width() {
 /// After scrolling down, line numbers should reflect the actual file line
 /// numbers, not restart at 1.
 #[test]
-#[ignore = "pgr -N line numbers not implemented"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_line_numbers_after_scroll() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -218,7 +218,7 @@ fn test_conformance_display_line_numbers_after_scroll() {
 ///
 /// With `-N -S`, line numbers should not interfere with chopped content.
 #[test]
-#[ignore = "pgr -N line numbers not implemented"]
+#[ignore = "pgr -S chop missing truncation marker (>) that less shows"]
 fn test_conformance_display_line_numbers_with_chop() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");

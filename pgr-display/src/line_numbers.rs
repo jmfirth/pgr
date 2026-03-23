@@ -6,7 +6,11 @@
 use std::fmt::Write;
 
 /// Minimum width of the line number column (matches `less` default).
-const MIN_LINE_NUMBER_WIDTH: usize = 7;
+///
+/// GNU less uses `LINENUM_WIDTH = 7` for the number field, then appends a
+/// trailing space separator, totalling 8 visible columns. Our width
+/// constant includes the separator, hence 8.
+const MIN_LINE_NUMBER_WIDTH: usize = 8;
 
 /// Calculate the width of the line number column.
 ///
@@ -100,25 +104,25 @@ mod tests {
 
     #[test]
     fn test_line_number_width_99_lines_returns_minimum() {
-        // 99 lines = 2 digits + 1 space = 3, but min is 7
+        // 99 lines = 2 digits + 1 space = 3, but min is 8
         assert_eq!(line_number_width(99), MIN_LINE_NUMBER_WIDTH);
     }
 
     #[test]
     fn test_line_number_width_1000_lines_returns_5_clamped_to_min() {
-        // 1000 lines = 4 digits + 1 space = 5, but min is 7
+        // 1000 lines = 4 digits + 1 space = 5, but min is 8
         assert_eq!(line_number_width(1000), MIN_LINE_NUMBER_WIDTH);
     }
 
     #[test]
     fn test_line_number_width_large_file_exceeds_minimum() {
-        // 10_000_000 lines = 8 digits + 1 space = 9 > 7
+        // 10_000_000 lines = 8 digits + 1 space = 9 > 8
         assert_eq!(line_number_width(10_000_000), 9);
     }
 
     #[test]
     fn test_line_number_width_zero_lines() {
-        // 0 lines = 1 digit + 1 space = 2, but min is 7
+        // 0 lines = 1 digit + 1 space = 2, but min is 8
         assert_eq!(line_number_width(0), MIN_LINE_NUMBER_WIDTH);
     }
 
@@ -183,7 +187,7 @@ mod tests {
         let ln_width = line_number_width(500);
         let content_width = total_cols - ln_width;
         assert_eq!(ln_width, MIN_LINE_NUMBER_WIDTH);
-        assert_eq!(content_width, 73);
+        assert_eq!(content_width, 72);
     }
 
     #[test]

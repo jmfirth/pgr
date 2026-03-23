@@ -8,9 +8,9 @@ use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    eval_prompt, paint_prompt, paint_screen, OverstrikeMode, PromptContext, PromptStyle,
-    RawControlMode, RenderConfig, Screen, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT,
-    DEFAULT_SHORT_PROMPT,
+    eval_prompt, paint_prompt, paint_screen_with_options, OverstrikeMode, PaintOptions,
+    PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, TabStops,
+    DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     CaseMode, HighlightState, SearchDirection, SearchModifiers, SearchPattern, Searcher, WrapMode,
@@ -1424,7 +1424,18 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.highlight_state
             .compute_highlights(&lines, self.last_pattern.as_ref());
 
-        paint_screen(&mut self.writer, &self.screen, &lines, &self.render_config)?;
+        let paint_opts = PaintOptions {
+            show_line_numbers: self.runtime_options.line_numbers,
+            total_lines: total,
+            line_num_width: None,
+        };
+        paint_screen_with_options(
+            &mut self.writer,
+            &self.screen,
+            &lines,
+            &self.render_config,
+            &paint_opts,
+        )?;
 
         // Write the prompt/status on the last row.
         self.paint_status_prompt(total)?;
