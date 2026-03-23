@@ -59,6 +59,14 @@ pub enum Command {
     ScrollForwardForce(usize),
     /// Like `ScrollBackward` but works beyond beginning. `K` or `Y`.
     ScrollBackwardForce(usize),
+    /// Switch to the next file in the file list. `:n`.
+    NextFile,
+    /// Switch to the previous file in the file list. `:p`.
+    PreviousFile,
+    /// Switch to the first file (or N-th with numeric prefix). `:x`.
+    FirstFile,
+    /// Remove the current file from the list. `:d`.
+    RemoveFile,
 }
 
 #[cfg(test)]
