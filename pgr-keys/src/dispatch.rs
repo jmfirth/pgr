@@ -1166,6 +1166,5 @@ mod tests {
         let pager = run_pager(b"10z q", &content);
         // 10z -> scrolls 10, SPACE -> scrolls 10 more = 20
         assert_eq!(pager.screen().top_line(), 20);
->>>>>>> worktree-agent-a1c50462
     }
 }
