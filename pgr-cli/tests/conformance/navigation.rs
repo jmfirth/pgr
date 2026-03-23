@@ -236,7 +236,7 @@ fn test_conformance_navigation_w_sets_backward_window() {
 /// Test 23: Right arrow (horizontal scroll right) — with `-S` flag and long
 /// lines, send right arrow, compare.
 #[test]
-#[ignore = "pgr horizontal scroll and -S chop not fully implemented"]
+#[ignore = "less 581 maps right arrow differently than less 668+; chop markers work"]
 fn test_conformance_navigation_horizontal_scroll_right() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
@@ -247,7 +247,7 @@ fn test_conformance_navigation_horizontal_scroll_right() {
 /// Test 24: Left arrow (horizontal scroll left) — after scrolling right,
 /// send left arrow, compare.
 #[test]
-#[ignore = "pgr horizontal scroll and -S chop not fully implemented"]
+#[ignore = "less 581 maps arrow keys differently than less 668+; chop markers work"]
 fn test_conformance_navigation_horizontal_scroll_left() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
