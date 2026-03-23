@@ -54,6 +54,32 @@ pub fn format_line_number(line_number: usize, width: usize) -> String {
     result
 }
 
+/// Format a line number with the configured color.
+///
+/// Like [`format_line_number`] but wraps the number in the provided SGR
+/// sequence when `number_sgr` is `Some`. The reset sequence follows
+/// the number (before the trailing space) to prevent color bleed.
+/// When `number_sgr` is `None`, behaves identically to [`format_line_number`].
+#[must_use]
+pub fn format_line_number_colored(
+    line_number: usize,
+    width: usize,
+    number_sgr: Option<&str>,
+) -> String {
+    match number_sgr {
+        Some(sgr) if !sgr.is_empty() => {
+            let num_width = width.saturating_sub(1);
+            let mut result = String::with_capacity(width + sgr.len() + 4);
+            result.push_str(sgr);
+            let _ = write!(result, "{line_number:>num_width$}");
+            result.push_str("\x1b[0m");
+            result.push(' ');
+            result
+        }
+        _ => format_line_number(line_number, width),
+    }
+}
+
 /// Count the number of decimal digits in a positive integer.
 fn digit_count(n: usize) -> usize {
     if n == 0 {
@@ -170,5 +196,36 @@ mod tests {
         assert_eq!(digit_count(100), 3);
         assert_eq!(digit_count(999), 3);
         assert_eq!(digit_count(1000), 4);
+    }
+
+    // --- Colored line number tests ---
+
+    #[test]
+    fn test_format_line_number_colored_with_sgr_wraps_number() {
+        let sgr = "\x1b[1;36m"; // bold cyan
+        let formatted = format_line_number_colored(42, 7, Some(sgr));
+        assert_eq!(formatted, "\x1b[1;36m    42\x1b[0m ");
+    }
+
+    #[test]
+    fn test_format_line_number_colored_none_produces_plain() {
+        let colored = format_line_number_colored(42, 7, None);
+        let plain = format_line_number(42, 7);
+        assert_eq!(colored, plain);
+    }
+
+    #[test]
+    fn test_format_line_number_colored_empty_sgr_produces_plain() {
+        let colored = format_line_number_colored(42, 7, Some(""));
+        let plain = format_line_number(42, 7);
+        assert_eq!(colored, plain);
+    }
+
+    #[test]
+    fn test_format_line_number_colored_reset_before_trailing_space() {
+        let sgr = "\x1b[32m"; // green
+        let formatted = format_line_number_colored(1, 7, Some(sgr));
+        // Reset should come before the trailing space
+        assert!(formatted.ends_with("\x1b[0m "));
     }
 }

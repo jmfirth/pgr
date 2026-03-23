@@ -1050,7 +1050,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         );
 
         let (rows, cols) = self.screen.dimensions();
-        paint_prompt(&mut self.writer, &text, rows, cols)?;
+        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
         Ok(())
     }
 
@@ -1143,7 +1143,7 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn display_version(&mut self) -> Result<()> {
         let text = help::version_string();
         let (rows, cols) = self.screen.dimensions();
-        paint_prompt(&mut self.writer, &text, rows, cols)?;
+        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
         Ok(())
     }
 
@@ -1203,7 +1203,7 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         // If there's a status message, show it instead of the normal prompt.
         if let Some(msg) = self.status_message.take() {
-            paint_prompt(&mut self.writer, &msg, rows, cols)?;
+            paint_prompt(&mut self.writer, &msg, rows, cols, None)?;
             return Ok(());
         }
 
@@ -1243,7 +1243,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         let text = render_prompt(&self.prompt_style, &ctx);
-        paint_prompt(&mut self.writer, &text, rows, cols)?;
+        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
 
         Ok(())
     }
