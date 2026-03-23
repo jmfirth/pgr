@@ -1,0 +1,8 @@
+[31mRed SGR[0m
+[2JScreen clear attempt
+Normal line
+[HHome cursor attempt
+[32mGreen SGR[0m
+[5AMove up attempt
+More normal text
+[1;35mBold magenta[0m

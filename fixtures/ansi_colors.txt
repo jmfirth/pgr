@@ -1,0 +1,10 @@
+[31mRed text[0m
+[32mGreen text[0m
+[1;34mBold blue text[0m
+Normal text
+[4;33mUnderlined yellow[0m
+[7mReverse video[0m
+Plain text between colors
+[35mMagenta text[0m
+[36mCyan text[0m
+[1mBold only[0m
