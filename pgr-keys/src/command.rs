@@ -67,6 +67,8 @@ pub enum Command {
     FirstFile,
     /// Remove the current file from the list. `:d`.
     RemoveFile,
+    /// Enter filter mode: prompt for pattern (`&` command).
+    Filter,
 }
 
 #[cfg(test)]

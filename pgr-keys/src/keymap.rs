@@ -93,6 +93,8 @@ impl Keymap {
             (Key::Char('J'), Command::ScrollForwardForce(1)),
             (Key::Char('K'), Command::ScrollBackwardForce(1)),
             (Key::Char('Y'), Command::ScrollBackwardForce(1)),
+            // Filter mode
+            (Key::Char('&'), Command::Filter),
         ];
 
         Self { bindings }
@@ -312,5 +314,12 @@ mod tests {
     fn test_keymap_esc_k_maps_to_file_line_backward() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::EscSeq('k')), Command::FileLineBackward);
+    }
+
+    // ── Test 14: & key maps to Filter command ───────────────────────
+    #[test]
+    fn test_keymap_ampersand_maps_to_filter() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('&')), Command::Filter);
     }
 }
