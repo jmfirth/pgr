@@ -359,6 +359,230 @@ fn raw_char_width(c: char) -> usize {
     }
 }
 
+/// ANSI escape sequence for standout (reverse video) mode.
+const STANDOUT_ON: &str = "\x1b[7m";
+/// ANSI escape sequence to reset all attributes.
+const STANDOUT_OFF: &str = "\x1b[0m";
+
+/// Render a single line with optional search highlighting.
+///
+/// Behaves identically to [`render_line`] but additionally wraps matched
+/// byte ranges in standout (reverse video) escape sequences. Each element
+/// of `highlights` is a `(start, end)` byte-offset pair into `line`.
+///
+/// Highlights that fall outside the visible horizontal window are clipped.
+/// Multiple highlights on one line are rendered independently.
+///
+/// Returns `(rendered_string, display_width)`.
+#[must_use]
+pub fn render_line_highlighted(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    config: &RenderConfig,
+    highlights: &[(usize, usize)],
+) -> (String, usize) {
+    if highlights.is_empty() {
+        return render_line(line, horizontal_offset, max_width, config);
+    }
+
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
+
+    // Pre-process overstrikes
+    let processed;
+    let effective_line = if config.overstrike_mode == OverstrikeMode::Interpret {
+        processed = ansi::process_overstrikes(line, OverstrikeMode::Interpret);
+        &processed
+    } else if config.overstrike_mode == OverstrikeMode::Show {
+        processed = ansi::process_overstrikes(line, OverstrikeMode::Show);
+        &processed
+    } else {
+        line
+    };
+
+    match config.raw_mode {
+        RawControlMode::Off => render_off_highlighted(
+            effective_line,
+            horizontal_offset,
+            max_width,
+            &config.tab_stops,
+            highlights,
+        ),
+        RawControlMode::AnsiOnly => render_ansi_only_highlighted(
+            effective_line,
+            horizontal_offset,
+            max_width,
+            &config.tab_stops,
+            highlights,
+        ),
+        // In raw passthrough mode, we don't apply highlights since we can't
+        // reliably track character positions. Fall back to un-highlighted.
+        RawControlMode::All => render_all(effective_line, horizontal_offset, max_width),
+    }
+}
+
+/// Check if a byte offset is inside any of the highlight ranges.
+fn is_highlighted(byte_offset: usize, highlights: &[(usize, usize)]) -> bool {
+    highlights
+        .iter()
+        .any(|&(start, end)| byte_offset >= start && byte_offset < end)
+}
+
+/// Render with ANSI stripping and search highlighting.
+fn render_off_highlighted(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    tab_stops: &TabStops,
+    highlights: &[(usize, usize)],
+) -> (String, usize) {
+    let stripped = ansi::strip_ansi(line);
+    render_chars_highlighted(
+        &stripped,
+        horizontal_offset,
+        max_width,
+        tab_stops,
+        highlights,
+    )
+}
+
+/// Render with ANSI passthrough and search highlighting.
+fn render_ansi_only_highlighted(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    tab_stops: &TabStops,
+    highlights: &[(usize, usize)],
+) -> (String, usize) {
+    let segments = ansi::parse_ansi(line);
+    let mut output = String::with_capacity(line.len());
+    let mut col: usize = 0;
+    let mut skipped: usize = 0;
+    let mut visible_width: usize = 0;
+    let mut byte_offset: usize = 0;
+    let mut in_standout = false;
+
+    for segment in segments {
+        match segment {
+            Segment::Escape(esc) => {
+                if skipped >= horizontal_offset {
+                    output.push_str(esc);
+                }
+                byte_offset += esc.len();
+            }
+            Segment::Text(text) => {
+                for c in text.chars() {
+                    if visible_width >= max_width {
+                        break;
+                    }
+
+                    let char_w = expanded_width(c, col, tab_stops);
+
+                    if skipped < horizontal_offset {
+                        let remaining_to_skip = horizontal_offset - skipped;
+                        if char_w <= remaining_to_skip {
+                            skipped += char_w;
+                            col += char_w;
+                            byte_offset += c.len_utf8();
+                            continue;
+                        }
+                        skipped += char_w;
+                        col += char_w;
+                        byte_offset += c.len_utf8();
+                        continue;
+                    }
+
+                    if visible_width + char_w > max_width {
+                        break;
+                    }
+
+                    let should_highlight = is_highlighted(byte_offset, highlights);
+                    if should_highlight && !in_standout {
+                        output.push_str(STANDOUT_ON);
+                        in_standout = true;
+                    } else if !should_highlight && in_standout {
+                        output.push_str(STANDOUT_OFF);
+                        in_standout = false;
+                    }
+
+                    let expansion = expand_char(c, col, tab_stops);
+                    output.push_str(&expansion);
+                    visible_width += char_w;
+                    col += char_w;
+                    byte_offset += c.len_utf8();
+                }
+            }
+        }
+    }
+
+    if in_standout {
+        output.push_str(STANDOUT_OFF);
+    }
+
+    (output, visible_width)
+}
+
+/// Render characters with highlight tracking.
+fn render_chars_highlighted(
+    text: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    tab_stops: &TabStops,
+    highlights: &[(usize, usize)],
+) -> (String, usize) {
+    let mut output = String::with_capacity(text.len());
+    let mut col: usize = 0;
+    let mut skipped: usize = 0;
+    let mut visible_width: usize = 0;
+    let mut in_standout = false;
+
+    for (byte_offset, c) in text.char_indices() {
+        if visible_width >= max_width {
+            break;
+        }
+
+        let char_w = expanded_width(c, col, tab_stops);
+
+        if skipped < horizontal_offset {
+            let remaining = horizontal_offset - skipped;
+            if char_w <= remaining {
+                skipped += char_w;
+                col += char_w;
+                continue;
+            }
+            skipped += char_w;
+            col += char_w;
+            continue;
+        }
+
+        if visible_width + char_w > max_width {
+            break;
+        }
+
+        let should_highlight = is_highlighted(byte_offset, highlights);
+        if should_highlight && !in_standout {
+            output.push_str(STANDOUT_ON);
+            in_standout = true;
+        } else if !should_highlight && in_standout {
+            output.push_str(STANDOUT_OFF);
+            in_standout = false;
+        }
+
+        let expansion = expand_char(c, col, tab_stops);
+        output.push_str(&expansion);
+        visible_width += char_w;
+        col += char_w;
+    }
+
+    if in_standout {
+        output.push_str(STANDOUT_OFF);
+    }
+
+    (output, visible_width)
+}
+
 /// Render a character slice with offset, width limit, and tab/control handling.
 fn render_chars(
     chars: &[char],
@@ -705,5 +929,68 @@ mod tests {
         assert!(rendered.contains("\x1b[31m"));
         // Tab should be expanded (4 spaces from col after bold 'a')
         assert!(rendered.contains("   "));
+    }
+
+    // --- Highlighted rendering tests ---
+
+    // ── Test 12: render_line_highlighted with no highlights produces identical output to render_line
+    #[test]
+    fn test_render_line_highlighted_no_highlights_matches_render_line() {
+        let config = default_config();
+        let line = "hello world";
+        let (normal, normal_w) = render_line(line, 0, 80, &config);
+        let (highlighted, highlighted_w) = render_line_highlighted(line, 0, 80, &config, &[]);
+        assert_eq!(normal, highlighted);
+        assert_eq!(normal_w, highlighted_w);
+    }
+
+    // ── Test 13: render_line_highlighted with one match wraps matched text in reverse video
+    #[test]
+    fn test_render_line_highlighted_one_match_wraps_in_reverse_video() {
+        let config = default_config();
+        // "hello world" — highlight "world" at bytes 6..11
+        let (rendered, width) = render_line_highlighted("hello world", 0, 80, &config, &[(6, 11)]);
+        assert_eq!(rendered, format!("hello {STANDOUT_ON}world{STANDOUT_OFF}"));
+        assert_eq!(width, 11);
+    }
+
+    // ── Test 14: render_line_highlighted with multiple matches highlights each independently
+    #[test]
+    fn test_render_line_highlighted_multiple_matches_each_highlighted() {
+        let config = default_config();
+        // "ab cd ab" — highlight "ab" at bytes 0..2 and 6..8
+        let (rendered, _) = render_line_highlighted("ab cd ab", 0, 80, &config, &[(0, 2), (6, 8)]);
+        assert_eq!(
+            rendered,
+            format!("{STANDOUT_ON}ab{STANDOUT_OFF} cd {STANDOUT_ON}ab{STANDOUT_OFF}")
+        );
+    }
+
+    // ── Test 15: render_line_highlighted clips highlights to the visible horizontal window
+    #[test]
+    fn test_render_line_highlighted_clips_at_horizontal_offset() {
+        let config = default_config();
+        // "hello world" with offset 8, max_width 80 — only "rld" is visible (bytes 8..11)
+        // Highlight is on "world" (bytes 6..11), so the visible portion "rld" should be highlighted
+        let (rendered, width) = render_line_highlighted("hello world", 8, 80, &config, &[(6, 11)]);
+        assert_eq!(rendered, format!("{STANDOUT_ON}rld{STANDOUT_OFF}"));
+        assert_eq!(width, 3);
+    }
+
+    #[test]
+    fn test_render_line_highlighted_highlight_entirely_before_viewport_not_shown() {
+        let config = default_config();
+        // "hello world" with offset 6 — "world" visible
+        // Highlight is on "hello" (bytes 0..5) — entirely before viewport
+        let (rendered, width) = render_line_highlighted("hello world", 6, 80, &config, &[(0, 5)]);
+        assert_eq!(rendered, "world");
+        assert_eq!(width, 5);
+    }
+
+    #[test]
+    fn test_render_line_highlighted_highlight_at_start_of_line() {
+        let config = default_config();
+        let (rendered, _) = render_line_highlighted("hello world", 0, 80, &config, &[(0, 5)]);
+        assert_eq!(rendered, format!("{STANDOUT_ON}hello{STANDOUT_OFF} world"));
     }
 }
