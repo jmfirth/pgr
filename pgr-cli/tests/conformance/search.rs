@@ -549,7 +549,7 @@ fn test_conformance_search_highlight_persists_on_scroll() {
 /// SPEC: Entering `&error` should display only lines matching "error",
 /// hiding all non-matching lines.
 #[test]
-#[ignore = "pgr filter mode (&pattern) not fully conformant with less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_filter_shows_matching_lines() {
     skip_if_no_less!();
     let file = generate_filter_test();
@@ -577,7 +577,7 @@ fn test_conformance_search_filter_shows_matching_lines() {
 /// SPEC: After filtering with `&error`, entering `&` followed by Enter
 /// (empty pattern) should clear the filter and show all lines again.
 #[test]
-#[ignore = "pgr filter mode (&pattern) not fully conformant with less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_filter_clear() {
     skip_if_no_less!();
     let file = generate_filter_test();
@@ -609,7 +609,7 @@ fn test_conformance_search_filter_clear() {
 /// SPEC: Entering `&` then Ctrl-N then a pattern should invert the filter,
 /// showing only lines that do NOT match.
 #[test]
-#[ignore = "pgr filter mode (&pattern) not fully conformant with less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_filter_inverted() {
     skip_if_no_less!();
     let file = generate_filter_test();
