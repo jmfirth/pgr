@@ -6,3 +6,4 @@ mod compare;
 mod display;
 mod harness;
 mod helpers;
+mod navigation;

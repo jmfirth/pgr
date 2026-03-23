@@ -196,3 +196,96 @@ pub fn assert_prompt_conformance(args: &[&str], input_file: &str, keystrokes: &s
     pgr.quit();
     less.quit();
 }
+
+/// Generate a file with long lines (each `width` characters wide).
+pub fn generate_long_lines_file(lines: usize, width: usize) -> tempfile::NamedTempFile {
+    let mut content = String::new();
+    for i in 1..=lines {
+        let prefix = format!("Line {i:03}: ");
+        let padding_len = width.saturating_sub(prefix.len());
+        content.push_str(&prefix);
+        for _ in 0..padding_len {
+            content.push('x');
+        }
+        content.push('\n');
+    }
+    generate_file(&content)
+}
+
+/// Like `assert_content_conformance` but sends raw bytes instead of a string.
+///
+/// Useful for sending escape sequences (arrow keys, etc).
+pub fn assert_content_conformance_bytes(args: &[&str], input_file: &str, keystrokes: &[u8]) {
+    let mut pgr = PagerSession::spawn_pgr(args, input_file, TEST_ROWS, TEST_COLS);
+    let mut less = PagerSession::spawn_less(args, input_file, TEST_ROWS, TEST_COLS);
+
+    pgr.settle(SETTLE_INITIAL);
+    less.settle(SETTLE_INITIAL);
+
+    if !keystrokes.is_empty() {
+        pgr.send_bytes(keystrokes);
+        less.send_bytes(keystrokes);
+
+        pgr.settle(SETTLE_KEY);
+        less.settle(SETTLE_KEY);
+    }
+
+    let pgr_screen = pgr.capture_screen();
+    let less_screen = less.capture_screen();
+
+    compare::compare_content(&pgr_screen, &less_screen);
+
+    pgr.quit();
+    less.quit();
+}
+
+/// Multi-step conformance: spawn both pagers, run a sequence of keystroke
+/// groups with settle between each, then compare content after the final step.
+pub fn assert_content_conformance_steps(args: &[&str], input_file: &str, steps: &[&str]) {
+    let mut pgr = PagerSession::spawn_pgr(args, input_file, TEST_ROWS, TEST_COLS);
+    let mut less = PagerSession::spawn_less(args, input_file, TEST_ROWS, TEST_COLS);
+
+    pgr.settle(SETTLE_INITIAL);
+    less.settle(SETTLE_INITIAL);
+
+    for step in steps {
+        pgr.send_keys(step);
+        less.send_keys(step);
+
+        pgr.settle(SETTLE_KEY);
+        less.settle(SETTLE_KEY);
+    }
+
+    let pgr_screen = pgr.capture_screen();
+    let less_screen = less.capture_screen();
+
+    compare::compare_content(&pgr_screen, &less_screen);
+
+    pgr.quit();
+    less.quit();
+}
+
+/// Multi-step conformance with raw byte steps.
+pub fn assert_content_conformance_byte_steps(args: &[&str], input_file: &str, steps: &[&[u8]]) {
+    let mut pgr = PagerSession::spawn_pgr(args, input_file, TEST_ROWS, TEST_COLS);
+    let mut less = PagerSession::spawn_less(args, input_file, TEST_ROWS, TEST_COLS);
+
+    pgr.settle(SETTLE_INITIAL);
+    less.settle(SETTLE_INITIAL);
+
+    for step in steps {
+        pgr.send_bytes(step);
+        less.send_bytes(step);
+
+        pgr.settle(SETTLE_KEY);
+        less.settle(SETTLE_KEY);
+    }
+
+    let pgr_screen = pgr.capture_screen();
+    let less_screen = less.capture_screen();
+
+    compare::compare_content(&pgr_screen, &less_screen);
+
+    pgr.quit();
+    less.quit();
+}
