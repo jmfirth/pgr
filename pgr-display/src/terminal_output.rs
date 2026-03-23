@@ -30,6 +30,9 @@ pub struct PaintOptions {
     pub total_lines: usize,
     /// Minimum width for the line number column (`--line-num-width`). Default: 7.
     pub line_num_width: Option<usize>,
+    /// Suppress tilde display for lines past EOF (`--tilde` / `-~` flag).
+    /// When true, beyond-EOF rows are rendered as blank instead of `~`.
+    pub suppress_tildes: bool,
 }
 
 /// Paint the full screen content to the terminal.
@@ -105,8 +108,8 @@ pub fn paint_screen_with_options<W: Write>(
             }
             let (rendered, _) = render::render_line(line_text, h_offset, content_cols, config);
             writer.write_all(rendered.as_bytes())?;
-        } else {
-            // Beyond EOF: display tilde
+        } else if !options.suppress_tildes {
+            // Beyond EOF: display tilde (unless suppressed by --tilde)
             writer.write_all(b"~")?;
         }
 
@@ -166,11 +169,11 @@ pub fn paint_screen_mapped<W: Write>(
                 }
                 let (rendered, _) = render::render_line(line_text, h_offset, content_cols, config);
                 writer.write_all(rendered.as_bytes())?;
-            } else {
-                // Beyond EOF: display tilde
+            } else if !options.suppress_tildes {
+                // Beyond EOF: display tilde (unless suppressed)
                 writer.write_all(b"~")?;
             }
-        } else {
+        } else if !options.suppress_tildes {
             writer.write_all(b"~")?;
         }
 
@@ -382,6 +385,7 @@ mod tests {
             show_line_numbers: true,
             total_lines: 100,
             line_num_width: None,
+            suppress_tildes: false,
         };
         let output =
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
@@ -416,6 +420,7 @@ mod tests {
             show_line_numbers: true,
             total_lines: 50,
             line_num_width: None,
+            suppress_tildes: false,
         };
         let output_ln =
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
@@ -472,6 +477,7 @@ mod tests {
             show_line_numbers: true,
             total_lines: 10,
             line_num_width: None,
+            suppress_tildes: false,
         };
         let output =
             capture_output(|w| paint_screen_mapped(w, &screen, &screen_lines, &config, &options));

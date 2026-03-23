@@ -41,12 +41,15 @@ impl Screen {
         (self.top_line, self.top_line + self.content_rows)
     }
 
-    /// Scroll forward (down) by `n` lines, clamping so `top_line` does not
-    /// exceed `total_lines - 1`.
+    /// Scroll forward (down) by `n` lines, clamping so the last line of
+    /// the file is still visible on screen.
+    ///
+    /// For files shorter than `content_rows`, `top_line` stays at 0.
+    /// For longer files, `top_line` never exceeds `total_lines - content_rows`.
     ///
     /// Returns the new `top_line` value.
     pub fn scroll_forward(&mut self, n: usize, total_lines: usize) -> usize {
-        let max_top = total_lines.saturating_sub(1);
+        let max_top = total_lines.saturating_sub(self.content_rows);
         self.top_line = (self.top_line + n).min(max_top);
         self.top_line
     }
@@ -67,11 +70,15 @@ impl Screen {
         self.top_line
     }
 
-    /// Jump directly to a line number, clamped to the valid range `[0, total_lines - 1]`.
+    /// Jump directly to a line number, clamped so the last line of
+    /// the file is still visible on screen.
+    ///
+    /// For files shorter than `content_rows`, `top_line` stays at 0.
+    /// For longer files, `top_line` never exceeds `total_lines - content_rows`.
     ///
     /// Returns the new `top_line` value.
     pub fn goto_line(&mut self, line: usize, total_lines: usize) -> usize {
-        let max_top = total_lines.saturating_sub(1);
+        let max_top = total_lines.saturating_sub(self.content_rows);
         self.top_line = line.min(max_top);
         self.top_line
     }
@@ -149,10 +156,11 @@ mod tests {
     }
 
     #[test]
-    fn test_screen_scroll_forward_clamps_at_total_lines_minus_one() {
+    fn test_screen_scroll_forward_clamps_at_total_lines_minus_content_rows() {
         let mut screen = Screen::new(25, 80);
+        // 25 rows = 24 content rows. max_top = 100 - 24 = 76
         let top = screen.scroll_forward(200, 100);
-        assert_eq!(top, 99);
+        assert_eq!(top, 76);
     }
 
     #[test]
@@ -182,8 +190,9 @@ mod tests {
     #[test]
     fn test_screen_goto_line_clamps_to_valid_range() {
         let mut screen = Screen::new(25, 80);
+        // 25 rows = 24 content rows. max_top = 100 - 24 = 76
         let top = screen.goto_line(500, 100);
-        assert_eq!(top, 99);
+        assert_eq!(top, 76);
     }
 
     #[test]
@@ -265,5 +274,46 @@ mod tests {
         screen.scroll_forward(50, 100);
         let top = screen.scroll_forward_unclamped(100);
         assert_eq!(top, 150);
+    }
+
+    // ── Short file / EOF clamping tests ────────────────────────────────
+
+    #[test]
+    fn test_screen_short_file_top_line_stays_zero_after_render() {
+        // 5-line file on a 24-row terminal (23 content rows): top_line stays 0
+        let screen = Screen::new(24, 80);
+        assert_eq!(screen.top_line(), 0);
+    }
+
+    #[test]
+    fn test_screen_empty_file_top_line_stays_zero() {
+        // 0-line file: top_line stays 0
+        let mut screen = Screen::new(24, 80);
+        let top = screen.scroll_forward(10, 0);
+        assert_eq!(top, 0);
+    }
+
+    #[test]
+    fn test_screen_goto_end_short_file_stays_at_zero() {
+        // G on a 5-line file with 23 content rows: top_line = max(0, 5-23) = 0
+        let mut screen = Screen::new(24, 80);
+        let top = screen.goto_line(usize::MAX, 5);
+        assert_eq!(top, 0);
+    }
+
+    #[test]
+    fn test_screen_scroll_forward_short_file_stays_at_zero() {
+        // scroll_forward(1) on a 5-line file already showing all content: stays at 0
+        let mut screen = Screen::new(24, 80);
+        let top = screen.scroll_forward(1, 5);
+        assert_eq!(top, 0);
+    }
+
+    #[test]
+    fn test_screen_single_line_file_top_line_stays_zero() {
+        // 1-line file: top_line stays 0
+        let mut screen = Screen::new(24, 80);
+        let top = screen.scroll_forward(100, 1);
+        assert_eq!(top, 0);
     }
 }
