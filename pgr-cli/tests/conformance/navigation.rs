@@ -180,7 +180,7 @@ fn test_conformance_navigation_bof_k_does_not_move() {
 
 /// Test 18: Single-line file — open a 1-line file, compare.
 #[test]
-#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
+#[ignore]
 fn test_conformance_navigation_single_line_file() {
     skip_if_no_less!();
     let file = generate_file("Only one line here.\n");
@@ -189,7 +189,7 @@ fn test_conformance_navigation_single_line_file() {
 
 /// Test 19: Empty file — open an empty file, compare.
 #[test]
-#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
+#[ignore]
 fn test_conformance_navigation_empty_file() {
     skip_if_no_less!();
     let file = generate_file("");
@@ -198,7 +198,7 @@ fn test_conformance_navigation_empty_file() {
 
 /// Test 20: File shorter than screen — open a 10-line file on 24-row terminal, compare.
 #[test]
-#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
+#[ignore]
 fn test_conformance_navigation_short_file() {
     skip_if_no_less!();
     let file = generate_numbered_file(10);

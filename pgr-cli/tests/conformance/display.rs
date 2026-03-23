@@ -244,7 +244,7 @@ fn test_conformance_display_squeeze_multiple_blanks() {
 ///
 /// A single blank line between content should not be removed by squeeze.
 #[test]
-#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
+#[ignore]
 fn test_conformance_display_squeeze_preserves_single_blanks() {
     skip_if_no_less!();
     // Create a file with only single blank lines between content.
@@ -420,7 +420,7 @@ fn test_conformance_display_line_number_color() {
 /// When the file is shorter than the terminal, empty rows after the last
 /// line of content should show `~` (tilde), matching less behavior.
 #[test]
-#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
+#[ignore]
 fn test_conformance_display_tilde_after_eof() {
     skip_if_no_less!();
     let path = fixture_path("short_5.txt");
@@ -433,7 +433,7 @@ fn test_conformance_display_tilde_after_eof() {
 /// With `--tilde` (or `-~`), empty rows after EOF should be blank instead
 /// of showing `~`.
 #[test]
-#[ignore = "pgr short-file display differs: tildes vs less inline (END) prompt"]
+#[ignore]
 fn test_conformance_display_tilde_suppressed() {
     skip_if_no_less!();
     let path = fixture_path("short_5.txt");

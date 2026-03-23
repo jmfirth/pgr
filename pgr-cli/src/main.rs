@@ -254,6 +254,17 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     if options.quit_at_first_eof {
         pager.set_quit_at_first_eof(true);
     }
+
+    // Wire display-affecting flags to runtime options.
+    let rt = RuntimeOptions {
+        squeeze_blank_lines: options.squeeze_blank_lines,
+        chop_long_lines: options.chop_long_lines,
+        tilde: options.tilde,
+        raw_control_mode: options.raw_mode(),
+        tab_width: options.tab_width,
+        ..RuntimeOptions::default()
+    };
+    pager.set_runtime_options(rt);
 }
 
 fn main() -> anyhow::Result<()> {

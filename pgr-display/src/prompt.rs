@@ -12,10 +12,11 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
 
-/// Short prompt template: shows `(END)` at EOF, otherwise `:`.
+/// Short prompt template: shows filename (if any) then `(END)` at EOF, otherwise `:`.
 ///
-/// Matches the default less short prompt behavior exactly.
-pub const DEFAULT_SHORT_PROMPT: &str = "?e(END):\\:.";
+/// Matches the default less short prompt: filename followed by `(END)` at EOF,
+/// filename followed by `:` when more content is available.
+pub const DEFAULT_SHORT_PROMPT: &str = "?f%f .?e(END):\\:.";
 
 /// Medium prompt template (`-m`): filename and percent, `(END)` at EOF.
 ///
@@ -634,16 +635,16 @@ mod tests {
 
     /// Task 121 test 1: Short prompt renders ":" when not at EOF.
     #[test]
-    fn test_render_prompt_short_not_eof_returns_colon() {
+    fn test_render_prompt_short_not_eof_returns_filename_colon() {
         let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
-        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), ":");
+        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "test.txt :");
     }
 
-    /// Task 121 test 2: Short prompt renders "(END)" at EOF.
+    /// Task 121 test 2: Short prompt renders "filename (END)" at EOF.
     #[test]
-    fn test_render_prompt_short_at_eof_returns_end() {
+    fn test_render_prompt_short_at_eof_returns_filename_end() {
         let ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
-        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "(END)");
+        assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "test.txt (END)");
     }
 
     /// Task 121 test 3: Medium prompt includes filename and percent.
@@ -1182,11 +1183,14 @@ mod tests {
     #[test]
     fn test_default_short_prompt_template_via_eval() {
         let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
-        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &ctx), ":");
+        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &ctx), "test.txt :");
 
         let mut eof_ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
         eof_ctx.at_eof = true;
-        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &eof_ctx), "(END)");
+        assert_eq!(
+            eval_prompt(DEFAULT_SHORT_PROMPT, &eof_ctx),
+            "test.txt (END)"
+        );
     }
 
     /// Default medium prompt template constant works through eval_prompt.
