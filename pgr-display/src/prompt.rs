@@ -75,34 +75,135 @@ pub fn render_prompt(style: &PromptStyle, ctx: &PromptContext<'_>) -> String {
     }
 }
 
-/// Evaluate a prompt template string, expanding all `%` escape sequences.
+/// Evaluate a prompt template string with full support for `%` escapes
+/// and `?x conditional .` expressions.
 ///
-/// This implements the less prompt mini-language. Unknown `%` escapes
-/// are passed through literally (e.g., `%Z` becomes `%Z`).
+/// Conditionals: `?x text .` includes `text` if condition `x` is true,
+/// otherwise the text up to `.` is skipped. Conditionals may nest.
 ///
+/// The `.` delimiter ends the conditional section. If no matching `.`
+/// is found, the conditional extends to the end of the template.
+///
+/// Unknown `%` escapes are passed through literally (e.g., `%Z` becomes `%Z`).
 /// `%%` produces a literal `%`.
-///
-/// Conditional expressions (`?x text .`) are NOT evaluated by this function;
-/// they are handled by `eval_prompt_conditional` (Task 104).
 #[must_use]
 pub fn eval_prompt(template: &str, ctx: &PromptContext<'_>) -> String {
-    let mut result = String::with_capacity(template.len());
-    let mut chars = template.chars();
+    let chars: Vec<char> = template.chars().collect();
+    let mut pos = 0;
+    eval_recursive(&chars, &mut pos, ctx, 0)
+}
 
-    while let Some(ch) = chars.next() {
-        if ch == '%' {
-            if let Some(escape) = chars.next() {
-                expand_escape(escape, ctx, &mut result);
-            } else {
-                // Trailing `%` at end of string: pass through literally
-                result.push('%');
+/// Recursive-descent evaluator for the prompt mini-language.
+///
+/// Processes characters from `pos` onward, handling `%` escapes, `?x...`
+/// conditionals, and literal text. `depth` tracks nesting level so that
+/// `.` is only treated as a conditional terminator inside a conditional body.
+fn eval_recursive(
+    chars: &[char],
+    pos: &mut usize,
+    ctx: &PromptContext<'_>,
+    depth: usize,
+) -> String {
+    let mut result = String::new();
+
+    while *pos < chars.len() {
+        match chars[*pos] {
+            '%' => {
+                *pos += 1;
+                if *pos < chars.len() {
+                    expand_escape(chars[*pos], ctx, &mut result);
+                    *pos += 1;
+                } else {
+                    // Trailing `%` at end of string: pass through literally
+                    result.push('%');
+                }
             }
-        } else {
-            result.push(ch);
+            '?' => {
+                *pos += 1;
+                if *pos < chars.len() {
+                    let flag = chars[*pos];
+                    *pos += 1;
+                    if evaluate_condition(flag, ctx) {
+                        // Condition true: recurse to evaluate the body
+                        result.push_str(&eval_recursive(chars, pos, ctx, depth + 1));
+                    } else {
+                        // Condition false: skip to matching `.`
+                        skip_conditional_body(chars, pos);
+                    }
+                }
+                // Trailing `?` at end of string: silently ignore
+            }
+            '.' if depth > 0 => {
+                // End of conditional section: consume the `.` and return
+                *pos += 1;
+                return result;
+            }
+            ch => {
+                result.push(ch);
+                *pos += 1;
+            }
         }
     }
 
     result
+}
+
+/// Evaluate a condition flag against the current prompt context.
+///
+/// Returns `true` if the condition is met, `false` otherwise.
+/// Unknown flags always evaluate to `false`.
+fn evaluate_condition(flag: char, ctx: &PromptContext<'_>) -> bool {
+    match flag {
+        'a' | 's' => ctx.search_active,
+        'b' => ctx.top_line == 1,
+        'e' => ctx.at_eof,
+        'f' => !ctx.is_pipe,
+        'l' => ctx.file_count > 1,
+        'm' => ctx.marks_set,
+        'n' => ctx.line_numbers_enabled,
+        'p' => ctx.is_pipe,
+        'B' => true, // Byte offset is always known
+        'L' => ctx.total_lines.is_some(),
+        'S' => !ctx.is_pipe || ctx.pipe_size.is_some(),
+        _ => false,
+    }
+}
+
+/// Skip past a conditional body when its condition is false.
+///
+/// Advances `pos` past the matching `.`, respecting nested `?`/`.` pairs.
+/// If no matching `.` is found, advances to the end of the input.
+fn skip_conditional_body(chars: &[char], pos: &mut usize) {
+    let mut nesting: usize = 1;
+    while *pos < chars.len() {
+        match chars[*pos] {
+            '?' => {
+                *pos += 1;
+                // Skip the flag character after `?`
+                if *pos < chars.len() {
+                    *pos += 1;
+                }
+                nesting += 1;
+            }
+            '.' => {
+                *pos += 1;
+                nesting -= 1;
+                if nesting == 0 {
+                    return;
+                }
+            }
+            '%' => {
+                // Skip the escape character after `%`
+                *pos += 1;
+                if *pos < chars.len() {
+                    *pos += 1;
+                }
+            }
+            _ => {
+                *pos += 1;
+            }
+        }
+    }
 }
 
 /// Expand a single `%` escape character into the result buffer.
@@ -156,8 +257,7 @@ fn expand_escape(escape: char, ctx: &PromptContext<'_>, out: &mut String) {
             None => out.push('?'),
         },
         'm' => {
-            let pct = compute_line_percent(ctx);
-            let _ = write!(out, "{pct}");
+            let _ = write!(out, "{}", ctx.file_count);
         }
         'M' => {
             if ctx.top_line == 1 && !ctx.at_eof {
@@ -579,9 +679,10 @@ mod tests {
 
     /// Spec ref: SPECIFICATION.md 5.9
     #[test]
-    fn test_eval_prompt_percent_m_shows_percent() {
-        let ctx = eval_ctx(Some("test.txt"), 1, 50, Some(100), 0, 5000);
-        assert_eq!(eval_prompt("%m", &ctx), "50");
+    fn test_eval_prompt_percent_m_shows_file_count() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 50, Some(100), 0, 5000);
+        ctx.file_count = 3;
+        assert_eq!(eval_prompt("%m", &ctx), "3");
     }
 
     /// Spec ref: SPECIFICATION.md 5.9
@@ -689,5 +790,132 @@ mod tests {
         let ctx = eval_ctx(Some("data.txt"), 10, 50, Some(200), 1000, 4000);
         let style = PromptStyle::Custom(String::from("File: %f Line: %l"));
         assert_eq!(render_prompt(&style, &ctx), "File: data.txt Line: 10");
+    }
+
+    // ===== Task 104: conditional expression tests =====
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_simple_conditional_true_includes_text() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.at_eof = true;
+        assert_eq!(eval_prompt("?e (END) .", &ctx), " (END) ");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_simple_conditional_false_excludes_text() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?e (END) .", &ctx), "");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_conditional_with_percent_escape() {
+        let ctx = eval_ctx(Some("readme.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?f %f .", &ctx), " readme.txt ");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_nested_conditional_both_true() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.at_eof = true;
+        assert_eq!(
+            eval_prompt("?f outer ?e inner . rest .", &ctx),
+            " outer  inner  rest "
+        );
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_nested_conditional_outer_false_skips_all() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        // `?p` is false because is_pipe is false
+        assert_eq!(eval_prompt("?p pipe ?e eof . stuff .", &ctx), "");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_nested_conditional_inner_false_shows_outer() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        // `?f` is true (not pipe), `?p` is false (not pipe)
+        assert_eq!(
+            eval_prompt("?f file ?p pipe . rest .", &ctx),
+            " file  rest "
+        );
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_condition_b_at_beginning() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?b TOP .", &ctx), " TOP ");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_condition_b_not_at_beginning() {
+        let ctx = eval_ctx(Some("test.txt"), 5, 28, Some(100), 500, 5000);
+        assert_eq!(eval_prompt("?b TOP .", &ctx), "");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_condition_l_multiple_files() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.file_index = 1;
+        ctx.file_count = 3;
+        assert_eq!(eval_prompt("?l (%i of %m) .", &ctx), " (2 of 3) ");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_condition_n_line_numbers() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.line_numbers_enabled = true;
+        assert_eq!(eval_prompt("?n lines on .", &ctx), " lines on ");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_unknown_condition_evaluates_false() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?Z text .", &ctx), "");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_unclosed_conditional_extends_to_end() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.at_eof = true;
+        assert_eq!(eval_prompt("?e hello", &ctx), " hello");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_dot_outside_conditional_is_literal() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("hello.world", &ctx), "hello.world");
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_mixed_escapes_and_conditionals() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.at_eof = true;
+        // %f expands to "test.txt", ?e is true so " (END)" included, ?b is true (top_line==1) so " (TOP)" included
+        assert_eq!(
+            eval_prompt("%f?e (END).?b (TOP).", &ctx),
+            "test.txt (END) (TOP)"
+        );
+    }
+
+    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    #[test]
+    fn test_eval_prompt_empty_conditional_body() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.at_eof = true;
+        assert_eq!(eval_prompt("?e.", &ctx), "");
     }
 }
