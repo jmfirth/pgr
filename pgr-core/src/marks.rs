@@ -77,6 +77,12 @@ impl MarkStore {
         entries
     }
 
+    /// Returns `true` if any marks are currently set.
+    #[must_use]
+    pub fn has_any(&self) -> bool {
+        !self.marks.is_empty()
+    }
+
     /// Returns `true` if the character is a valid mark name.
     ///
     /// Valid marks: `a`-`z`, `A`-`Z`, `^`, `$`, `'`.
@@ -279,5 +285,26 @@ mod tests {
         assert!(!MarkStore::is_valid_mark(' '));
         assert!(!MarkStore::is_valid_mark('!'));
         assert!(!MarkStore::is_valid_mark('\n'));
+    }
+
+    #[test]
+    fn test_mark_store_has_any_empty_returns_false() {
+        let store = MarkStore::new();
+        assert!(!store.has_any());
+    }
+
+    #[test]
+    fn test_mark_store_has_any_with_mark_returns_true() {
+        let mut store = MarkStore::new();
+        store
+            .set(
+                'a',
+                Mark {
+                    line: 0,
+                    horizontal_offset: 0,
+                },
+            )
+            .unwrap();
+        assert!(store.has_any());
     }
 }

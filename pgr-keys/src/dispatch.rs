@@ -8,8 +8,9 @@ use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    paint_prompt, paint_screen, render_prompt, OverstrikeMode, PromptContext, PromptStyle,
-    RawControlMode, RenderConfig, Screen, TabStops,
+    eval_prompt, paint_prompt, paint_screen, OverstrikeMode, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT,
+    DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{CaseMode, HighlightState, SearchDirection, SearchPattern, Searcher, WrapMode};
 
@@ -115,6 +116,8 @@ pub struct Pager<R: Read, W: Write> {
     file_list: Option<FileList>,
     /// Runtime-mutable options (toggled with `-` prefix at the prompt).
     runtime_options: RuntimeOptions,
+    /// Transient status message that overrides the prompt for one repaint.
+    status_message: Option<String>,
     /// `-e`: quit on second attempt to scroll past EOF.
     quit_at_eof: bool,
     /// `-E`: quit on first scroll past EOF.
@@ -133,8 +136,6 @@ pub struct Pager<R: Read, W: Write> {
     editor: String,
     /// The previously viewed file, for `#` expansion in `:e`.
     previous_file: Option<String>,
-    /// Status message to display on the prompt line (cleared on next repaint).
-    status_message: Option<String>,
     /// The last search pattern, used for n/N repeat.
     last_pattern: Option<SearchPattern>,
     /// The direction of the last search.
@@ -181,6 +182,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             custom_window_size: None,
             file_list: None,
             runtime_options: RuntimeOptions::default(),
+            status_message: None,
             quit_at_eof: false,
             quit_at_first_eof: false,
             eof_seen_count: 0,
@@ -190,7 +192,6 @@ impl<R: Read, W: Write> Pager<R, W> {
             shell: String::from("sh"),
             editor: String::from("vi"),
             previous_file: None,
-            status_message: None,
             last_pattern: None,
             last_direction: SearchDirection::Forward,
             highlight_state: HighlightState::new(),
@@ -1386,38 +1387,67 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Render and paint the status prompt on the last row.
     ///
-    /// If a transient status message is set, displays it in reverse video
-    /// instead of the normal prompt.
+    /// If a transient status message is set, it is displayed in reverse video
+    /// instead of the normal prompt and then cleared. Otherwise the prompt
+    /// template is evaluated from the current pager state.
     fn paint_status_prompt(&mut self, total_lines: usize) -> Result<()> {
         let (rows, cols) = self.screen.dimensions();
         if rows == 0 {
             return Ok(());
         }
 
-        // If there's a status message, show it instead of the normal prompt.
-        if let Some(ref msg) = self.status_message {
-            paint_prompt(&mut self.writer, msg, rows, cols, None)?;
-            return Ok(());
-        }
+        // Take the status message first to avoid borrow conflicts with
+        // building the prompt context.
+        let status_msg = self.status_message.take();
 
-        let at_eof = if total_lines == 0 {
-            true
+        let text = if let Some(msg) = status_msg {
+            msg
         } else {
-            let (_, end) = self.screen.visible_range();
-            end >= total_lines
+            let at_eof = if total_lines == 0 {
+                true
+            } else {
+                let (_, end) = self.screen.visible_range();
+                end >= total_lines
+            };
+
+            let (start, end) = self.screen.visible_range();
+            let bottom_display = end.min(total_lines);
+
+            let ctx = self.build_prompt_context(total_lines, at_eof, start, bottom_display);
+
+            let template = match self.runtime_options.prompt_string {
+                Some(ref custom) => custom.as_str(),
+                None => match self.prompt_style {
+                    PromptStyle::Short => DEFAULT_SHORT_PROMPT,
+                    PromptStyle::Medium => DEFAULT_MEDIUM_PROMPT,
+                    PromptStyle::Long => DEFAULT_LONG_PROMPT,
+                    PromptStyle::Custom(ref t) => t.as_str(),
+                },
+            };
+            eval_prompt(template, &ctx)
         };
 
-        let (start, end) = self.screen.visible_range();
-        let bottom_display = end.min(total_lines);
+        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
 
+        Ok(())
+    }
+
+    /// Build a `PromptContext` from the current pager state.
+    fn build_prompt_context(
+        &self,
+        total_lines: usize,
+        at_eof: bool,
+        top_line_0: usize,
+        bottom_display: usize,
+    ) -> PromptContext<'_> {
         let (file_index, file_count) = self
             .file_list
             .as_ref()
             .map_or((0, 1), |fl| (fl.current_index(), fl.file_count()));
 
-        let ctx = PromptContext {
+        PromptContext {
             filename: self.filename.as_deref(),
-            top_line: start.saturating_add(1),
+            top_line: top_line_0.saturating_add(1),
             bottom_line: bottom_display,
             total_lines: Some(total_lines),
             total_bytes: self.buffer.len() as u64,
@@ -1426,19 +1456,25 @@ impl<R: Read, W: Write> Pager<R, W> {
             file_count,
             at_eof,
             is_pipe: false,
-            column: 1,
+            column: self.screen.horizontal_offset().saturating_add(1),
             page_number: None,
             input_line: None,
             pipe_size: None,
             search_active: self.last_pattern.is_some(),
-            line_numbers_enabled: false,
-            marks_set: false,
-        };
+            search_pattern: None,
+            line_numbers_enabled: self.runtime_options.line_numbers,
+            marks_set: self.marks.has_any(),
+            filter_active: false,
+            filter_pattern: None,
+            input_complete: !self.buffer.is_growable(),
+        }
+    }
 
-        let text = render_prompt(&self.prompt_style, &ctx);
-        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
-
-        Ok(())
+    /// Set a transient status message that overrides the prompt for one repaint.
+    ///
+    /// The message is displayed on the next repaint and then cleared.
+    pub fn set_status_message(&mut self, msg: String) {
+        self.status_message = Some(msg);
     }
 
     /// Set the raw control mode for rendering.
@@ -2926,7 +2962,7 @@ mod tests {
         assert_eq!(pager.screen().top_line(), 2);
     }
 
-    // Test 9: Search with no match sets "Pattern not found" status message.
+    // Test 9: Search with no match renders "Pattern not found" on the status line.
     #[test]
     fn test_dispatch_search_no_match_sets_pattern_not_found_message() {
         let content = make_search_content(&["alpha", "beta", "gamma"]);
@@ -2934,10 +2970,14 @@ mod tests {
         keys.push(b'/');
         keys.extend_from_slice(b"nonexistent");
         keys.push(b'\n');
-        // Don't press another key so the status message is preserved.
-        // Input exhaustion ends the loop.
+        // Input exhaustion ends the loop. The transient message is consumed
+        // during repaint, so we check the writer output instead.
         let pager = run_pager(&keys, &content);
-        assert_eq!(pager.status_message(), Some("Pattern not found"));
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Pattern not found"),
+            "Expected 'Pattern not found' in output: {output}"
+        );
     }
 
     // Test 10: `n` repeats last forward search.
@@ -2968,14 +3008,20 @@ mod tests {
         assert_eq!(pager.screen().top_line(), 0);
     }
 
-    // Test 12: `n` with no previous pattern shows "No previous search pattern".
+    // Test 12: `n` with no previous pattern renders "No previous search pattern".
     #[test]
     fn test_dispatch_n_no_previous_pattern_shows_message() {
         let content = make_search_content(&["alpha", "beta"]);
         let mut keys: Vec<u8> = Vec::new();
         keys.push(b'n');
+        // The transient message is consumed during repaint, so we check
+        // the writer output instead of the field.
         let pager = run_pager(&keys, &content);
-        assert_eq!(pager.status_message(), Some("No previous search pattern"));
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("No previous search pattern"),
+            "Expected 'No previous search pattern' in output: {output}"
+        );
     }
 
     // Test 13: Numeric prefix: `3n` finds the 3rd match.
@@ -3010,7 +3056,7 @@ mod tests {
         assert_eq!(pager.last_pattern().unwrap().pattern(), "target");
     }
 
-    // Test 15: Invalid regex displays "Invalid pattern" message.
+    // Test 15: Invalid regex renders "Invalid pattern" on the status line.
     #[test]
     fn test_dispatch_invalid_regex_displays_invalid_pattern_message() {
         let content = make_search_content(&["alpha", "beta"]);
@@ -3018,8 +3064,14 @@ mod tests {
         keys.push(b'/');
         keys.extend_from_slice(b"(unclosed");
         keys.push(b'\n');
+        // The transient message is consumed during repaint, so we check
+        // the writer output instead of the field.
         let pager = run_pager(&keys, &content);
-        assert_eq!(pager.status_message(), Some("Invalid pattern"));
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Invalid pattern"),
+            "Expected 'Invalid pattern' in output: {output}"
+        );
     }
 
     // Test 16: ToggleHighlight toggles the highlight state.
@@ -3097,5 +3149,54 @@ mod tests {
         let pager = run_pager(&keys, &content);
         // Should wrap and find "target" at line 0.
         assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // ── Task 121: integrated prompt rendering ───────────────────────
+
+    /// Task 121 test 11: Transient status messages override the prompt.
+    #[test]
+    fn test_status_message_overrides_prompt_temporarily() {
+        let content = make_test_content(50);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("test.txt".into()));
+        pager.set_status_message("Pattern not found".into());
+        let _ = pager.run();
+
+        // After run, the writer output should contain the transient message
+        // rendered on the status line (in reverse video).
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Pattern not found"),
+            "Status message should appear in output: {output}"
+        );
+    }
+
+    /// Task 121 test 5: Custom -P prompt template renders correctly
+    /// through the pager's rendering pipeline.
+    #[test]
+    fn test_custom_prompt_string_renders_via_runtime_options() {
+        let content = make_test_content(50);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("myfile.txt".into()));
+        let mut opts = RuntimeOptions::default();
+        opts.prompt_string = Some(String::from("Viewing: %f"));
+        pager.set_runtime_options(opts);
+        let _ = pager.run();
+
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Viewing: myfile.txt"),
+            "Custom prompt template should appear in output: {output}"
+        );
     }
 }

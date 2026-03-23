@@ -3,10 +3,32 @@
 //! Renders the three default prompt styles (short, medium, long) matching
 //! the behavior of GNU less, plus a `%` escape mini-language for custom
 //! prompt templates via the `-P` flag.
+//!
+//! Default prompts are expressed as mini-language templates rather than
+//! hardcoded logic, so `eval_prompt` is the single rendering path for all
+//! prompt styles including custom `-P` strings.
 
 use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
+
+/// Short prompt template: shows `(END)` at EOF, otherwise `:`.
+///
+/// Matches the default less short prompt behavior exactly.
+pub const DEFAULT_SHORT_PROMPT: &str = "?e(END):\\:.";
+
+/// Medium prompt template (`-m`): filename and percent, `(END)` at EOF.
+///
+/// Derived from less's default medium prompt, simplified for Phase 1.
+pub const DEFAULT_MEDIUM_PROMPT: &str = "?f%f .?e(END) :?pB%pB\\%..";
+
+/// Long prompt template (`-M`): filename, line numbers, byte offset, percent.
+///
+/// Derived from less's default long prompt, simplified for Phase 1.
+/// Each section is wrapped in a conditional so dots act as terminators
+/// rather than literals.
+pub const DEFAULT_LONG_PROMPT: &str =
+    "?f%f .?ltlines %lt-%lb?L/%L. .?bbyte %bB?s/%s. .?e(END) :?pB%pB\\%..";
 
 /// Prompt style, matching less's `-m` / `-M` flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,26 +75,39 @@ pub struct PromptContext<'a> {
     pub input_line: Option<usize>,
     /// Size of the pipe in bytes (if known), for `%s`/`%S`.
     pub pipe_size: Option<u64>,
-    /// Whether a search pattern is active, for condition `?s`.
+    /// Whether a search pattern is active, for condition `?a`.
     pub search_active: bool,
-    /// Whether line numbers are enabled, for condition `?n`.
+    /// The current search pattern string (for future `%S` escape).
+    pub search_pattern: Option<&'a str>,
+    /// Whether line numbers are enabled.
     pub line_numbers_enabled: bool,
-    /// Whether any marks are set, for condition `?m`.
+    /// Whether any marks are set.
     pub marks_set: bool,
+    /// Whether a filter is active, for condition `?u` (unfiltered input available).
+    pub filter_active: bool,
+    /// The current filter pattern string.
+    pub filter_pattern: Option<&'a str>,
+    /// Whether the input has been fully read (for pipe/stdin `?x` conditional).
+    pub input_complete: bool,
 }
 
 /// Render the prompt string for the given style and context.
+///
+/// All prompt styles—including the three defaults—are rendered through
+/// [`eval_prompt`] using template strings, so there is a single rendering
+/// path for built-in and custom (`-P`) prompts.
 ///
 /// Returns the text content of the prompt without any terminal formatting.
 /// Use [`paint_prompt`] to write it to the terminal with reverse video.
 #[must_use]
 pub fn render_prompt(style: &PromptStyle, ctx: &PromptContext<'_>) -> String {
-    match style {
-        PromptStyle::Short => render_short(ctx),
-        PromptStyle::Medium => render_medium(ctx),
-        PromptStyle::Long => render_long(ctx),
-        PromptStyle::Custom(template) => eval_prompt(template, ctx),
-    }
+    let template = match style {
+        PromptStyle::Short => DEFAULT_SHORT_PROMPT,
+        PromptStyle::Medium => DEFAULT_MEDIUM_PROMPT,
+        PromptStyle::Long => DEFAULT_LONG_PROMPT,
+        PromptStyle::Custom(t) => t.as_str(),
+    };
+    eval_prompt(template, ctx)
 }
 
 /// Evaluate a prompt template string with full support for `%` escapes
@@ -96,8 +131,9 @@ pub fn eval_prompt(template: &str, ctx: &PromptContext<'_>) -> String {
 /// Recursive-descent evaluator for the prompt mini-language.
 ///
 /// Processes characters from `pos` onward, handling `%` escapes, `?x...`
-/// conditionals, and literal text. `depth` tracks nesting level so that
-/// `.` is only treated as a conditional terminator inside a conditional body.
+/// conditionals (with optional `:` else branches), and literal text.
+/// `depth` tracks nesting level so that `.` and `:` are only treated as
+/// structural delimiters inside a conditional body.
 fn eval_recursive(
     chars: &[char],
     pos: &mut usize,
@@ -111,27 +147,50 @@ fn eval_recursive(
             '%' => {
                 *pos += 1;
                 if *pos < chars.len() {
-                    expand_escape(chars[*pos], ctx, &mut result);
-                    *pos += 1;
+                    expand_escape(chars, pos, ctx, &mut result);
                 } else {
                     // Trailing `%` at end of string: pass through literally
                     result.push('%');
                 }
             }
+            '\\' => {
+                // Backslash escaping: \% → literal %, \. → literal ., etc.
+                *pos += 1;
+                if *pos < chars.len() {
+                    result.push(chars[*pos]);
+                    *pos += 1;
+                }
+            }
             '?' => {
                 *pos += 1;
                 if *pos < chars.len() {
-                    let flag = chars[*pos];
-                    *pos += 1;
-                    if evaluate_condition(flag, ctx) {
-                        // Condition true: recurse to evaluate the body
-                        result.push_str(&eval_recursive(chars, pos, ctx, depth + 1));
+                    if evaluate_condition(chars, pos, ctx) {
+                        // Condition true: recurse to evaluate the true branch.
+                        let text = eval_recursive(chars, pos, ctx, depth + 1);
+                        result.push_str(&text);
                     } else {
-                        // Condition false: skip to matching `.`
-                        skip_conditional_body(chars, pos);
+                        // Condition false: skip the true branch. If a `:`
+                        // else separator is found, evaluate the else branch;
+                        // otherwise the `.` terminator was consumed and we're
+                        // done with this conditional.
+                        let found_else = skip_to_colon_or_dot(chars, pos);
+                        if found_else {
+                            // Evaluate the else branch at depth+1 so the
+                            // closing `.` terminates it.
+                            let text = eval_recursive(chars, pos, ctx, depth + 1);
+                            result.push_str(&text);
+                        }
                     }
                 }
                 // Trailing `?` at end of string: silently ignore
+            }
+            ':' if depth > 0 => {
+                // Else separator within a conditional. When the true branch
+                // was evaluated and we hit `:`, skip the false branch and
+                // consume the closing `.`.
+                *pos += 1;
+                skip_to_dot(chars, pos);
+                return result;
             }
             '.' if depth > 0 => {
                 // End of conditional section: consume the `.` and return
@@ -150,36 +209,121 @@ fn eval_recursive(
 
 /// Evaluate a condition flag against the current prompt context.
 ///
-/// Returns `true` if the condition is met, `false` otherwise.
-/// Unknown flags always evaluate to `false`.
-fn evaluate_condition(flag: char, ctx: &PromptContext<'_>) -> bool {
+/// Reads the flag character at `chars[*pos]` and advances `pos` past it
+/// (and past any modifier characters, e.g. `B` after `p`). Returns `true`
+/// if the condition is met, `false` otherwise. Unknown flags always
+/// evaluate to `false`.
+///
+/// The conditional flags mirror GNU less:
+///
+/// | Flag | True when |
+/// |------|-----------|
+/// | `a` | Search pattern is active |
+/// | `b` | Byte offset is known (always true) |
+/// | `e` | At end of file |
+/// | `f` | A filename is known (not a pipe) |
+/// | `l` | Line number known (bottom_line > 0) |
+/// | `L` | Total line count is known |
+/// | `m` | More than one file open |
+/// | `n` | Not the only file (same as `m`) |
+/// | `pB` | Percent by byte is known (total_bytes > 0) |
+/// | `s`/`S` | File size is known |
+/// | `t` | Tab stops set (always true for now) |
+/// | `u` | Filter (un-filter) is active |
+/// | `x` | First file in the file list |
+/// | `B` | Total bytes known (always true) |
+fn evaluate_condition(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>) -> bool {
+    let flag = chars[*pos];
+    *pos += 1;
+
     match flag {
-        'a' | 's' => ctx.search_active,
-        'b' => ctx.top_line == 1,
+        'a' => ctx.search_active,
+        'b' | 'B' | 't' => true, // Byte offset / total bytes / tab stops always known
         'e' => ctx.at_eof,
         'f' => !ctx.is_pipe,
-        'l' => ctx.file_count > 1,
-        'm' => ctx.marks_set,
-        'n' => ctx.line_numbers_enabled,
-        'p' => ctx.is_pipe,
-        'B' => true, // Byte offset is always known
+        'l' => {
+            // Consume optional modifier: `t` (top line) or `b` (bottom line)
+            if *pos < chars.len() && (chars[*pos] == 't' || chars[*pos] == 'b') {
+                *pos += 1;
+            }
+            ctx.bottom_line > 0 // Line numbers are known when we have lines
+        }
         'L' => ctx.total_lines.is_some(),
-        'S' => !ctx.is_pipe || ctx.pipe_size.is_some(),
+        'm' | 'n' => ctx.file_count > 1,
+        'p' | 'P' => {
+            // Consume optional `B` modifier (byte-based percent)
+            if *pos < chars.len() && chars[*pos] == 'B' {
+                *pos += 1;
+            }
+            ctx.total_bytes > 0
+        }
+        's' | 'S' => !ctx.is_pipe || ctx.pipe_size.is_some(),
+        'u' => ctx.filter_active,
+        'x' => ctx.file_index == 0,
         _ => false,
     }
 }
 
-/// Skip past a conditional body when its condition is false.
+/// Skip past a conditional's true branch to either a `:` (else) or `.` (end).
 ///
-/// Advances `pos` past the matching `.`, respecting nested `?`/`.` pairs.
-/// If no matching `.` is found, advances to the end of the input.
-fn skip_conditional_body(chars: &[char], pos: &mut usize) {
+/// When the condition was false, we need to skip the true branch. If we
+/// find a `:` at the current nesting level, we stop there and return
+/// `true` so the caller can evaluate the else branch. If we find a `.`
+/// first, the entire conditional is over (no else branch) and we return
+/// `false`.
+///
+/// Respects nested `?`/`.` pairs so that inner conditionals' `:` and `.`
+/// delimiters are not confused with the outer one.
+fn skip_to_colon_or_dot(chars: &[char], pos: &mut usize) -> bool {
     let mut nesting: usize = 1;
     while *pos < chars.len() {
         match chars[*pos] {
             '?' => {
                 *pos += 1;
                 // Skip the flag character after `?`
+                if *pos < chars.len() {
+                    *pos += 1;
+                }
+                nesting += 1;
+            }
+            ':' if nesting == 1 => {
+                // Found the else separator at our level. Consume it and
+                // let the caller evaluate the else branch.
+                *pos += 1;
+                return true;
+            }
+            '.' => {
+                *pos += 1;
+                nesting -= 1;
+                if nesting == 0 {
+                    return false;
+                }
+            }
+            '%' | '\\' => {
+                // Skip the character after `%` or `\`
+                *pos += 1;
+                if *pos < chars.len() {
+                    *pos += 1;
+                }
+            }
+            _ => {
+                *pos += 1;
+            }
+        }
+    }
+    false
+}
+
+/// Skip to the closing `.` at the current nesting level.
+///
+/// Used to discard the false branch of a conditional after the true branch
+/// was evaluated and the `:` separator was encountered.
+fn skip_to_dot(chars: &[char], pos: &mut usize) {
+    let mut nesting: usize = 1;
+    while *pos < chars.len() {
+        match chars[*pos] {
+            '?' => {
+                *pos += 1;
                 if *pos < chars.len() {
                     *pos += 1;
                 }
@@ -192,8 +336,7 @@ fn skip_conditional_body(chars: &[char], pos: &mut usize) {
                     return;
                 }
             }
-            '%' => {
-                // Skip the escape character after `%`
+            '%' | '\\' => {
                 *pos += 1;
                 if *pos < chars.len() {
                     *pos += 1;
@@ -206,12 +349,25 @@ fn skip_conditional_body(chars: &[char], pos: &mut usize) {
     }
 }
 
-/// Expand a single `%` escape character into the result buffer.
-fn expand_escape(escape: char, ctx: &PromptContext<'_>, out: &mut String) {
+/// Expand a `%` escape starting at `chars[*pos]` into the result buffer.
+///
+/// Advances `*pos` past all characters consumed by the escape. Handles
+/// both single-character escapes (`%f`, `%B`) and the multi-character
+/// `%l` family (`%lt` = top line, `%lb` = bottom line).
+#[allow(clippy::too_many_lines)] // Escape dispatch table is inherently large
+fn expand_escape(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>, out: &mut String) {
+    let escape = chars[*pos];
+    *pos += 1;
+
     match escape {
         '%' => out.push('%'),
-        // %b and %o both expand to byte offset of the top of screen
+        // %b and %o both expand to byte offset of the top of screen.
+        // An optional `B` modifier is consumed for compatibility with the
+        // default long prompt template (`%bB`).
         'b' | 'o' => {
+            if *pos < chars.len() && chars[*pos] == 'B' {
+                *pos += 1;
+            }
             let _ = write!(out, "{}", ctx.byte_offset);
         }
         'B' => {
@@ -248,7 +404,17 @@ fn expand_escape(escape: char, ctx: &PromptContext<'_>, out: &mut String) {
             let _ = write!(out, "{}", ctx.file_index + 1);
         }
         'l' => {
-            let _ = write!(out, "{}", ctx.top_line);
+            // Multi-character escape: %lt = top line, %lb = bottom line.
+            // Plain %l (no modifier) defaults to top line.
+            if *pos < chars.len() && chars[*pos] == 't' {
+                *pos += 1;
+                let _ = write!(out, "{}", ctx.top_line);
+            } else if *pos < chars.len() && chars[*pos] == 'b' {
+                *pos += 1;
+                let _ = write!(out, "{}", ctx.bottom_line);
+            } else {
+                let _ = write!(out, "{}", ctx.top_line);
+            }
         }
         'L' => match ctx.total_lines {
             Some(n) => {
@@ -269,9 +435,14 @@ fn expand_escape(escape: char, ctx: &PromptContext<'_>, out: &mut String) {
                 let _ = write!(out, "{pct}%");
             }
         }
-        // %p and %P both use byte-based percent (we approximate %P with the same
-        // byte_offset since a separate bottom-byte-offset field is not yet available)
+        // %p and %P compute percent through file. An optional modifier `B`
+        // explicitly selects byte-based percent (the only mode currently
+        // supported), so `%pB` and `%p` produce the same result.
         'p' | 'P' => {
+            // Consume optional `B` modifier
+            if *pos < chars.len() && chars[*pos] == 'B' {
+                *pos += 1;
+            }
             let pct = compute_byte_percent(ctx);
             let _ = write!(out, "{pct}");
         }
@@ -337,68 +508,6 @@ pub fn paint_prompt<W: Write>(
     writer.flush()
 }
 
-fn render_short(ctx: &PromptContext<'_>) -> String {
-    if ctx.at_eof {
-        String::from("(END)")
-    } else {
-        String::from(":")
-    }
-}
-
-fn render_medium(ctx: &PromptContext<'_>) -> String {
-    if ctx.at_eof {
-        return String::from("(END)");
-    }
-
-    if ctx.is_pipe {
-        let mut s = String::new();
-        // Write cannot fail on String
-        let _ = write!(s, "byte {}", ctx.byte_offset);
-        return s;
-    }
-
-    let name = ctx.filename.unwrap_or("(standard input)");
-    let percent = compute_byte_percent(ctx);
-    let mut s = String::new();
-    let _ = write!(s, "{name} {percent}%");
-    s
-}
-
-fn render_long(ctx: &PromptContext<'_>) -> String {
-    if ctx.at_eof {
-        return if ctx.is_pipe {
-            String::from("(END)")
-        } else {
-            let name = ctx.filename.unwrap_or("(standard input)");
-            let mut s = String::new();
-            let _ = write!(s, "(END) - {name}");
-            s
-        };
-    }
-
-    if ctx.is_pipe {
-        let mut s = String::new();
-        let _ = write!(s, "byte {}", ctx.byte_offset);
-        return s;
-    }
-
-    let name = ctx.filename.unwrap_or("(standard input)");
-    let percent = compute_byte_percent(ctx);
-
-    let lines_part = match ctx.total_lines {
-        Some(total) => format!("lines {}-{}/{total}", ctx.top_line, ctx.bottom_line),
-        None => format!("lines {}-{}", ctx.top_line, ctx.bottom_line),
-    };
-
-    let mut s = String::new();
-    let _ = write!(
-        s,
-        "{name} {lines_part} byte {}/{} {percent}%",
-        ctx.byte_offset, ctx.total_bytes
-    );
-    s
-}
-
 /// Compute the percentage through the file based on byte offset.
 fn compute_byte_percent(ctx: &PromptContext<'_>) -> u64 {
     if ctx.total_bytes == 0 {
@@ -451,8 +560,12 @@ mod tests {
             input_line: None,
             pipe_size: None,
             search_active: false,
+            search_pattern: None,
             line_numbers_enabled: false,
             marks_set: false,
+            filter_active: false,
+            filter_pattern: None,
+            input_complete: true,
         }
     }
 
@@ -474,8 +587,12 @@ mod tests {
             input_line: None,
             pipe_size: None,
             search_active: false,
+            search_pattern: None,
             line_numbers_enabled: false,
             marks_set: false,
+            filter_active: false,
+            filter_pattern: None,
+            input_complete: true,
         }
     }
 
@@ -504,43 +621,53 @@ mod tests {
             input_line: None,
             pipe_size: None,
             search_active: false,
+            search_pattern: None,
             line_numbers_enabled: false,
             marks_set: false,
+            filter_active: false,
+            filter_pattern: None,
+            input_complete: true,
         }
     }
 
-    // ===== Existing render_prompt tests =====
+    // ===== render_prompt tests (template-based) =====
 
+    /// Task 121 test 1: Short prompt renders ":" when not at EOF.
     #[test]
     fn test_render_prompt_short_not_eof_returns_colon() {
         let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
         assert_eq!(render_prompt(&PromptStyle::Short, &ctx), ":");
     }
 
+    /// Task 121 test 2: Short prompt renders "(END)" at EOF.
     #[test]
     fn test_render_prompt_short_at_eof_returns_end() {
         let ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
         assert_eq!(render_prompt(&PromptStyle::Short, &ctx), "(END)");
     }
 
+    /// Task 121 test 3: Medium prompt includes filename and percent.
     #[test]
     fn test_render_prompt_medium_file_shows_name_and_percent() {
         let ctx = file_ctx("filename", false, 1, 24, Some(100), 2100, 5000);
         assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "filename 42%");
     }
 
+    /// Medium prompt for pipe shows percent (not byte offset).
     #[test]
-    fn test_render_prompt_medium_pipe_shows_byte_offset() {
+    fn test_render_prompt_medium_pipe_shows_percent() {
         let ctx = pipe_ctx(false, 1234, 5000);
-        assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "byte 1234");
+        assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "24%");
     }
 
+    /// Medium prompt at EOF shows filename and (END).
     #[test]
     fn test_render_prompt_medium_at_eof_returns_end() {
         let ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
-        assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "(END)");
+        assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "test.txt (END) ");
     }
 
+    /// Task 121 test 4: Long prompt includes filename, lines, bytes, percent.
     #[test]
     fn test_render_prompt_long_file_known_total_shows_full_format() {
         let ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
@@ -550,6 +677,7 @@ mod tests {
         );
     }
 
+    /// Long prompt with unknown total omits the total line count.
     #[test]
     fn test_render_prompt_long_file_unknown_total_omits_total() {
         let ctx = file_ctx("data.log", false, 10, 33, None, 1500, 10000);
@@ -559,18 +687,23 @@ mod tests {
         );
     }
 
+    /// Long prompt for pipe shows lines and percent.
     #[test]
-    fn test_render_prompt_long_pipe_shows_byte_offset() {
+    fn test_render_prompt_long_pipe_shows_lines_and_percent() {
         let ctx = pipe_ctx(false, 4096, 8192);
-        assert_eq!(render_prompt(&PromptStyle::Long, &ctx), "byte 4096");
+        assert_eq!(
+            render_prompt(&PromptStyle::Long, &ctx),
+            "lines 1-24 byte 4096 50%"
+        );
     }
 
+    /// Long prompt at EOF shows all info plus (END).
     #[test]
     fn test_render_prompt_long_at_eof_shows_end_with_filename() {
         let ctx = file_ctx("readme.txt", true, 90, 100, Some(100), 5000, 5000);
         assert_eq!(
             render_prompt(&PromptStyle::Long, &ctx),
-            "(END) - readme.txt"
+            "readme.txt lines 90-100/100 byte 5000/5000 (END) "
         );
     }
 
@@ -596,6 +729,7 @@ mod tests {
         );
     }
 
+    /// Long prompt for pipe at EOF shows lines and (END).
     #[test]
     fn test_paint_prompt_with_custom_sgr_uses_provided_color() {
         let mut buf: Vec<u8> = Vec::new();
@@ -625,13 +759,17 @@ mod tests {
     #[test]
     fn test_render_prompt_long_pipe_at_eof_returns_end() {
         let ctx = pipe_ctx(true, 8192, 8192);
-        assert_eq!(render_prompt(&PromptStyle::Long, &ctx), "(END)");
+        assert_eq!(
+            render_prompt(&PromptStyle::Long, &ctx),
+            "lines 1-24 byte 8192 (END) "
+        );
     }
 
+    /// Medium prompt with zero-byte file shows filename only.
     #[test]
-    fn test_render_prompt_medium_zero_bytes_shows_zero_percent() {
+    fn test_render_prompt_medium_zero_bytes_shows_filename_only() {
         let ctx = file_ctx("empty.txt", false, 1, 1, Some(1), 0, 0);
-        assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "empty.txt 0%");
+        assert_eq!(render_prompt(&PromptStyle::Medium, &ctx), "empty.txt ");
     }
 
     // ===== Task 103: eval_prompt tests =====
@@ -860,50 +998,67 @@ mod tests {
     #[test]
     fn test_eval_prompt_nested_conditional_outer_false_skips_all() {
         let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
-        // `?p` is false because is_pipe is false
-        assert_eq!(eval_prompt("?p pipe ?e eof . stuff .", &ctx), "");
+        // `?a` is false because search_active is false
+        assert_eq!(eval_prompt("?a search ?e eof . stuff .", &ctx), "");
     }
 
     /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
     #[test]
     fn test_eval_prompt_nested_conditional_inner_false_shows_outer() {
         let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
-        // `?f` is true (not pipe), `?p` is false (not pipe)
+        // `?f` is true (not pipe), `?a` is false (no search active)
         assert_eq!(
-            eval_prompt("?f file ?p pipe . rest .", &ctx),
+            eval_prompt("?f file ?a search . rest .", &ctx),
             " file  rest "
         );
     }
 
     /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    /// `?b` = byte offset is known (always true)
     #[test]
-    fn test_eval_prompt_condition_b_at_beginning() {
+    fn test_eval_prompt_condition_b_byte_offset_known() {
         let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
-        assert_eq!(eval_prompt("?b TOP .", &ctx), " TOP ");
+        assert_eq!(eval_prompt("?b has bytes .", &ctx), " has bytes ");
     }
 
     /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    /// `?l` = line numbers are known (bottom_line > 0)
     #[test]
-    fn test_eval_prompt_condition_b_not_at_beginning() {
-        let ctx = eval_ctx(Some("test.txt"), 5, 28, Some(100), 500, 5000);
-        assert_eq!(eval_prompt("?b TOP .", &ctx), "");
+    fn test_eval_prompt_condition_l_line_numbers_known() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?l lines known .", &ctx), " lines known ");
     }
 
     /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    /// `?m` = more than one file open
     #[test]
-    fn test_eval_prompt_condition_l_multiple_files() {
+    fn test_eval_prompt_condition_m_multiple_files() {
         let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
         ctx.file_index = 1;
         ctx.file_count = 3;
-        assert_eq!(eval_prompt("?l (%i of %m) .", &ctx), " (2 of 3) ");
+        assert_eq!(eval_prompt("?m (%i of %m) .", &ctx), " (2 of 3) ");
     }
 
-    /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
+    /// `?m` is false when only one file is open.
     #[test]
-    fn test_eval_prompt_condition_n_line_numbers() {
+    fn test_eval_prompt_condition_m_single_file_false() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?m multi .", &ctx), "");
+    }
+
+    /// Task 121 test 8: `?n` shows text when multiple files are open.
+    #[test]
+    fn test_eval_prompt_condition_n_multiple_files() {
         let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
-        ctx.line_numbers_enabled = true;
-        assert_eq!(eval_prompt("?n lines on .", &ctx), " lines on ");
+        ctx.file_count = 3;
+        assert_eq!(eval_prompt("?n multi files .", &ctx), " multi files ");
+    }
+
+    /// `?n` is false when only one file.
+    #[test]
+    fn test_eval_prompt_condition_n_single_file_false() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?n multi .", &ctx), "");
     }
 
     /// Spec ref: SPECIFICATION.md 5.9 — conditional expressions
@@ -946,5 +1101,147 @@ mod tests {
         let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
         ctx.at_eof = true;
         assert_eq!(eval_prompt("?e.", &ctx), "");
+    }
+
+    // ===== Task 121: integrated prompt rendering tests =====
+
+    /// Task 121 test 5: Custom `-P` prompt template renders correctly.
+    #[test]
+    fn test_custom_prompt_template_renders_correctly() {
+        let ctx = file_ctx("myfile.log", false, 50, 73, Some(500), 2500, 10000);
+        let style = PromptStyle::Custom(String::from("Viewing %f (%pB%%)"));
+        assert_eq!(render_prompt(&style, &ctx), "Viewing myfile.log (25%)");
+    }
+
+    /// Task 121 test 6: `?e` conditional shows text only at EOF.
+    #[test]
+    fn test_conditional_e_only_at_eof() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?eEOF.more", &ctx), "more");
+        ctx.at_eof = true;
+        assert_eq!(eval_prompt("?eEOF.more", &ctx), "EOFmore");
+    }
+
+    /// Task 121 test 7: `?f` conditional shows text only when filename known.
+    #[test]
+    fn test_conditional_f_only_when_filename_known() {
+        let file_ctx = eval_ctx(Some("data.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?f%f.", &file_ctx), "data.txt");
+
+        let mut pipe = eval_ctx(None, 1, 24, None, 0, 5000);
+        pipe.is_pipe = true;
+        assert_eq!(eval_prompt("?f%f.", &pipe), "");
+    }
+
+    /// Task 121 test 9: `?a` (search-active) correctly reflects search state.
+    #[test]
+    fn test_conditional_a_search_active_reflects_state() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?a[searching].", &ctx), "");
+
+        ctx.search_active = true;
+        ctx.search_pattern = Some("pattern");
+        assert_eq!(eval_prompt("?a[searching].", &ctx), "[searching]");
+    }
+
+    /// Task 121 test 10: `?u` (filter-active) correctly reflects filter state.
+    #[test]
+    fn test_conditional_u_filter_active_reflects_state() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?u[filtered].", &ctx), "");
+
+        ctx.filter_active = true;
+        ctx.filter_pattern = Some("filter.*");
+        assert_eq!(eval_prompt("?u[filtered].", &ctx), "[filtered]");
+    }
+
+    /// Task 121 test 12: Prompt is truncated to screen width.
+    #[test]
+    fn test_paint_prompt_truncates_to_screen_width() {
+        let mut buf: Vec<u8> = Vec::new();
+        let long_prompt = "A".repeat(100);
+        paint_prompt(&mut buf, &long_prompt, 24, 10, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        // The prompt should be truncated to 10 chars
+        assert!(output.contains(&"A".repeat(10)));
+        assert!(!output.contains(&"A".repeat(11)));
+    }
+
+    /// Conditional with `:` else branch works.
+    #[test]
+    fn test_eval_prompt_colon_else_branch() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        // ?e false → else branch: "middle"
+        assert_eq!(eval_prompt("?eend:middle.", &ctx), "middle");
+        // ?e true → true branch: "end"
+        ctx.at_eof = true;
+        assert_eq!(eval_prompt("?eend:middle.", &ctx), "end");
+    }
+
+    /// Default short prompt template constant works through eval_prompt.
+    #[test]
+    fn test_default_short_prompt_template_via_eval() {
+        let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &ctx), ":");
+
+        let mut eof_ctx = file_ctx("test.txt", true, 77, 100, Some(100), 5000, 5000);
+        eof_ctx.at_eof = true;
+        assert_eq!(eval_prompt(DEFAULT_SHORT_PROMPT, &eof_ctx), "(END)");
+    }
+
+    /// Default medium prompt template constant works through eval_prompt.
+    #[test]
+    fn test_default_medium_prompt_template_via_eval() {
+        let ctx = file_ctx("notes.txt", false, 1, 24, Some(100), 2500, 5000);
+        assert_eq!(eval_prompt(DEFAULT_MEDIUM_PROMPT, &ctx), "notes.txt 50%");
+    }
+
+    /// Default long prompt template constant works through eval_prompt.
+    #[test]
+    fn test_default_long_prompt_template_via_eval() {
+        let ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
+        assert_eq!(
+            eval_prompt(DEFAULT_LONG_PROMPT, &ctx),
+            "data.log lines 10-33/200 byte 1500/10000 15%"
+        );
+    }
+
+    /// `%lt` expands to top line and `%lb` expands to bottom line.
+    #[test]
+    fn test_eval_prompt_percent_lt_and_lb_line_modifiers() {
+        let ctx = eval_ctx(Some("test.txt"), 15, 38, Some(200), 0, 5000);
+        assert_eq!(eval_prompt("lines %lt-%lb", &ctx), "lines 15-38");
+    }
+
+    /// `%pB` expands to byte percent and consumes the `B` modifier.
+    #[test]
+    fn test_eval_prompt_percent_p_b_modifier() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 500, 2000);
+        assert_eq!(eval_prompt("%pB\\%%", &ctx), "25%%");
+    }
+
+    /// `?pB` condition consumes the `B` modifier.
+    #[test]
+    fn test_eval_prompt_conditional_p_b_modifier() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 500, 2000);
+        assert_eq!(eval_prompt("?pB%pB\\%.", &ctx), "25%");
+    }
+
+    /// `?x` conditional is true for the first file.
+    #[test]
+    fn test_eval_prompt_condition_x_first_file() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.file_index = 0;
+        ctx.file_count = 3;
+        assert_eq!(eval_prompt("?xfirst.", &ctx), "first");
+    }
+
+    /// `?x` conditional is false when not first file.
+    #[test]
+    fn test_eval_prompt_condition_x_not_first_file() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.file_index = 1;
+        ctx.file_count = 3;
+        assert_eq!(eval_prompt("?xfirst.", &ctx), "");
     }
 }
