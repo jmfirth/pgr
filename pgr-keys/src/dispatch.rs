@@ -16,6 +16,7 @@ use crate::file_list::FileList;
 use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
+use crate::runtime_options::RuntimeOptions;
 use crate::Command;
 
 /// A partially-entered multi-key command awaiting its argument.
@@ -33,6 +34,10 @@ pub enum PendingCommand {
     CtrlXPrefix,
     /// `:` pressed; waiting for the colon sub-command letter.
     ColonPrefix,
+    /// `-` pressed; waiting for the option flag character.
+    ToggleOption,
+    /// `_` pressed; waiting for the option flag character to query.
+    QueryOption,
 }
 
 /// The main pager state, tying together all subsystems.
@@ -62,6 +67,14 @@ pub struct Pager<R: Read, W: Write> {
     custom_window_size: Option<usize>,
     /// The list of open files for multi-file navigation.
     file_list: Option<FileList>,
+    /// Runtime-mutable options (toggled with `-` prefix at the prompt).
+    runtime_options: RuntimeOptions,
+    /// `-e`: quit on second attempt to scroll past EOF.
+    quit_at_eof: bool,
+    /// `-E`: quit on first scroll past EOF.
+    quit_at_first_eof: bool,
+    /// Tracks how many times the user has been shown EOF after a forward scroll.
+    eof_seen_count: usize,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -95,6 +108,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             sticky_half_page: None,
             custom_window_size: None,
             file_list: None,
+            runtime_options: RuntimeOptions::default(),
+            quit_at_eof: false,
+            quit_at_first_eof: false,
+            eof_seen_count: 0,
         }
     }
 
@@ -225,6 +242,16 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
                 return Ok(!self.should_quit);
             }
+            PendingCommand::ToggleOption => {
+                if let Key::Char(c) = *key {
+                    self.handle_toggle_option(c)?;
+                }
+            }
+            PendingCommand::QueryOption => {
+                if let Key::Char(c) = *key {
+                    self.handle_query_option(c);
+                }
+            }
         }
         Ok(!self.should_quit)
     }
@@ -274,6 +301,24 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.last_position = Some(self.screen.top_line());
     }
 
+    /// Check if the viewport is at EOF and quit-at-eof behavior should trigger.
+    ///
+    /// With `-E`: quit on first forward scroll that lands at or past EOF.
+    /// With `-e`: quit on the second such scroll.
+    fn check_eof_quit(&mut self, total_lines: usize) {
+        let (_, end) = self.screen.visible_range();
+        if end >= total_lines {
+            if self.quit_at_first_eof {
+                self.should_quit = true;
+            } else if self.quit_at_eof {
+                self.eof_seen_count += 1;
+                if self.eof_seen_count >= 2 {
+                    self.should_quit = true;
+                }
+            }
+        }
+    }
+
     /// Execute a command with the given numeric count prefix.
     #[allow(clippy::too_many_lines)] // dispatch table is inherently large
     fn execute(&mut self, command: &Command, count: Option<usize>) -> Result<()> {
@@ -283,6 +328,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::ScrollForward(n) => {
                 self.screen.scroll_forward(count.unwrap_or(n), total);
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::ScrollBackward(n) => {
                 self.screen.scroll_backward(count.unwrap_or(n));
@@ -295,6 +341,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     .unwrap_or(self.screen.content_rows());
                 self.screen.scroll_forward(count.unwrap_or(window), total);
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::PageBackward => {
                 self.save_last_position();
@@ -314,6 +361,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     .unwrap_or(self.screen.content_rows() / 2);
                 self.screen.scroll_forward(amount, total);
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::HalfPageBackward => {
                 self.save_last_position();
@@ -336,6 +384,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 let default = total.saturating_sub(self.screen.content_rows());
                 self.screen.goto_line(count.or(n).unwrap_or(default), total);
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::Repaint => {
                 self.repaint()?;
@@ -402,6 +451,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.screen
                     .scroll_forward_unclamped(count.unwrap_or(window));
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::BackwardForceBeginning => {
                 let window = self
@@ -420,6 +470,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     .unwrap_or(self.screen.content_rows());
                 self.screen.scroll_forward(window, total);
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::WindowBackward => {
                 if let Some(c) = count {
@@ -444,6 +495,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 // Equivalent to ScrollForward for now; differentiation comes with word-wrap.
                 self.screen.scroll_forward(count.unwrap_or(1), total);
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::FileLineBackward => {
                 // Equivalent to ScrollBackward for now; differentiation comes with word-wrap.
@@ -453,6 +505,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::ScrollForwardForce(n) => {
                 self.screen.scroll_forward_unclamped(count.unwrap_or(n));
                 self.repaint()?;
+                self.check_eof_quit(total);
             }
             Command::ScrollBackwardForce(n) => {
                 // scroll_backward already clamps at 0
@@ -470,6 +523,12 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::RemoveFile => {
                 self.remove_current_file()?;
+            }
+            Command::ToggleOption => {
+                self.pending_command = Some(PendingCommand::ToggleOption);
+            }
+            Command::QueryOption => {
+                self.pending_command = Some(PendingCommand::QueryOption);
             }
         }
 
@@ -664,6 +723,52 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Set the prompt style used for the status line.
     pub fn set_prompt_style(&mut self, style: PromptStyle) {
         self.prompt_style = style;
+    }
+
+    /// Enable `-e` behavior: quit after the second forward scroll past EOF.
+    pub fn set_quit_at_eof(&mut self, enabled: bool) {
+        self.quit_at_eof = enabled;
+    }
+
+    /// Enable `-E` behavior: quit on the first forward scroll past EOF.
+    pub fn set_quit_at_first_eof(&mut self, enabled: bool) {
+        self.quit_at_first_eof = enabled;
+    }
+
+    /// Set the full runtime options state.
+    pub fn set_runtime_options(&mut self, opts: RuntimeOptions) {
+        self.runtime_options = opts;
+    }
+
+    /// Access the runtime options (for testing).
+    #[must_use]
+    pub fn runtime_options(&self) -> &RuntimeOptions {
+        &self.runtime_options
+    }
+
+    /// Handle a toggle option command (`-<flag>`).
+    fn handle_toggle_option(&mut self, flag: char) -> Result<()> {
+        if self.runtime_options.toggle(flag).is_ok() {
+            // Sync render-affecting options to the screen/render_config.
+            self.sync_runtime_to_render();
+            self.repaint()?;
+        }
+        Ok(())
+    }
+
+    /// Handle a query option command (`_<flag>`).
+    fn handle_query_option(&mut self, flag: char) {
+        // Query is display-only; we just invoke it to get the message.
+        // Full prompt display of the result is Phase 2.
+        let _result = self.runtime_options.query(flag);
+    }
+
+    /// Synchronize runtime options to render config and screen state.
+    fn sync_runtime_to_render(&mut self) {
+        self.screen
+            .set_chop_mode(self.runtime_options.chop_long_lines);
+        self.render_config.raw_mode = self.runtime_options.raw_control_mode;
+        self.render_config.tab_stops = TabStops::regular(self.runtime_options.tab_width);
     }
 
     /// Access the screen state (for testing).
@@ -1434,5 +1539,150 @@ mod tests {
         let fl = pager.file_list().expect("file list should be set");
         assert_eq!(fl.current_index(), 0);
         assert_eq!(pager.screen().top_line(), 10);
+    }
+
+    // ── Quit-at-EOF tests (Task 120) ────────────────────────────────────
+
+    /// Create a pager with quit-at-eof enabled, run it, and return the pager.
+    fn run_pager_quit_eof(
+        keys: &[u8],
+        content: &[u8],
+        quit_at_eof: bool,
+        quit_at_first_eof: bool,
+    ) -> Pager<Cursor<Vec<u8>>, Vec<u8>> {
+        let reader = KeyReader::new(Cursor::new(keys.to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("test".to_string()));
+        pager.set_quit_at_eof(quit_at_eof);
+        pager.set_quit_at_first_eof(quit_at_first_eof);
+        let _ = pager.run();
+        pager
+    }
+
+    // Test: -E quits on first scroll past EOF
+    #[test]
+    fn test_dispatch_quit_at_first_eof_quits_on_first_scroll_past_eof() {
+        // 5 lines, 24-row screen (23 content rows). File fits on one screen.
+        // Scrolling forward should immediately trigger EOF quit with -E.
+        let content = b"a\nb\nc\nd\ne\n";
+        let pager = run_pager_quit_eof(b"j", content, false, true);
+        assert!(pager.should_quit);
+    }
+
+    // Test: -e quits after second scroll past EOF
+    #[test]
+    fn test_dispatch_quit_at_eof_quits_on_second_scroll_past_eof() {
+        let content = b"a\nb\nc\nd\ne\n";
+        // First `j` scrolls to EOF (count 1). Second `j` is also at EOF.
+        // With -e, should quit after the second.
+        let pager = run_pager_quit_eof(b"jj", content, true, false);
+        assert!(pager.should_quit);
+    }
+
+    // Test: -e does NOT quit after first scroll past EOF
+    #[test]
+    fn test_dispatch_quit_at_eof_does_not_quit_after_first_scroll() {
+        let content = b"a\nb\nc\nd\ne\n";
+        // Single `j` at EOF. With -e, should not quit yet (first time).
+        // We need the pager to not quit immediately but also not hang.
+        // Use `j` then `q` to verify the pager didn't auto-quit on first scroll.
+        let pager = run_pager_quit_eof(b"jq", content, true, false);
+        // Should have quit via `q`, not from -e auto-quit.
+        assert!(pager.should_quit);
+        // The eof_seen_count should be 1 (only one scroll past EOF before `q`).
+        assert_eq!(pager.eof_seen_count, 1);
+    }
+
+    // Test: without -e or -E, scrolling past EOF does not auto-quit
+    #[test]
+    fn test_dispatch_no_eof_flag_does_not_auto_quit() {
+        let content = b"a\nb\nc\nd\ne\n";
+        let pager = run_pager_quit_eof(b"jjq", content, false, false);
+        // Only quit via `q`.
+        assert!(pager.should_quit);
+        assert_eq!(pager.eof_seen_count, 0);
+    }
+
+    // ── Option toggling tests (Task 119) ─────────────────────────────
+
+    #[test]
+    fn test_dispatch_dash_i_toggles_case_insensitive() {
+        let content = make_test_content(50);
+        // `-` then `i` toggles case_insensitive, then quit.
+        let pager = run_pager(b"-iq", &content);
+        assert!(pager.runtime_options().case_insensitive);
+    }
+
+    #[test]
+    fn test_dispatch_dash_n_upper_toggles_line_numbers_and_repaints() {
+        let content = make_test_content(50);
+        // Toggling -N should flip line_numbers and trigger a repaint.
+        let pager = run_pager(b"-Nq", &content);
+        assert!(pager.runtime_options().line_numbers);
+    }
+
+    #[test]
+    fn test_dispatch_dash_s_upper_toggles_chop_long_lines() {
+        let content = make_test_content(50);
+        let pager = run_pager(b"-Sq", &content);
+        assert!(pager.runtime_options().chop_long_lines);
+        // Screen chop mode should also be updated.
+        assert!(pager.screen().chop_mode());
+    }
+
+    #[test]
+    fn test_dispatch_dash_s_lower_toggles_squeeze_blank_lines() {
+        let content = make_test_content(50);
+        let pager = run_pager(b"-sq", &content);
+        assert!(pager.runtime_options().squeeze_blank_lines);
+    }
+
+    #[test]
+    fn test_dispatch_underscore_queries_option() {
+        // Pressing _ then i should not change any state.
+        let content = make_test_content(50);
+        let pager = run_pager(b"_iq", &content);
+        assert!(!pager.runtime_options().case_insensitive);
+    }
+
+    #[test]
+    fn test_dispatch_dash_toggle_twice_reverts() {
+        let content = make_test_content(50);
+        // Toggle i on, then off.
+        let pager = run_pager(b"-i-iq", &content);
+        assert!(!pager.runtime_options().case_insensitive);
+    }
+
+    #[test]
+    fn test_dispatch_runtime_options_initialized_default() {
+        let content = make_test_content(50);
+        let pager = run_pager(b"q", &content);
+        assert!(!pager.runtime_options().case_insensitive);
+        assert!(!pager.runtime_options().line_numbers);
+        assert!(!pager.runtime_options().chop_long_lines);
+        assert_eq!(pager.runtime_options().tab_width, 8);
+    }
+
+    #[test]
+    fn test_dispatch_set_runtime_options_is_reflected() {
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(b"test\n"));
+        let index = LineIndex::new(5);
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+
+        let mut opts = RuntimeOptions::default();
+        opts.case_insensitive = true;
+        opts.line_numbers = true;
+        opts.tab_width = 4;
+        pager.set_runtime_options(opts);
+
+        assert!(pager.runtime_options().case_insensitive);
+        assert!(pager.runtime_options().line_numbers);
+        assert_eq!(pager.runtime_options().tab_width, 4);
     }
 }

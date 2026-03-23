@@ -9,6 +9,7 @@ pub mod key;
 pub mod key_reader;
 pub mod keymap;
 pub mod line_editor;
+pub mod runtime_options;
 pub mod terminal;
 
 pub use command::Command;
@@ -19,4 +20,5 @@ pub use key::Key;
 pub use key_reader::KeyReader;
 pub use keymap::Keymap;
 pub use line_editor::{LineEditResult, LineEditor};
+pub use runtime_options::{HiliteMode, OptionError, RuntimeOptions};
 pub use terminal::RawTerminal;

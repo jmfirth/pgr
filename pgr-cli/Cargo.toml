@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+libc = "0.2"
 pgr-core = { path = "../pgr-core" }
 pgr-input = { path = "../pgr-input" }
 pgr-search = { path = "../pgr-search" }
@@ -16,3 +17,4 @@ pgr-agent = { path = "../pgr-agent" }
 
 [dev-dependencies]
 expectrl = "0.8"
+tempfile = "3"

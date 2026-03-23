@@ -67,6 +67,10 @@ pub enum Command {
     FirstFile,
     /// Remove the current file from the list. `:d`.
     RemoveFile,
+    /// Toggle or set an option at runtime (`-` prefix).
+    ToggleOption,
+    /// Display current option value (`_` prefix).
+    QueryOption,
 }
 
 #[cfg(test)]

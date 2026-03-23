@@ -338,6 +338,7 @@ dependencies = [
  "anyhow",
  "clap",
  "expectrl",
+ "libc",
  "pgr-agent",
  "pgr-core",
  "pgr-display",
@@ -345,6 +346,7 @@ dependencies = [
  "pgr-keys",
  "pgr-search",
  "pgr-syntax",
+ "tempfile",
 ]
 
 [[package]]

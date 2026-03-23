@@ -93,6 +93,9 @@ impl Keymap {
             (Key::Char('J'), Command::ScrollForwardForce(1)),
             (Key::Char('K'), Command::ScrollBackwardForce(1)),
             (Key::Char('Y'), Command::ScrollBackwardForce(1)),
+            // Option toggling and query
+            (Key::Char('-'), Command::ToggleOption),
+            (Key::Char('_'), Command::QueryOption),
         ];
 
         Self { bindings }
@@ -312,5 +315,21 @@ mod tests {
     fn test_keymap_esc_k_maps_to_file_line_backward() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::EscSeq('k')), Command::FileLineBackward);
+    }
+
+    // ── Task 119: `-` key maps to ToggleOption command ──
+
+    #[test]
+    fn test_keymap_dash_maps_to_toggle_option() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('-')), Command::ToggleOption);
+    }
+
+    // ── Task 119: `_` key maps to QueryOption command ──
+
+    #[test]
+    fn test_keymap_underscore_maps_to_query_option() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('_')), Command::QueryOption);
     }
 }
