@@ -12,6 +12,7 @@ use pgr_display::{
 };
 
 use crate::error::Result;
+use crate::file_list::FileList;
 use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
@@ -30,6 +31,8 @@ pub enum PendingCommand {
     ClearMark,
     /// `^X` pressed; waiting for `^X` (to complete `^X^X` for goto mark).
     CtrlXPrefix,
+    /// `:` pressed; waiting for the colon sub-command letter.
+    ColonPrefix,
 }
 
 /// The main pager state, tying together all subsystems.
@@ -57,6 +60,8 @@ pub struct Pager<R: Read, W: Write> {
     sticky_half_page: Option<usize>,
     /// Custom window size. Set by `z`/`w` with a count.
     custom_window_size: Option<usize>,
+    /// The list of open files for multi-file navigation.
+    file_list: Option<FileList>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -89,6 +94,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             pending_command: None,
             sticky_half_page: None,
             custom_window_size: None,
+            file_list: None,
         }
     }
 
@@ -160,6 +166,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             Key::Char('\'') => Some(PendingCommand::GotoMark),
             Key::EscSeq('m') => Some(PendingCommand::ClearMark),
             Key::Ctrl('x') => Some(PendingCommand::CtrlXPrefix),
+            Key::Char(':') => Some(PendingCommand::ColonPrefix),
             _ => None,
         }
     }
@@ -205,6 +212,18 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
                 // Not ^X: ignore the prefix, process key normally.
                 return self.process_key(key);
+            }
+            PendingCommand::ColonPrefix => {
+                let count = self.pending_count.take();
+                match *key {
+                    Key::Char('n') => self.execute(&Command::NextFile, count)?,
+                    Key::Char('p') => self.execute(&Command::PreviousFile, count)?,
+                    Key::Char('x') => self.execute(&Command::FirstFile, count)?,
+                    Key::Char('d') => self.execute(&Command::RemoveFile, count)?,
+                    Key::Char('q') => self.execute(&Command::Quit, count)?,
+                    _ => {} // Unknown colon command: ignore.
+                }
+                return Ok(!self.should_quit);
             }
         }
         Ok(!self.should_quit)
@@ -440,6 +459,18 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.screen.scroll_backward(count.unwrap_or(n));
                 self.repaint()?;
             }
+            Command::NextFile => {
+                self.switch_file_next()?;
+            }
+            Command::PreviousFile => {
+                self.switch_file_prev()?;
+            }
+            Command::FirstFile => {
+                self.switch_file_goto(count.unwrap_or(0))?;
+            }
+            Command::RemoveFile => {
+                self.remove_current_file()?;
+            }
         }
 
         Ok(())
@@ -461,6 +492,76 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.screen.goto_line(default, total);
         self.repaint()?;
         Ok(())
+    }
+
+    /// Switch to the next file in the file list.
+    fn switch_file_next(&mut self) -> Result<()> {
+        if let Some(ref mut file_list) = self.file_list {
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            if file_list.next().is_ok() {
+                self.apply_current_file();
+                self.repaint()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Switch to the previous file in the file list.
+    fn switch_file_prev(&mut self) -> Result<()> {
+        if let Some(ref mut file_list) = self.file_list {
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            if file_list.prev().is_ok() {
+                self.apply_current_file();
+                self.repaint()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Switch to the N-th file (0-based) in the file list.
+    fn switch_file_goto(&mut self, index: usize) -> Result<()> {
+        if let Some(ref mut file_list) = self.file_list {
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            if file_list.goto(index).is_ok() {
+                self.apply_current_file();
+                self.repaint()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove the current file from the file list.
+    fn remove_current_file(&mut self) -> Result<()> {
+        if let Some(ref mut file_list) = self.file_list {
+            if file_list.remove_current().is_ok() {
+                self.apply_current_file();
+                self.repaint()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load the current file's display name and viewport into the pager state.
+    fn apply_current_file(&mut self) {
+        if let Some(ref file_list) = self.file_list {
+            let entry = file_list.current();
+            let (top_line, h_offset) = file_list.saved_viewport();
+            self.filename = Some(entry.display_name.clone());
+            self.screen.goto_line(top_line, usize::MAX);
+            self.screen.set_horizontal_offset(h_offset);
+        }
+    }
+
+    /// Set the file list for multi-file navigation.
+    pub fn set_file_list(&mut self, file_list: FileList) {
+        self.file_list = Some(file_list);
+        self.apply_current_file();
+    }
+
+    /// Access the file list (for testing).
+    #[must_use]
+    pub fn file_list(&self) -> Option<&FileList> {
+        self.file_list.as_ref()
     }
 
     /// Fetch visible lines from the buffer/index and repaint the screen.
@@ -504,6 +605,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         let (start, end) = self.screen.visible_range();
         let bottom_display = end.min(total_lines);
 
+        let (file_index, file_count) = self
+            .file_list
+            .as_ref()
+            .map_or((0, 1), |fl| (fl.current_index(), fl.file_count()));
+
         let ctx = PromptContext {
             filename: self.filename.as_deref(),
             top_line: start.saturating_add(1),
@@ -511,8 +617,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             total_lines: Some(total_lines),
             total_bytes: self.buffer.len() as u64,
             byte_offset: 0,
-            file_index: 0,
-            file_count: 1,
+            file_index,
+            file_count,
             at_eof,
             is_pipe: false,
             column: 1,
@@ -1166,5 +1272,167 @@ mod tests {
         let pager = run_pager(b"10z q", &content);
         // 10z -> scrolls 10, SPACE -> scrolls 10 more = 20
         assert_eq!(pager.screen().top_line(), 20);
+    }
+
+    // ── Colon-prefix and file list tests ────────────────────────────────
+
+    use crate::file_list::{FileEntry, FileList};
+    use std::path::PathBuf;
+
+    fn make_file_entry(name: &str, content: &[u8]) -> FileEntry {
+        let buf_len = content.len() as u64;
+        FileEntry {
+            path: Some(PathBuf::from(name)),
+            display_name: name.to_string(),
+            buffer: Box::new(TestBuffer::new(content)),
+            index: LineIndex::new(buf_len),
+            marks: MarkStore::new(),
+            saved_top_line: 0,
+            saved_horizontal_offset: 0,
+        }
+    }
+
+    /// Create a pager with a file list, run it, and return the pager.
+    fn run_pager_with_files(
+        keys: &[u8],
+        files: Vec<(&str, &[u8])>,
+    ) -> Pager<Cursor<Vec<u8>>, Vec<u8>> {
+        assert!(!files.is_empty());
+
+        let first_content = files[0].1;
+        let reader = KeyReader::new(Cursor::new(keys.to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(first_content));
+        let buf_len = first_content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some(files[0].0.to_string()));
+
+        let first_entry = make_file_entry(files[0].0, files[0].1);
+        let mut file_list = FileList::new(first_entry);
+        for &(name, content) in &files[1..] {
+            file_list.push(make_file_entry(name, content));
+        }
+        pager.set_file_list(file_list);
+
+        let _ = pager.run();
+        pager
+    }
+
+    // Test 12: `:n` key sequence maps to NextFile command
+    #[test]
+    fn test_dispatch_colon_n_switches_to_next_file() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let pager = run_pager_with_files(
+            b":nq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 1);
+        assert_eq!(fl.current().display_name, "file2.txt");
+    }
+
+    // Test 13: `:p` key sequence maps to PreviousFile command
+    #[test]
+    fn test_dispatch_colon_p_switches_to_previous_file() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let pager = run_pager_with_files(
+            b":n:pq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+        assert_eq!(fl.current().display_name, "file1.txt");
+    }
+
+    // Test 14: `:d` key sequence maps to RemoveFile command
+    #[test]
+    fn test_dispatch_colon_d_removes_current_file() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let pager = run_pager_with_files(
+            b":dq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.file_count(), 1);
+        assert_eq!(fl.current().display_name, "file2.txt");
+    }
+
+    // Test 15: Switching files updates pager's active filename
+    #[test]
+    fn test_dispatch_switching_files_updates_pager_filename() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let pager = run_pager_with_files(
+            b":nq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        assert_eq!(pager.filename.as_deref(), Some("file2.txt"));
+    }
+
+    // `:x` with no count goes to first file
+    #[test]
+    fn test_dispatch_colon_x_goes_to_first_file() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let content3 = make_test_content(20);
+        let pager = run_pager_with_files(
+            b":n:n:xq",
+            vec![
+                ("file1.txt", &content1),
+                ("file2.txt", &content2),
+                ("file3.txt", &content3),
+            ],
+        );
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+    }
+
+    // `:n` at last file stays at last file (no-op)
+    #[test]
+    fn test_dispatch_colon_n_at_last_file_stays() {
+        let content1 = make_test_content(50);
+        let pager = run_pager_with_files(b":nq", vec![("file1.txt", &content1)]);
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+    }
+
+    // `:p` at first file stays at first file (no-op)
+    #[test]
+    fn test_dispatch_colon_p_at_first_file_stays() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let pager = run_pager_with_files(
+            b":pq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+    }
+
+    // `:q` via colon prefix quits
+    #[test]
+    fn test_dispatch_colon_q_quits() {
+        let content1 = make_test_content(50);
+        let pager = run_pager_with_files(b":q", vec![("file1.txt", &content1)]);
+        assert!(pager.should_quit);
+    }
+
+    // Viewport state is preserved across file switches
+    #[test]
+    fn test_dispatch_viewport_preserved_across_file_switch() {
+        let content1 = make_test_content(100);
+        let content2 = make_test_content(50);
+        // Scroll to line 10 in file1, switch to file2, switch back, should be at 10.
+        let pager = run_pager_with_files(
+            b"10j:n:pq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+        assert_eq!(pager.screen().top_line(), 10);
     }
 }
