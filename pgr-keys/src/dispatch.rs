@@ -8,8 +8,8 @@ use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    eval_prompt, paint_prompt, paint_screen_with_options, OverstrikeMode, PaintOptions,
-    PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, TabStops,
+    clear_screen, eval_prompt, paint_prompt, paint_screen_with_options, OverstrikeMode,
+    PaintOptions, PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, TabStops,
     DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
@@ -830,6 +830,14 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.last_shell_command = Some(cmd.clone());
         let _ = shell::execute_shell_command(&cmd, &self.shell);
+
+        // Show "!done" and wait for a keypress before repainting,
+        // matching GNU less behavior.
+        write!(self.writer, "\r\n!done  (press RETURN)")?;
+        self.writer.flush()?;
+        let _ = self.reader.read_key();
+
+        clear_screen(&mut self.writer)?;
         self.repaint()?;
         Ok(())
     }
@@ -856,6 +864,12 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.last_shell_command = Some(expanded.clone());
         let _ = shell::execute_shell_command(&expanded, &self.shell);
+
+        write!(self.writer, "\r\n!done  (press RETURN)")?;
+        self.writer.flush()?;
+        let _ = self.reader.read_key();
+
+        clear_screen(&mut self.writer)?;
         self.repaint()?;
         Ok(())
     }
