@@ -7,3 +7,4 @@ mod display;
 mod harness;
 mod helpers;
 mod navigation;
+mod search;
