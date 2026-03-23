@@ -387,10 +387,10 @@ mod tests {
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
         let output_str = String::from_utf8_lossy(&output);
 
-        // Should contain line numbers 1, 2, 3 (right-aligned in 7-wide column)
-        assert!(output_str.contains("     1 "));
-        assert!(output_str.contains("     2 "));
-        assert!(output_str.contains("     3 "));
+        // Should contain line numbers 1, 2, 3 (right-aligned in 8-wide column)
+        assert!(output_str.contains("      1 "));
+        assert!(output_str.contains("      2 "));
+        assert!(output_str.contains("      3 "));
         // Should also contain the content
         assert!(output_str.contains("alpha"));
         assert!(output_str.contains("beta"));
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_paint_screen_line_numbers_reduce_content_width() {
-        // 20 columns total, line number column takes 7 -> 13 for content
+        // 20 columns total, line number column takes 8 -> 12 for content
         let screen = Screen::new(2, 20); // 1 content row
         let lines: Vec<Option<String>> = vec![Some(
             "this is a longer line that should be truncated".to_string(),
@@ -411,7 +411,7 @@ mod tests {
         let output_no_ln = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let str_no_ln = String::from_utf8_lossy(&output_no_ln);
 
-        // With line numbers: 13 cols of content
+        // With line numbers: 12 cols of content
         let options = PaintOptions {
             show_line_numbers: true,
             total_lines: 50,
@@ -422,11 +422,11 @@ mod tests {
         let str_ln = String::from_utf8_lossy(&output_ln);
 
         // The version with line numbers should have the line number prefix
-        assert!(str_ln.contains("     1 "));
+        assert!(str_ln.contains("      1 "));
         // And should contain less content text (truncated earlier)
-        // "this is a longer" fits in 20 cols; with line nums only 13 cols
+        // "this is a longer" fits in 20 cols; with line nums only 12 cols
         assert!(str_no_ln.contains("this is a longer lin"));
-        assert!(str_ln.contains("this is a lon"));
+        assert!(str_ln.contains("this is a lo"));
         assert!(!str_ln.contains("this is a longer"));
     }
 
@@ -442,7 +442,7 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
 
         // Should NOT contain any line number formatting
-        assert!(!output_str.contains("     1 "));
+        assert!(!output_str.contains("      1 "));
         assert!(output_str.contains("content"));
     }
 
@@ -478,11 +478,11 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
 
         // Should show line numbers 1, 2, 5 (skipping squeezed 3, 4)
-        assert!(output_str.contains("     1 "));
-        assert!(output_str.contains("     2 "));
-        assert!(output_str.contains("     5 "));
-        assert!(!output_str.contains("     3 "));
-        assert!(!output_str.contains("     4 "));
+        assert!(output_str.contains("      1 "));
+        assert!(output_str.contains("      2 "));
+        assert!(output_str.contains("      5 "));
+        assert!(!output_str.contains("      3 "));
+        assert!(!output_str.contains("      4 "));
     }
 
     #[test]
