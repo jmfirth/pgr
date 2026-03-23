@@ -385,6 +385,7 @@ dependencies = [
  "pgr-core",
  "pgr-display",
  "pgr-input",
+ "pgr-search",
  "tempfile",
  "thiserror",
 ]

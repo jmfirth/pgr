@@ -93,6 +93,16 @@ pub enum Command {
     Help,
     /// Display version information (`V`).
     Version,
+    /// Enter forward search mode: prompt for pattern, search forward.
+    SearchForward,
+    /// Enter backward search mode: prompt for pattern, search backward.
+    SearchBackward,
+    /// Repeat last search in the same direction.
+    RepeatSearch,
+    /// Repeat last search in the opposite direction.
+    RepeatSearchReverse,
+    /// Toggle search highlighting (ESC-u).
+    ToggleHighlight,
 }
 
 #[cfg(test)]

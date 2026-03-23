@@ -8,6 +8,7 @@ libc = "0.2"
 pgr-core = { path = "../pgr-core" }
 pgr-display = { path = "../pgr-display" }
 pgr-input = { path = "../pgr-input" }
+pgr-search = { path = "../pgr-search" }
 thiserror = "2"
 
 [dev-dependencies]
