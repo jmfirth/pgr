@@ -4,6 +4,7 @@
 //! those commands by mutating the screen state and repainting.
 
 use std::io::{Read, Write};
+use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
@@ -12,10 +13,12 @@ use pgr_display::{
 };
 
 use crate::error::Result;
-use crate::file_list::FileList;
+use crate::file_list::{FileEntry, FileList};
+use crate::filename::expand_filename;
 use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
+use crate::line_editor::{LineEditResult, LineEditor};
 use crate::Command;
 
 /// A partially-entered multi-key command awaiting its argument.
@@ -62,6 +65,10 @@ pub struct Pager<R: Read, W: Write> {
     custom_window_size: Option<usize>,
     /// The list of open files for multi-file navigation.
     file_list: Option<FileList>,
+    /// The previously viewed file, for `#` expansion in `:e`.
+    previous_file: Option<String>,
+    /// Status message to display on the prompt line (cleared on next repaint).
+    status_message: Option<String>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -95,6 +102,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             sticky_half_page: None,
             custom_window_size: None,
             file_list: None,
+            previous_file: None,
+            status_message: None,
         }
     }
 
@@ -210,7 +219,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                     self.pending_command = Some(PendingCommand::GotoMark);
                     return Ok(true);
                 }
-                // Not ^X: ignore the prefix, process key normally.
+                if *key == Key::Ctrl('v') {
+                    // ^X^V: examine (open) a new file.
+                    self.execute(&Command::ExamineAlt, None)?;
+                    return Ok(!self.should_quit);
+                }
+                // Not ^X or ^V: ignore the prefix, process key normally.
                 return self.process_key(key);
             }
             PendingCommand::ColonPrefix => {
@@ -221,6 +235,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('x') => self.execute(&Command::FirstFile, count)?,
                     Key::Char('d') => self.execute(&Command::RemoveFile, count)?,
                     Key::Char('q') => self.execute(&Command::Quit, count)?,
+                    Key::Char('e') => self.execute(&Command::Examine, count)?,
                     _ => {} // Unknown colon command: ignore.
                 }
                 return Ok(!self.should_quit);
@@ -471,6 +486,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::RemoveFile => {
                 self.remove_current_file()?;
             }
+            Command::Examine | Command::ExamineAlt => {
+                self.examine_prompt()?;
+            }
         }
 
         Ok(())
@@ -498,7 +516,9 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn switch_file_next(&mut self) -> Result<()> {
         if let Some(ref mut file_list) = self.file_list {
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            let old_name = self.filename.clone();
             if file_list.next().is_ok() {
+                self.previous_file = old_name;
                 self.apply_current_file();
                 self.repaint()?;
             }
@@ -510,7 +530,9 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn switch_file_prev(&mut self) -> Result<()> {
         if let Some(ref mut file_list) = self.file_list {
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            let old_name = self.filename.clone();
             if file_list.prev().is_ok() {
+                self.previous_file = old_name;
                 self.apply_current_file();
                 self.repaint()?;
             }
@@ -522,7 +544,9 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn switch_file_goto(&mut self, index: usize) -> Result<()> {
         if let Some(ref mut file_list) = self.file_list {
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            let old_name = self.filename.clone();
             if file_list.goto(index).is_ok() {
+                self.previous_file = old_name;
                 self.apply_current_file();
                 self.repaint()?;
             }
@@ -538,6 +562,113 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             }
         }
+        Ok(())
+    }
+
+    /// Show the `:e` prompt and read a filename via the line editor.
+    ///
+    /// On Enter with a filename: expand `%`/`#`, open the file, add it to the
+    /// file list, and switch to it. On Enter with empty input: refresh the
+    /// current file. On Escape: cancel.
+    fn examine_prompt(&mut self) -> Result<()> {
+        let mut editor = LineEditor::new("Examine: ");
+        let (rows, cols) = self.screen.dimensions();
+        if rows > 0 {
+            let prompt_row = rows.saturating_sub(1);
+            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
+            let _ = self.writer.flush();
+        }
+
+        loop {
+            match self.reader.read_key() {
+                Ok(key) => match editor.process_key(&key) {
+                    LineEditResult::Continue => {
+                        if rows > 0 {
+                            let prompt_row = rows.saturating_sub(1);
+                            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
+                            let _ = self.writer.flush();
+                        }
+                    }
+                    LineEditResult::Confirm(input) => {
+                        if input.is_empty() {
+                            // Re-examine (reload) the current file.
+                            self.buffer.refresh()?;
+                            let new_len = self.buffer.len() as u64;
+                            self.index = LineIndex::new(new_len);
+                            self.repaint()?;
+                        } else {
+                            self.examine_file(&input)?;
+                        }
+                        return Ok(());
+                    }
+                    LineEditResult::Cancel => {
+                        self.repaint()?;
+                        return Ok(());
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// Expand the filename and attempt to open it, adding to the file list.
+    fn examine_file(&mut self, raw_input: &str) -> Result<()> {
+        // Expand % and # substitutions.
+        let expanded = match expand_filename(
+            raw_input,
+            self.filename.as_deref(),
+            self.previous_file.as_deref(),
+        ) {
+            Ok(name) => name,
+            Err(e) => {
+                self.status_message = Some(e.to_string());
+                self.repaint()?;
+                return Ok(());
+            }
+        };
+
+        let path = Path::new(&expanded);
+        match pgr_input::LoadedFile::open(path) {
+            Ok(loaded) => {
+                let display_name = expanded.clone();
+                let file_path = loaded.path().to_path_buf();
+                let (buffer, index) = loaded.into_parts();
+
+                let entry = FileEntry {
+                    path: Some(file_path),
+                    display_name: display_name.clone(),
+                    buffer,
+                    index,
+                    marks: MarkStore::new(),
+                    saved_top_line: 0,
+                    saved_horizontal_offset: 0,
+                };
+
+                // Track the previous file before switching.
+                let old_name = self.filename.clone();
+
+                if let Some(ref mut file_list) = self.file_list {
+                    file_list
+                        .save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+                    file_list.push(entry);
+                    let new_index = file_list.file_count() - 1;
+                    let _ = file_list.goto(new_index);
+                } else {
+                    // No file list yet — create one with this file.
+                    self.file_list = Some(FileList::new(entry));
+                }
+
+                self.previous_file = old_name;
+                self.apply_current_file();
+                self.repaint()?;
+            }
+            Err(e) => {
+                self.status_message = Some(format!("{expanded}: {e}"));
+                self.repaint()?;
+            }
+        }
+
         Ok(())
     }
 
@@ -592,6 +723,12 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn paint_status_prompt(&mut self, total_lines: usize) -> Result<()> {
         let (rows, cols) = self.screen.dimensions();
         if rows == 0 {
+            return Ok(());
+        }
+
+        // If there's a status message, show it instead of the normal prompt.
+        if let Some(msg) = self.status_message.take() {
+            paint_prompt(&mut self.writer, &msg, rows, cols)?;
             return Ok(());
         }
 
@@ -694,6 +831,29 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[must_use]
     pub fn custom_window_size(&self) -> Option<usize> {
         self.custom_window_size
+    }
+
+    /// Return the previously viewed filename, for `#` expansion in `:e`.
+    #[must_use]
+    pub fn previous_file(&self) -> Option<&str> {
+        self.previous_file.as_deref()
+    }
+
+    /// Return the current status message, if any.
+    #[must_use]
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
+    /// Return the current filename.
+    #[must_use]
+    pub fn filename(&self) -> Option<&str> {
+        self.filename.as_deref()
+    }
+
+    /// Return a mutable reference to the file list (for testing).
+    pub fn file_list_mut(&mut self) -> Option<&mut FileList> {
+        self.file_list.as_mut()
     }
 }
 
@@ -1434,5 +1594,153 @@ mod tests {
         let fl = pager.file_list().expect("file list should be set");
         assert_eq!(fl.current_index(), 0);
         assert_eq!(pager.screen().top_line(), 10);
+    }
+
+    // ── Examine command tests ─────────────────────────────────────────
+
+    // Test: :e filename opens the file and adds to file list
+    #[test]
+    fn test_dispatch_examine_opens_file_and_adds_to_file_list() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        tmp.write_all(b"hello\nworld\n").expect("write tempfile");
+        tmp.flush().expect("flush tempfile");
+        let path_str = tmp.path().to_str().expect("path to str");
+
+        // Build key sequence: :e<path bytes><Enter>q
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b':');
+        keys.push(b'e');
+        keys.extend_from_slice(path_str.as_bytes());
+        keys.push(0x0A); // Enter
+        keys.push(b'q');
+
+        let content = make_test_content(10);
+        let pager = run_pager_with_files(&keys, vec![("original.txt", &content)]);
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.file_count(), 2);
+        // Should have switched to the new file.
+        assert_eq!(fl.current_index(), 1);
+        assert_eq!(fl.current().display_name, path_str);
+    }
+
+    // Test: :e with no argument refreshes the current file
+    #[test]
+    fn test_dispatch_examine_empty_input_refreshes_current_file() {
+        // :e followed by Enter (empty input) triggers a refresh.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b':');
+        keys.push(b'e');
+        keys.push(0x0A); // Enter with empty input
+        keys.push(b'q');
+
+        let content = make_test_content(50);
+        let pager = run_pager_with_files(&keys, vec![("file1.txt", &content)]);
+        let fl = pager.file_list().expect("file list should be set");
+        // File count should still be 1 — no new file added.
+        assert_eq!(fl.file_count(), 1);
+        // Position should remain at 0 after refresh.
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test: :e nonexistent displays error, does not change current file
+    #[test]
+    fn test_dispatch_examine_nonexistent_file_does_not_change_file() {
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b':');
+        keys.push(b'e');
+        keys.extend_from_slice(b"/tmp/pgr_definitely_does_not_exist_xyz123");
+        keys.push(0x0A); // Enter
+        keys.push(b'q');
+
+        let content = make_test_content(50);
+        let pager = run_pager_with_files(&keys, vec![("file1.txt", &content)]);
+        let fl = pager.file_list().expect("file list should be set");
+        // File count should still be 1 — failed open didn't add anything.
+        assert_eq!(fl.file_count(), 1);
+        assert_eq!(fl.current().display_name, "file1.txt");
+    }
+
+    // Test: E key maps to ExamineAlt
+    #[test]
+    fn test_keymap_upper_e_maps_to_examine_alt() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('E')), Command::ExamineAlt);
+    }
+
+    // Test: :e with ESC cancels
+    #[test]
+    fn test_dispatch_examine_cancel_with_escape() {
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b':');
+        keys.push(b'e');
+        keys.push(0x1B); // Escape (standalone, at end of available input)
+                         // After cancel, we need a quit key. But ESC handling in key_reader
+                         // reads ahead... Let's just end input — pager exits on EOF.
+
+        let content = make_test_content(50);
+        let pager = run_pager_with_files(&keys, vec![("file1.txt", &content)]);
+        let fl = pager.file_list().expect("file list should be set");
+        // Nothing should have changed.
+        assert_eq!(fl.file_count(), 1);
+        assert_eq!(fl.current().display_name, "file1.txt");
+    }
+
+    // Test: Previous file tracking on file switch
+    #[test]
+    fn test_dispatch_previous_file_tracked_on_switch() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(30);
+        let pager = run_pager_with_files(
+            b":nq",
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        assert_eq!(pager.previous_file(), Some("file1.txt"));
+    }
+
+    // Test: Previous file updated when examining a new file
+    #[test]
+    fn test_dispatch_examine_updates_previous_file() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        tmp.write_all(b"new content\n").expect("write tempfile");
+        tmp.flush().expect("flush tempfile");
+        let path_str = tmp.path().to_str().expect("path to str");
+
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b':');
+        keys.push(b'e');
+        keys.extend_from_slice(path_str.as_bytes());
+        keys.push(0x0A);
+        keys.push(b'q');
+
+        let content = make_test_content(10);
+        let pager = run_pager_with_files(&keys, vec![("original.txt", &content)]);
+        assert_eq!(pager.previous_file(), Some("original.txt"));
+        assert_eq!(pager.filename(), Some(path_str));
+    }
+
+    // Test: ^X^V triggers examine
+    #[test]
+    fn test_dispatch_ctrl_x_ctrl_v_triggers_examine() {
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+        tmp.write_all(b"ctrl-x-v content\n")
+            .expect("write tempfile");
+        tmp.flush().expect("flush tempfile");
+        let path_str = tmp.path().to_str().expect("path to str");
+
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(0x18); // Ctrl+X
+        keys.push(0x16); // Ctrl+V
+        keys.extend_from_slice(path_str.as_bytes());
+        keys.push(0x0A); // Enter
+        keys.push(b'q');
+
+        let content = make_test_content(10);
+        let pager = run_pager_with_files(&keys, vec![("original.txt", &content)]);
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.file_count(), 2);
+        assert_eq!(fl.current().display_name, path_str);
     }
 }

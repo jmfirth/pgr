@@ -67,6 +67,10 @@ pub enum Command {
     FirstFile,
     /// Remove the current file from the list. `:d`.
     RemoveFile,
+    /// Examine (open) a new file. `:e [filename]`.
+    Examine,
+    /// Same as Examine (alternative bindings: `^X^V`, `E`).
+    ExamineAlt,
 }
 
 #[cfg(test)]

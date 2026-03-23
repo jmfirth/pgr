@@ -382,6 +382,8 @@ dependencies = [
  "libc",
  "pgr-core",
  "pgr-display",
+ "pgr-input",
+ "tempfile",
  "thiserror",
 ]
 

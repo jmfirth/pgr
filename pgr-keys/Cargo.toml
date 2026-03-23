@@ -7,4 +7,8 @@ edition = "2021"
 libc = "0.2"
 pgr-core = { path = "../pgr-core" }
 pgr-display = { path = "../pgr-display" }
+pgr-input = { path = "../pgr-input" }
 thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

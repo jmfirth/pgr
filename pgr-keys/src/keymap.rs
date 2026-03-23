@@ -93,6 +93,8 @@ impl Keymap {
             (Key::Char('J'), Command::ScrollForwardForce(1)),
             (Key::Char('K'), Command::ScrollBackwardForce(1)),
             (Key::Char('Y'), Command::ScrollBackwardForce(1)),
+            // Examine (open new file) — alternative binding
+            (Key::Char('E'), Command::ExamineAlt),
         ];
 
         Self { bindings }
