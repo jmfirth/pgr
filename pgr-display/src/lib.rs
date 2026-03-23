@@ -29,6 +29,6 @@ pub use render::{
 pub use screen::Screen;
 pub use squeeze::{is_blank_line, squeeze_visible_lines};
 pub use terminal_output::{
-    paint_error_message, paint_screen, paint_screen_mapped, paint_screen_with_options,
-    PaintOptions, ScreenLine,
+    clear_screen, paint_error_message, paint_screen, paint_screen_mapped,
+    paint_screen_with_options, PaintOptions, ScreenLine,
 };

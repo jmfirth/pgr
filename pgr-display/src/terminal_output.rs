@@ -94,36 +94,71 @@ pub fn paint_screen_with_options<W: Write>(
     // Move cursor to top-left
     move_cursor(writer, 1, 1)?;
 
-    for row in 0..content_rows {
-        if row > 0 {
-            // Move to the next row
-            move_cursor(writer, row + 1, 1)?;
+    // Track the current terminal row (1-based) to account for wrapped lines.
+    let mut screen_row: usize = 1;
+    let mut line_idx: usize = 0;
+
+    while screen_row <= content_rows {
+        if screen_row > 1 {
+            move_cursor(writer, screen_row, 1)?;
         }
 
-        if let Some(Some(line_text)) = lines.get(row) {
+        if let Some(Some(line_text)) = lines.get(line_idx) {
             if options.show_line_numbers {
-                // Line number is top_line + row + 1 (1-based)
-                let line_num = screen.top_line() + row + 1;
+                let line_num = screen.top_line() + line_idx + 1;
                 let formatted = line_numbers::format_line_number(line_num, ln_width);
                 writer.write_all(formatted.as_bytes())?;
             }
-            let (rendered, width) = render::render_line(line_text, h_offset, content_cols, config);
-            if chop_mode && content_cols > 0 {
-                let full_width = render::line_display_width(line_text, config);
-                let truncated_right = full_width > h_offset + content_cols;
-                let (chopped, _) =
-                    render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
-                writer.write_all(chopped.as_bytes())?;
+
+            if chop_mode {
+                // Chop mode: truncate at content_cols, apply markers
+                let (rendered, width) =
+                    render::render_line(line_text, h_offset, content_cols, config);
+                if content_cols > 0 {
+                    let full_width = render::line_display_width(line_text, config);
+                    let truncated_right = full_width > h_offset + content_cols;
+                    let (chopped, _) =
+                        render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
+                    writer.write_all(chopped.as_bytes())?;
+                } else {
+                    writer.write_all(rendered.as_bytes())?;
+                }
+                clear_to_eol(writer)?;
+                screen_row += 1;
             } else {
+                // Wrap mode (default): render the full line and let the
+                // terminal auto-wrap at the terminal width boundary.
+                let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
+                let (rendered, width) =
+                    render::render_line(line_text, h_offset, render_width, config);
                 writer.write_all(rendered.as_bytes())?;
+                clear_to_eol(writer)?;
+
+                // Calculate how many screen rows this line consumed.
+                let rows_used = if cols == 0 {
+                    1
+                } else {
+                    let total_display = ln_width + width;
+                    if total_display <= cols {
+                        1
+                    } else {
+                        // First row fills cols columns; each continuation
+                        // row also fills cols columns.
+                        let remaining = total_display.saturating_sub(cols);
+                        1 + remaining.div_ceil(cols)
+                    }
+                };
+                screen_row += rows_used;
             }
-        } else if !options.suppress_tildes {
-            // Beyond EOF: display tilde (unless suppressed by --tilde)
-            writer.write_all(b"~")?;
+        } else {
+            if !options.suppress_tildes {
+                writer.write_all(b"~")?;
+            }
+            clear_to_eol(writer)?;
+            screen_row += 1;
         }
 
-        // Clear to end of line
-        clear_to_eol(writer)?;
+        line_idx += 1;
     }
 
     writer.flush()?;
@@ -166,37 +201,71 @@ pub fn paint_screen_mapped<W: Write>(
     // Move cursor to top-left
     move_cursor(writer, 1, 1)?;
 
-    for row in 0..content_rows {
-        if row > 0 {
-            move_cursor(writer, row + 1, 1)?;
+    let mut screen_row: usize = 1;
+    let mut line_idx: usize = 0;
+
+    while screen_row <= content_rows {
+        if screen_row > 1 {
+            move_cursor(writer, screen_row, 1)?;
         }
 
-        if let Some(sl) = screen_lines.get(row) {
+        if let Some(sl) = screen_lines.get(line_idx) {
             if let Some(ref line_text) = sl.content {
                 if options.show_line_numbers {
                     let formatted = line_numbers::format_line_number(sl.line_number, ln_width);
                     writer.write_all(formatted.as_bytes())?;
                 }
-                let (rendered, width) =
-                    render::render_line(line_text, h_offset, content_cols, config);
-                if chop_mode && content_cols > 0 {
-                    let full_width = render::line_display_width(line_text, config);
-                    let truncated_right = full_width > h_offset + content_cols;
-                    let (chopped, _) =
-                        render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
-                    writer.write_all(chopped.as_bytes())?;
+
+                if chop_mode {
+                    let (rendered, width) =
+                        render::render_line(line_text, h_offset, content_cols, config);
+                    if content_cols > 0 {
+                        let full_width = render::line_display_width(line_text, config);
+                        let truncated_right = full_width > h_offset + content_cols;
+                        let (chopped, _) =
+                            render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
+                        writer.write_all(chopped.as_bytes())?;
+                    } else {
+                        writer.write_all(rendered.as_bytes())?;
+                    }
+                    clear_to_eol(writer)?;
+                    screen_row += 1;
                 } else {
+                    let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
+                    let (rendered, width) =
+                        render::render_line(line_text, h_offset, render_width, config);
                     writer.write_all(rendered.as_bytes())?;
+                    clear_to_eol(writer)?;
+
+                    let rows_used = if cols == 0 {
+                        1
+                    } else {
+                        let total_display = ln_width + width;
+                        if total_display <= cols {
+                            1
+                        } else {
+                            let remaining = total_display.saturating_sub(cols);
+                            1 + remaining.div_ceil(cols)
+                        }
+                    };
+                    screen_row += rows_used;
                 }
-            } else if !options.suppress_tildes {
-                // Beyond EOF: display tilde (unless suppressed)
+            } else {
+                if !options.suppress_tildes {
+                    writer.write_all(b"~")?;
+                }
+                clear_to_eol(writer)?;
+                screen_row += 1;
+            }
+        } else {
+            if !options.suppress_tildes {
                 writer.write_all(b"~")?;
             }
-        } else if !options.suppress_tildes {
-            writer.write_all(b"~")?;
+            clear_to_eol(writer)?;
+            screen_row += 1;
         }
 
-        clear_to_eol(writer)?;
+        line_idx += 1;
     }
 
     writer.flush()?;
@@ -422,19 +491,21 @@ mod tests {
 
     #[test]
     fn test_paint_screen_line_numbers_reduce_content_width() {
-        // 20 columns total, line number column takes 8 -> 12 for content
-        let screen = Screen::new(2, 20); // 1 content row
+        // 20 columns total, line number column takes 8 -> 12 for content.
+        // Chop mode is required to see truncation (wrap mode renders full lines).
+        let mut screen = Screen::new(2, 20); // 1 content row
+        screen.set_chop_mode(true);
         let lines: Vec<Option<String>> = vec![Some(
             "this is a longer line that should be truncated".to_string(),
         )];
 
         let config = RenderConfig::default();
 
-        // Without line numbers: 20 cols of content
+        // Without line numbers: 20 cols of content (chop marker at col 20)
         let output_no_ln = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let str_no_ln = String::from_utf8_lossy(&output_no_ln);
 
-        // With line numbers: 12 cols of content
+        // With line numbers: 12 cols of content (chop marker at col 12)
         let options = PaintOptions {
             show_line_numbers: true,
             total_lines: 50,
@@ -447,10 +518,16 @@ mod tests {
 
         // The version with line numbers should have the line number prefix
         assert!(str_ln.contains("      1 "));
-        // And should contain less content text (truncated earlier)
-        // "this is a longer" fits in 20 cols; with line nums only 12 cols
-        assert!(str_no_ln.contains("this is a longer lin"));
-        assert!(str_ln.contains("this is a lo"));
+        // And should contain less content text (truncated earlier).
+        // Chop marker replaces last char: "this is a longer li>" vs "this is a l>"
+        assert!(
+            str_no_ln.contains("this is a longer li>"),
+            "expected chopped line without line nums: {str_no_ln}"
+        );
+        assert!(
+            str_ln.contains("this is a l>"),
+            "expected chopped line with line nums: {str_ln}"
+        );
         assert!(!str_ln.contains("this is a longer"));
     }
 
@@ -696,10 +773,78 @@ mod tests {
         let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let output_str = String::from_utf8_lossy(&output);
 
-        // Even though line is truncated, chop mode is off so no markers
+        // With chop mode off, the full line is rendered (terminal auto-wraps)
+        // and no truncation markers are added.
         assert!(
             !output_str.contains('>'),
             "unexpected right marker when chop off: {output_str}"
         );
+    }
+
+    // --- Line wrapping tests ---
+
+    #[test]
+    fn test_paint_screen_wrap_mode_renders_full_line() {
+        // 10-col screen, chop mode OFF (default). A 15-char line should
+        // be rendered in full, letting the terminal auto-wrap.
+        let screen = Screen::new(4, 10); // 3 content rows
+        let lines: Vec<Option<String>> = vec![Some("abcdefghijklmno".to_string())];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // The full line content should be present (not truncated at 10)
+        assert!(
+            output_str.contains("abcdefghijklmno"),
+            "full line should be rendered in wrap mode: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_wrap_mode_accounts_for_wrapped_rows() {
+        // 10-col screen with 3 content rows. A 25-char line consumes 3
+        // screen rows (10+10+5), leaving no room for additional lines.
+        let screen = Screen::new(4, 10); // 3 content rows
+        let lines: Vec<Option<String>> = vec![
+            Some("abcdefghijklmnopqrstuvwxy".to_string()), // 25 chars = 3 rows
+            Some("second line".to_string()),
+            Some("third line".to_string()),
+        ];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // The first line should be fully rendered
+        assert!(
+            output_str.contains("abcdefghijklmnopqrstuvwxy"),
+            "first line should be fully rendered: {output_str}"
+        );
+        // The second line should NOT appear because the first line
+        // consumed all 3 content rows.
+        assert!(
+            !output_str.contains("second line"),
+            "second line should not fit when first line wraps to 3 rows: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_wrap_mode_short_lines_no_wrap() {
+        // Lines shorter than terminal width behave identically to before.
+        let screen = Screen::new(4, 80); // 3 content rows
+        let lines: Vec<Option<String>> = vec![
+            Some("short 1".to_string()),
+            Some("short 2".to_string()),
+            Some("short 3".to_string()),
+        ];
+
+        let config = RenderConfig::default();
+        let output = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(output_str.contains("short 1"));
+        assert!(output_str.contains("short 2"));
+        assert!(output_str.contains("short 3"));
     }
 }
