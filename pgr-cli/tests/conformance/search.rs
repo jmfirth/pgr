@@ -101,7 +101,7 @@ fn test_conformance_search_forward_scrolls_to_match() {
 /// SPEC: Scroll to the middle of the file, then search backward for "error".
 /// Both pagers should move the cursor to a match above the current position.
 #[test]
-#[ignore = "pgr backward search finds wrong match (skips last occurrence)"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_backward_finds_match() {
     skip_if_no_less!();
     let file = generate_search_basic();
@@ -153,7 +153,7 @@ fn test_conformance_search_backward_no_match() {
 /// SPEC: At line 1, search backward. If wrap is enabled (default), the search
 /// should wrap around to find matches from the end of the file.
 #[test]
-#[ignore = "pgr backward search wrap behavior differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_backward_wraps_from_beginning() {
     skip_if_no_less!();
     let file = generate_search_basic();
@@ -641,7 +641,7 @@ fn test_conformance_search_filter_inverted() {
 /// SPEC: Pressing Ctrl-R before the pattern disables regex interpretation,
 /// treating the pattern as a literal string.
 #[test]
-#[ignore = "pgr Ctrl-R literal search modifier not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_ctrl_r_literal() {
     skip_if_no_less!();
     let file = generate_search_regex();
@@ -695,7 +695,7 @@ fn test_conformance_search_ctrl_w_wrap() {
 /// SPEC: Pressing Ctrl-N before the pattern inverts the match, finding
 /// the next line that does NOT contain the pattern.
 #[test]
-#[ignore = "pgr Ctrl-N inverted search modifier not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_search_ctrl_n_inverted() {
     skip_if_no_less!();
     let file = generate_search_highlight();

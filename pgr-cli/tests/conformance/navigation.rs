@@ -61,7 +61,7 @@ fn test_conformance_navigation_b_pages_backward() {
 
 /// Test 6: d (half page forward) — send `d`, compare.
 #[test]
-#[ignore = "pgr half-page scroll off-by-one vs less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_navigation_d_half_page_forward() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -70,7 +70,7 @@ fn test_conformance_navigation_d_half_page_forward() {
 
 /// Test 7: u (half page backward) — send `ddu`, compare.
 #[test]
-#[ignore = "pgr half-page scroll off-by-one vs less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_navigation_u_half_page_backward() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -97,7 +97,7 @@ fn test_conformance_navigation_g_upper_goes_to_end() {
 
 /// Test 10: Down arrow — send down arrow key, compare with same result as `j`.
 #[test]
-#[ignore = "pgr arrow key escape sequence handling differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_navigation_down_arrow() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -107,7 +107,7 @@ fn test_conformance_navigation_down_arrow() {
 
 /// Test 11: Up arrow — send up arrow after scrolling, compare with same result as `k`.
 #[test]
-#[ignore = "pgr arrow key escape sequence handling differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_navigation_up_arrow() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -292,7 +292,7 @@ fn test_conformance_navigation_u_sticky_count() {
 ///
 /// ESC followed by Space is "forward one window, but don't stop at EOF".
 #[test]
-#[ignore = "pgr ESC-Space forward-past-EOF behavior differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_navigation_esc_space_forward_past_eof() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
@@ -306,7 +306,7 @@ fn test_conformance_navigation_esc_space_forward_past_eof() {
 
 /// Test 28: ESC-b — scroll backward one window (different from `b` with wrapping).
 #[test]
-#[ignore = "pgr ESC-b backward window scroll differs from less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_navigation_esc_b_backward() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);

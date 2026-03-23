@@ -25,7 +25,7 @@ use super::helpers::{
 ///
 /// Opens two files, sends `:n\n`, verifies the second file is displayed.
 #[test]
-#[ignore = "pgr :n file switching not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_file_next_switches_to_second_file() {
     skip_if_no_less!();
 
@@ -41,7 +41,7 @@ fn test_conformance_file_next_switches_to_second_file() {
 ///
 /// Opens two files, navigates to second with `:n`, then back with `:p`.
 #[test]
-#[ignore = "pgr :n/:p file switching not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_file_prev_returns_to_first_file() {
     skip_if_no_less!();
 
@@ -58,7 +58,7 @@ fn test_conformance_file_prev_returns_to_first_file() {
 /// Opens two files, navigates to the last file, then tries `:n` again.
 /// Both pagers should display an error or stay on the last file.
 #[test]
-#[ignore = "pgr :n file switching not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_file_next_at_last_file() {
     skip_if_no_less!();
 
@@ -74,7 +74,7 @@ fn test_conformance_file_next_at_last_file() {
 ///
 /// Opens two files and tries `:p` while on the first file.
 #[test]
-#[ignore = "pgr :p file switching not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_file_prev_at_first_file() {
     skip_if_no_less!();
 
@@ -90,7 +90,7 @@ fn test_conformance_file_prev_at_first_file() {
 ///
 /// Opens three files, removes the first with `:d`, verifies second file shown.
 #[test]
-#[ignore = "pgr :d file deletion not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_file_delete_removes_current() {
     skip_if_no_less!();
 
@@ -108,7 +108,7 @@ fn test_conformance_file_delete_removes_current() {
 ///
 /// Opens three files, navigates to the third, then `:x` goes back to first.
 #[test]
-#[ignore = "pgr :x file navigation not working"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_file_first_returns_to_first() {
     skip_if_no_less!();
 
