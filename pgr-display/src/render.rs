@@ -367,8 +367,11 @@ const STANDOUT_OFF: &str = "\x1b[0m";
 /// Render a single line with optional search highlighting.
 ///
 /// Behaves identically to [`render_line`] but additionally wraps matched
-/// byte ranges in standout (reverse video) escape sequences. Each element
-/// of `highlights` is a `(start, end)` byte-offset pair into `line`.
+/// byte ranges in highlight escape sequences. Each element of `highlights`
+/// is a `(start, end)` byte-offset pair into `line`.
+///
+/// `highlight_sgr` is the SGR sequence for search matches (from `ColorConfig`
+/// selector `'S'`). If `None`, falls back to reverse video (`\x1b[7m`).
 ///
 /// Highlights that fall outside the visible horizontal window are clipped.
 /// Multiple highlights on one line are rendered independently.
@@ -381,6 +384,7 @@ pub fn render_line_highlighted(
     max_width: usize,
     config: &RenderConfig,
     highlights: &[(usize, usize)],
+    highlight_sgr: Option<&str>,
 ) -> (String, usize) {
     if highlights.is_empty() {
         return render_line(line, horizontal_offset, max_width, config);
@@ -402,6 +406,9 @@ pub fn render_line_highlighted(
         line
     };
 
+    let hl_on = highlight_sgr.unwrap_or(STANDOUT_ON);
+    let hl_off = STANDOUT_OFF;
+
     match config.raw_mode {
         RawControlMode::Off => render_off_highlighted(
             effective_line,
@@ -409,6 +416,8 @@ pub fn render_line_highlighted(
             max_width,
             &config.tab_stops,
             highlights,
+            hl_on,
+            hl_off,
         ),
         RawControlMode::AnsiOnly => render_ansi_only_highlighted(
             effective_line,
@@ -416,10 +425,40 @@ pub fn render_line_highlighted(
             max_width,
             &config.tab_stops,
             highlights,
+            hl_on,
+            hl_off,
         ),
         // In raw passthrough mode, we don't apply highlights since we can't
         // reliably track character positions. Fall back to un-highlighted.
         RawControlMode::All => render_all(effective_line, horizontal_offset, max_width),
+    }
+}
+
+/// Render a single line with mark color applied to the entire line.
+///
+/// When a line has a mark set, the entire rendered line is wrapped in
+/// the mark SGR sequence. If `mark_sgr` is `None`, the line is rendered
+/// without any mark coloring.
+///
+/// Returns `(rendered_string, display_width)`.
+#[must_use]
+pub fn render_line_marked(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    config: &RenderConfig,
+    mark_sgr: Option<&str>,
+) -> (String, usize) {
+    let (rendered, width) = render_line(line, horizontal_offset, max_width, config);
+    match mark_sgr {
+        Some(sgr) if !sgr.is_empty() => {
+            let mut result = String::with_capacity(sgr.len() + rendered.len() + STANDOUT_OFF.len());
+            result.push_str(sgr);
+            result.push_str(&rendered);
+            result.push_str(STANDOUT_OFF);
+            (result, width)
+        }
+        _ => (rendered, width),
     }
 }
 
@@ -437,6 +476,8 @@ fn render_off_highlighted(
     max_width: usize,
     tab_stops: &TabStops,
     highlights: &[(usize, usize)],
+    hl_on: &str,
+    hl_off: &str,
 ) -> (String, usize) {
     let stripped = ansi::strip_ansi(line);
     render_chars_highlighted(
@@ -445,6 +486,8 @@ fn render_off_highlighted(
         max_width,
         tab_stops,
         highlights,
+        hl_on,
+        hl_off,
     )
 }
 
@@ -455,6 +498,8 @@ fn render_ansi_only_highlighted(
     max_width: usize,
     tab_stops: &TabStops,
     highlights: &[(usize, usize)],
+    hl_on: &str,
+    hl_off: &str,
 ) -> (String, usize) {
     let segments = ansi::parse_ansi(line);
     let mut output = String::with_capacity(line.len());
@@ -500,10 +545,10 @@ fn render_ansi_only_highlighted(
 
                     let should_highlight = is_highlighted(byte_offset, highlights);
                     if should_highlight && !in_standout {
-                        output.push_str(STANDOUT_ON);
+                        output.push_str(hl_on);
                         in_standout = true;
                     } else if !should_highlight && in_standout {
-                        output.push_str(STANDOUT_OFF);
+                        output.push_str(hl_off);
                         in_standout = false;
                     }
 
@@ -518,7 +563,7 @@ fn render_ansi_only_highlighted(
     }
 
     if in_standout {
-        output.push_str(STANDOUT_OFF);
+        output.push_str(hl_off);
     }
 
     (output, visible_width)
@@ -531,6 +576,8 @@ fn render_chars_highlighted(
     max_width: usize,
     tab_stops: &TabStops,
     highlights: &[(usize, usize)],
+    hl_on: &str,
+    hl_off: &str,
 ) -> (String, usize) {
     let mut output = String::with_capacity(text.len());
     let mut col: usize = 0;
@@ -563,10 +610,10 @@ fn render_chars_highlighted(
 
         let should_highlight = is_highlighted(byte_offset, highlights);
         if should_highlight && !in_standout {
-            output.push_str(STANDOUT_ON);
+            output.push_str(hl_on);
             in_standout = true;
         } else if !should_highlight && in_standout {
-            output.push_str(STANDOUT_OFF);
+            output.push_str(hl_off);
             in_standout = false;
         }
 
@@ -577,7 +624,7 @@ fn render_chars_highlighted(
     }
 
     if in_standout {
-        output.push_str(STANDOUT_OFF);
+        output.push_str(hl_off);
     }
 
     (output, visible_width)
@@ -939,7 +986,7 @@ mod tests {
         let config = default_config();
         let line = "hello world";
         let (normal, normal_w) = render_line(line, 0, 80, &config);
-        let (highlighted, highlighted_w) = render_line_highlighted(line, 0, 80, &config, &[]);
+        let (highlighted, highlighted_w) = render_line_highlighted(line, 0, 80, &config, &[], None);
         assert_eq!(normal, highlighted);
         assert_eq!(normal_w, highlighted_w);
     }
@@ -949,7 +996,8 @@ mod tests {
     fn test_render_line_highlighted_one_match_wraps_in_reverse_video() {
         let config = default_config();
         // "hello world" — highlight "world" at bytes 6..11
-        let (rendered, width) = render_line_highlighted("hello world", 0, 80, &config, &[(6, 11)]);
+        let (rendered, width) =
+            render_line_highlighted("hello world", 0, 80, &config, &[(6, 11)], None);
         assert_eq!(rendered, format!("hello {STANDOUT_ON}world{STANDOUT_OFF}"));
         assert_eq!(width, 11);
     }
@@ -959,7 +1007,8 @@ mod tests {
     fn test_render_line_highlighted_multiple_matches_each_highlighted() {
         let config = default_config();
         // "ab cd ab" — highlight "ab" at bytes 0..2 and 6..8
-        let (rendered, _) = render_line_highlighted("ab cd ab", 0, 80, &config, &[(0, 2), (6, 8)]);
+        let (rendered, _) =
+            render_line_highlighted("ab cd ab", 0, 80, &config, &[(0, 2), (6, 8)], None);
         assert_eq!(
             rendered,
             format!("{STANDOUT_ON}ab{STANDOUT_OFF} cd {STANDOUT_ON}ab{STANDOUT_OFF}")
@@ -972,7 +1021,8 @@ mod tests {
         let config = default_config();
         // "hello world" with offset 8, max_width 80 — only "rld" is visible (bytes 8..11)
         // Highlight is on "world" (bytes 6..11), so the visible portion "rld" should be highlighted
-        let (rendered, width) = render_line_highlighted("hello world", 8, 80, &config, &[(6, 11)]);
+        let (rendered, width) =
+            render_line_highlighted("hello world", 8, 80, &config, &[(6, 11)], None);
         assert_eq!(rendered, format!("{STANDOUT_ON}rld{STANDOUT_OFF}"));
         assert_eq!(width, 3);
     }
@@ -982,7 +1032,8 @@ mod tests {
         let config = default_config();
         // "hello world" with offset 6 — "world" visible
         // Highlight is on "hello" (bytes 0..5) — entirely before viewport
-        let (rendered, width) = render_line_highlighted("hello world", 6, 80, &config, &[(0, 5)]);
+        let (rendered, width) =
+            render_line_highlighted("hello world", 6, 80, &config, &[(0, 5)], None);
         assert_eq!(rendered, "world");
         assert_eq!(width, 5);
     }
@@ -990,7 +1041,97 @@ mod tests {
     #[test]
     fn test_render_line_highlighted_highlight_at_start_of_line() {
         let config = default_config();
-        let (rendered, _) = render_line_highlighted("hello world", 0, 80, &config, &[(0, 5)]);
+        let (rendered, _) = render_line_highlighted("hello world", 0, 80, &config, &[(0, 5)], None);
         assert_eq!(rendered, format!("{STANDOUT_ON}hello{STANDOUT_OFF} world"));
+    }
+
+    // --- Color integration tests ---
+
+    #[test]
+    fn test_render_line_highlighted_custom_sgr_uses_provided_sequence() {
+        let config = default_config();
+        let custom_sgr = "\x1b[32;44m"; // green on blue
+        let (rendered, _) =
+            render_line_highlighted("hello world", 0, 80, &config, &[(6, 11)], Some(custom_sgr));
+        assert_eq!(rendered, format!("hello {custom_sgr}world{STANDOUT_OFF}"));
+    }
+
+    #[test]
+    fn test_render_line_highlighted_none_sgr_falls_back_to_reverse_video() {
+        let config = default_config();
+        let (rendered, _) =
+            render_line_highlighted("hello world", 0, 80, &config, &[(6, 11)], None);
+        assert_eq!(rendered, format!("hello {STANDOUT_ON}world{STANDOUT_OFF}"));
+    }
+
+    #[test]
+    fn test_render_line_highlighted_multiple_highlights_use_custom_color() {
+        let config = default_config();
+        let custom_sgr = "\x1b[1;33m"; // bold yellow
+        let (rendered, _) = render_line_highlighted(
+            "ab cd ab",
+            0,
+            80,
+            &config,
+            &[(0, 2), (6, 8)],
+            Some(custom_sgr),
+        );
+        assert_eq!(
+            rendered,
+            format!("{custom_sgr}ab{STANDOUT_OFF} cd {custom_sgr}ab{STANDOUT_OFF}")
+        );
+    }
+
+    #[test]
+    fn test_render_line_highlighted_reset_follows_every_colored_region() {
+        let config = default_config();
+        let custom_sgr = "\x1b[31m";
+        let (rendered, _) = render_line_highlighted(
+            "ab cd ab",
+            0,
+            80,
+            &config,
+            &[(0, 2), (6, 8)],
+            Some(custom_sgr),
+        );
+        // Count reset sequences — should be 2 (one per highlighted region)
+        let reset_count = rendered.matches(STANDOUT_OFF).count();
+        assert_eq!(reset_count, 2);
+    }
+
+    #[test]
+    fn test_render_line_highlighted_color_does_not_bleed_across_lines() {
+        let config = default_config();
+        let custom_sgr = "\x1b[31m";
+        let (rendered, _) =
+            render_line_highlighted("hello world", 0, 80, &config, &[(6, 11)], Some(custom_sgr));
+        // Must end with reset, not with custom_sgr active
+        assert!(rendered.ends_with(STANDOUT_OFF));
+    }
+
+    // --- Mark rendering tests ---
+
+    #[test]
+    fn test_render_line_marked_with_sgr_wraps_line() {
+        let config = default_config();
+        let mark_sgr = "\x1b[43m"; // yellow background
+        let (rendered, width) = render_line_marked("hello", 0, 80, &config, Some(mark_sgr));
+        assert_eq!(rendered, format!("{mark_sgr}hello{STANDOUT_OFF}"));
+        assert_eq!(width, 5);
+    }
+
+    #[test]
+    fn test_render_line_marked_none_sgr_renders_plain() {
+        let config = default_config();
+        let (rendered, width) = render_line_marked("hello", 0, 80, &config, None);
+        assert_eq!(rendered, "hello");
+        assert_eq!(width, 5);
+    }
+
+    #[test]
+    fn test_render_line_marked_empty_sgr_renders_plain() {
+        let config = default_config();
+        let (rendered, _) = render_line_marked("hello", 0, 80, &config, Some(""));
+        assert_eq!(rendered, "hello");
     }
 }

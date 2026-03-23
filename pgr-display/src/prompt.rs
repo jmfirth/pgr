@@ -308,11 +308,12 @@ fn expand_escape(escape: char, ctx: &PromptContext<'_>, out: &mut String) {
     }
 }
 
-/// Render the prompt on the last row of the screen.
+/// Render the prompt on the last row of the screen with the configured color.
 ///
-/// Clears the row first, then renders in standout (reverse video) mode,
-/// matching less behavior. The prompt text is truncated to fit within
-/// `screen_cols`.
+/// Clears the row first, then renders using the provided SGR sequence.
+/// If `prompt_sgr` is `None`, falls back to reverse video (standout mode),
+/// matching less default behavior. The prompt text is truncated to fit
+/// within `screen_cols`.
 ///
 /// # Errors
 ///
@@ -322,6 +323,7 @@ pub fn paint_prompt<W: Write>(
     prompt_text: &str,
     screen_rows: usize,
     screen_cols: usize,
+    prompt_sgr: Option<&str>,
 ) -> std::io::Result<()> {
     // Move cursor to last row, column 1 (1-based ANSI coordinates)
     write!(writer, "\x1b[{screen_rows};1H")?;
@@ -329,8 +331,9 @@ pub fn paint_prompt<W: Write>(
     write!(writer, "\x1b[2K")?;
     // Truncate prompt to screen width
     let display_text: String = prompt_text.chars().take(screen_cols).collect();
-    // Render in reverse video (standout mode)
-    write!(writer, "\x1b[7m{display_text}\x1b[0m")?;
+    // Render with configured color or fallback to reverse video
+    let sgr = prompt_sgr.unwrap_or("\x1b[7m");
+    write!(writer, "{sgr}{display_text}\x1b[0m")?;
     writer.flush()
 }
 
@@ -574,7 +577,7 @@ mod tests {
     #[test]
     fn test_paint_prompt_output_includes_reverse_video_and_cursor() {
         let mut buf: Vec<u8> = Vec::new();
-        paint_prompt(&mut buf, "test prompt", 24, 80).unwrap();
+        paint_prompt(&mut buf, "test prompt", 24, 80, None).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(
@@ -590,6 +593,32 @@ mod tests {
         assert!(
             output.contains("test prompt"),
             "missing prompt text: {output}"
+        );
+    }
+
+    #[test]
+    fn test_paint_prompt_with_custom_sgr_uses_provided_color() {
+        let mut buf: Vec<u8> = Vec::new();
+        let custom_sgr = "\x1b[1;33m"; // bold yellow
+        paint_prompt(&mut buf, "colored prompt", 24, 80, Some(custom_sgr)).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains(custom_sgr), "missing custom SGR: {output}");
+        assert!(
+            !output.contains("\x1b[7m"),
+            "should not contain reverse video when custom SGR provided: {output}"
+        );
+        assert!(output.contains("\x1b[0m"), "missing reset: {output}");
+    }
+
+    #[test]
+    fn test_paint_prompt_none_sgr_falls_back_to_reverse_video() {
+        let mut buf: Vec<u8> = Vec::new();
+        paint_prompt(&mut buf, "prompt", 24, 80, None).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("\x1b[7m"),
+            "should use reverse video when sgr is None: {output}"
         );
     }
 

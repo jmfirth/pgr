@@ -294,6 +294,60 @@ impl ColorConfig {
     pub fn set(&mut self, selector: ColorSelector, spec: ColorSpec) {
         self.specs.insert(selector, spec);
     }
+
+    /// Get the SGR escape sequence for a selector.
+    ///
+    /// Returns `Some(sgr_string)` if the selector has a non-empty color spec,
+    /// or `None` if no spec is set (or the spec produces no SGR codes).
+    /// The caller should fall back to reverse video when `None` is returned.
+    #[must_use]
+    pub fn get_sgr(&self, selector: ColorSelector) -> Option<String> {
+        self.specs
+            .get(&selector)
+            .map(ColorSpec::to_sgr)
+            .filter(|s| !s.is_empty())
+    }
+}
+
+/// Auto-detection for terminal color support.
+///
+/// Determines whether the output terminal supports ANSI color sequences
+/// based on environment variables and terminal state.
+pub struct ColorAutoDetect;
+
+impl ColorAutoDetect {
+    /// Detect whether color output should be enabled.
+    ///
+    /// Color is disabled when any of these conditions holds:
+    /// - `NO_COLOR` environment variable is set (any value)
+    /// - `TERM` is set to `dumb`
+    /// - `force_disable` is `true` (from `--use-color=false`)
+    ///
+    /// When `force_enable` is `true` (from `--use-color=always`), color is
+    /// always enabled regardless of other conditions.
+    #[must_use]
+    pub fn detect(force_enable: bool, force_disable: bool) -> bool {
+        if force_disable {
+            return false;
+        }
+        if force_enable {
+            return true;
+        }
+
+        // NO_COLOR convention: https://no-color.org/
+        if std::env::var_os("NO_COLOR").is_some() {
+            return false;
+        }
+
+        // TERM=dumb means no color support
+        if let Ok(term) = std::env::var("TERM") {
+            if term == "dumb" {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 /// Parse the color/attribute portion of a `-D` spec (after the selector character).
@@ -605,5 +659,101 @@ mod tests {
         let n = config.get(ColorSelector::LineNumber);
         assert_eq!(n.fg, Some(Color::Extended(128)));
         assert_eq!(n.bg, Some(Color::Extended(200)));
+    }
+
+    // --- get_sgr tests ---
+
+    #[test]
+    fn test_color_config_get_sgr_returns_correct_string() {
+        let config = ColorConfig::default_less();
+        let sgr = config.get_sgr(ColorSelector::Search);
+        assert_eq!(sgr, Some("\x1b[7m".to_string()));
+    }
+
+    #[test]
+    fn test_color_config_get_sgr_unset_returns_none() {
+        let config = ColorConfig::default_less();
+        let sgr = config.get_sgr(ColorSelector::Binary);
+        assert_eq!(sgr, None);
+    }
+
+    #[test]
+    fn test_color_config_get_sgr_empty_spec_returns_none() {
+        let mut config = ColorConfig::default_less();
+        config.set(ColorSelector::Binary, ColorSpec::new());
+        let sgr = config.get_sgr(ColorSelector::Binary);
+        assert_eq!(sgr, None);
+    }
+
+    #[test]
+    fn test_empty_color_config_uses_defaults_reverse_video() {
+        // An empty ColorConfig (no -D flags) has no specs, so get_sgr returns None
+        // for all selectors, which means callers fall back to reverse video.
+        let config = ColorConfig {
+            specs: HashMap::new(),
+        };
+        assert_eq!(config.get_sgr(ColorSelector::Search), None);
+        assert_eq!(config.get_sgr(ColorSelector::Prompt), None);
+        assert_eq!(config.get_sgr(ColorSelector::Error), None);
+        assert_eq!(config.get_sgr(ColorSelector::LineNumber), None);
+    }
+
+    // --- ColorAutoDetect tests ---
+
+    #[test]
+    fn test_auto_detect_force_disable_returns_false() {
+        assert!(!ColorAutoDetect::detect(false, true));
+    }
+
+    #[test]
+    fn test_auto_detect_force_enable_returns_true() {
+        assert!(ColorAutoDetect::detect(true, false));
+    }
+
+    #[test]
+    fn test_auto_detect_force_disable_overrides_force_enable() {
+        // force_disable is checked first
+        assert!(!ColorAutoDetect::detect(true, true));
+    }
+
+    // NOTE: The following tests manipulate environment variables, which is
+    // inherently not thread-safe. In the standard test runner these are safe
+    // because each test function runs in isolation within the same thread.
+    // They use force_enable=false, force_disable=false to exercise the
+    // env-var detection path.
+
+    #[test]
+    fn test_auto_detect_no_color_env_disables_color() {
+        // Save and set NO_COLOR
+        let saved = std::env::var_os("NO_COLOR");
+        std::env::set_var("NO_COLOR", "1");
+        let result = ColorAutoDetect::detect(false, false);
+        // Restore
+        match saved {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_auto_detect_term_dumb_disables_color() {
+        // Save and set TERM
+        let saved_term = std::env::var_os("TERM");
+        let saved_no_color = std::env::var_os("NO_COLOR");
+        // Ensure NO_COLOR is not set (it takes priority over TERM)
+        std::env::remove_var("NO_COLOR");
+        std::env::set_var("TERM", "dumb");
+        let result = ColorAutoDetect::detect(false, false);
+        // Restore
+        match saved_term {
+            Some(v) => std::env::set_var("TERM", v),
+            None => std::env::remove_var("TERM"),
+        }
+        match saved_no_color {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
+        assert!(!result);
     }
 }

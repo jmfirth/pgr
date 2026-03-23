@@ -219,6 +219,34 @@ pub fn set_cursor_visible<W: Write>(writer: &mut W, visible: bool) -> std::io::R
     }
 }
 
+/// Paint an error message on the status line with error color.
+///
+/// Displays the message on the last row of the screen using the provided
+/// `error_sgr` sequence. If `error_sgr` is `None`, falls back to bold
+/// reverse video (matching less default error styling).
+///
+/// # Errors
+///
+/// Returns an I/O error if writing to `writer` fails.
+pub fn paint_error_message<W: Write>(
+    writer: &mut W,
+    message: &str,
+    screen_rows: usize,
+    screen_cols: usize,
+    error_sgr: Option<&str>,
+) -> std::io::Result<()> {
+    // Move cursor to last row, column 1
+    write!(writer, "\x1b[{screen_rows};1H")?;
+    // Clear the entire line
+    write!(writer, "\x1b[2K")?;
+    // Truncate message to screen width
+    let display_text: String = message.chars().take(screen_cols).collect();
+    // Render with configured color or fallback to bold reverse video
+    let sgr = error_sgr.unwrap_or("\x1b[1;7m");
+    write!(writer, "{sgr}{display_text}\x1b[0m")?;
+    writer.flush()
+}
+
 /// Clear from the cursor position to the end of the current line.
 ///
 /// Emits `ESC[K`.
@@ -481,5 +509,68 @@ mod tests {
         // 2 tildes: one from screen_lines[1] (None content), one from missing row 2
         let tilde_count = output_str.matches('~').count();
         assert_eq!(tilde_count, 2);
+    }
+
+    // --- Error message rendering tests ---
+
+    #[test]
+    fn test_paint_error_message_with_custom_sgr_uses_provided_color() {
+        let custom_sgr = "\x1b[1;31m"; // bold red
+        let output = capture_output(|w| {
+            paint_error_message(w, "Pattern not found", 24, 80, Some(custom_sgr))
+        });
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(
+            output_str.contains(custom_sgr),
+            "missing custom SGR: {output_str}"
+        );
+        assert!(
+            output_str.contains("Pattern not found"),
+            "missing error message: {output_str}"
+        );
+        assert!(
+            output_str.contains("\x1b[0m"),
+            "missing reset: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_error_message_none_sgr_falls_back_to_bold_reverse() {
+        let output = capture_output(|w| paint_error_message(w, "error msg", 24, 80, None));
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(
+            output_str.contains("\x1b[1;7m"),
+            "should use bold reverse video when sgr is None: {output_str}"
+        );
+        assert!(
+            output_str.contains("error msg"),
+            "missing error text: {output_str}"
+        );
+        assert!(
+            output_str.contains("\x1b[0m"),
+            "missing reset: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_error_message_positions_cursor_on_last_row() {
+        let output = capture_output(|w| paint_error_message(w, "test", 24, 80, None));
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("\x1b[24;1H"),
+            "missing cursor positioning: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_error_message_clears_line() {
+        let output = capture_output(|w| paint_error_message(w, "test", 24, 80, None));
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("\x1b[2K"),
+            "missing line clear: {output_str}"
+        );
     }
 }

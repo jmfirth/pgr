@@ -690,7 +690,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         let text = render_prompt(&self.prompt_style, &ctx);
-        paint_prompt(&mut self.writer, &text, rows, cols)?;
+        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
 
         Ok(())
     }
