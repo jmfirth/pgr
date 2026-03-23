@@ -12,6 +12,10 @@ pub enum SearchError {
     /// A search pattern was invalid.
     #[error("invalid pattern: {0}")]
     InvalidPattern(String),
+
+    /// An error propagated from the core crate (buffer/index operations).
+    #[error("core error: {0}")]
+    Core(#[from] pgr_core::CoreError),
 }
 
 /// A specialized `Result` type for search operations.
