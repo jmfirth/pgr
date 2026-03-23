@@ -141,6 +141,17 @@ impl FileList {
         let entry = &self.entries[self.current];
         (entry.saved_top_line, entry.saved_horizontal_offset)
     }
+
+    /// Swap the current entry's buffer and index with the caller's.
+    ///
+    /// Used during file switching to move the pager's active buffer/index
+    /// into the outgoing entry and the incoming entry's buffer/index into
+    /// the pager.
+    pub fn swap_buffer_and_index(&mut self, buffer: &mut Box<dyn Buffer>, index: &mut LineIndex) {
+        let entry = &mut self.entries[self.current];
+        std::mem::swap(&mut entry.buffer, buffer);
+        std::mem::swap(&mut entry.index, index);
+    }
 }
 
 /// Errors from file list operations.

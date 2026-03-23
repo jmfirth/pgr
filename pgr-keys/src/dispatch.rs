@@ -1098,53 +1098,96 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Switch to the next file in the file list.
     fn switch_file_next(&mut self) -> Result<()> {
-        if let Some(ref mut file_list) = self.file_list {
+        let switched = if let Some(ref mut file_list) = self.file_list {
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
             let old_name = self.filename.clone();
-            if file_list.next().is_ok() {
-                self.previous_file = old_name;
-                self.apply_current_file();
+            if file_list.next().is_err() {
+                // Undo the swap — restore pager's buffer from the same entry.
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                self.status_message = Some("No next file".to_string());
                 self.repaint()?;
+                return Ok(());
             }
+            self.previous_file = old_name;
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.apply_current_file_impl(true);
+            self.repaint()?;
         }
         Ok(())
     }
 
     /// Switch to the previous file in the file list.
     fn switch_file_prev(&mut self) -> Result<()> {
-        if let Some(ref mut file_list) = self.file_list {
+        let switched = if let Some(ref mut file_list) = self.file_list {
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
             let old_name = self.filename.clone();
-            if file_list.prev().is_ok() {
-                self.previous_file = old_name;
-                self.apply_current_file();
+            if file_list.prev().is_err() {
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                self.status_message = Some("No previous file".to_string());
                 self.repaint()?;
+                return Ok(());
             }
+            self.previous_file = old_name;
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.apply_current_file_impl(true);
+            self.repaint()?;
         }
         Ok(())
     }
 
     /// Switch to the N-th file (0-based) in the file list.
     fn switch_file_goto(&mut self, index: usize) -> Result<()> {
-        if let Some(ref mut file_list) = self.file_list {
+        let switched = if let Some(ref mut file_list) = self.file_list {
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
             let old_name = self.filename.clone();
-            if file_list.goto(index).is_ok() {
-                self.previous_file = old_name;
-                self.apply_current_file();
-                self.repaint()?;
+            if file_list.goto(index).is_err() {
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                return Ok(());
             }
+            self.previous_file = old_name;
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.apply_current_file_impl(true);
+            self.repaint()?;
         }
         Ok(())
     }
 
     /// Remove the current file from the file list.
     fn remove_current_file(&mut self) -> Result<()> {
-        if let Some(ref mut file_list) = self.file_list {
-            if file_list.remove_current().is_ok() {
-                self.apply_current_file();
-                self.repaint()?;
+        let removed = if let Some(ref mut file_list) = self.file_list {
+            // Save pager's buffer/index into the entry about to be removed.
+            // After remove_current, the entry is dropped and the cursor moves
+            // to the next (or previous) file.
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+            if file_list.remove_current().is_err() {
+                // Undo the swap.
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                false
+            } else {
+                true
             }
+        } else {
+            false
+        };
+        if removed {
+            self.apply_current_file_impl(true);
+            self.repaint()?;
         }
         Ok(())
     }
@@ -1235,6 +1278,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if let Some(ref mut file_list) = self.file_list {
                     file_list
                         .save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+                    file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
                     file_list.push(entry);
                     let new_index = file_list.file_count() - 1;
                     let _ = file_list.goto(new_index);
@@ -1244,7 +1288,8 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
 
                 self.previous_file = old_name;
-                self.apply_current_file();
+                // Always swap: loads the new file's buffer into the pager.
+                self.apply_current_file_impl(true);
                 self.repaint()?;
             }
             Err(e) => {
@@ -1382,14 +1427,29 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Load the current file's display name and viewport into the pager state.
-    fn apply_current_file(&mut self) {
-        if let Some(ref file_list) = self.file_list {
+    ///
+    /// When `swap_buffers` is true, also swap the pager's buffer/index with the
+    /// current entry's buffer/index. This is used during file switching (after
+    /// saving the old entry's state). When false, only metadata is restored
+    /// (used during initial `set_file_list` where the pager already has the
+    /// correct buffer).
+    fn apply_current_file_impl(&mut self, swap_buffers: bool) {
+        if let Some(ref mut file_list) = self.file_list {
+            if swap_buffers {
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+            }
             let entry = file_list.current();
-            let (top_line, h_offset) = file_list.saved_viewport();
+            let (top_line, h_offset) = (entry.saved_top_line, entry.saved_horizontal_offset);
             self.filename = Some(entry.display_name.clone());
             self.screen.goto_line(top_line, usize::MAX);
             self.screen.set_horizontal_offset(h_offset);
         }
+    }
+
+    /// Load the current file's display name and viewport into the pager state.
+    /// Does not swap buffers — used during initial file list setup.
+    fn apply_current_file(&mut self) {
+        self.apply_current_file_impl(false);
     }
 
     /// Set the file list for multi-file navigation.
