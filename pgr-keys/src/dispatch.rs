@@ -17,6 +17,7 @@ use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
 use crate::runtime_options::RuntimeOptions;
+use crate::shell;
 use crate::Command;
 
 /// A partially-entered multi-key command awaiting its argument.
@@ -41,6 +42,7 @@ pub enum PendingCommand {
 }
 
 /// The main pager state, tying together all subsystems.
+#[allow(clippy::struct_excessive_bools)] // Pager legitimately tracks multiple independent on/off modes
 pub struct Pager<R: Read, W: Write> {
     reader: KeyReader<R>,
     writer: W,
@@ -75,6 +77,16 @@ pub struct Pager<R: Read, W: Write> {
     quit_at_first_eof: bool,
     /// Tracks how many times the user has been shown EOF after a forward scroll.
     eof_seen_count: usize,
+    /// Whether security restrictions are enabled (LESSSECURE=1).
+    secure_mode: bool,
+    /// Whether the input is from a pipe (not a named file).
+    is_pipe: bool,
+    /// The last shell command executed (for `!` repeat).
+    last_shell_command: Option<String>,
+    /// The shell to use for shell commands (from SHELL env or "sh").
+    shell: String,
+    /// The editor command (from VISUAL/EDITOR env or "vi").
+    editor: String,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -112,6 +124,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             quit_at_eof: false,
             quit_at_first_eof: false,
             eof_seen_count: 0,
+            secure_mode: false,
+            is_pipe: false,
+            last_shell_command: None,
+            shell: String::from("sh"),
+            editor: String::from("vi"),
         }
     }
 
@@ -533,9 +550,232 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::QueryOption => {
                 self.pending_command = Some(PendingCommand::QueryOption);
             }
+            Command::ShellCommand => {
+                self.handle_shell_command()?;
+            }
+            Command::ShellCommandExpand => {
+                self.handle_shell_command_expand(total)?;
+            }
+            Command::PipeToCommand => {
+                self.handle_pipe_to_command(total)?;
+            }
+            Command::EditFile => {
+                self.handle_edit_file()?;
+            }
+            Command::SavePipeInput => {
+                self.handle_save_pipe_input(total)?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Write a message to the status line.
+    fn write_status(&mut self, msg: &str) -> Result<()> {
+        let (rows, _) = self.screen.dimensions();
+        if rows > 0 {
+            write!(self.writer, "\x1b[{rows};1H\x1b[K{msg}")?;
+            self.writer.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Handle the `!` (shell command) dispatch.
+    fn handle_shell_command(&mut self) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
+        // Read a command line from the user using the line editor.
+        let input = self.read_command_line("!")?;
+        let Some(input) = input else {
+            return Ok(());
+        };
+
+        // "!" with no command (or "!!") repeats the last command.
+        let cmd = if input.is_empty() || input == "!" {
+            match self.last_shell_command.clone() {
+                Some(prev) => prev,
+                None => return Ok(()),
+            }
+        } else {
+            input
+        };
+
+        self.last_shell_command = Some(cmd.clone());
+        let _ = shell::execute_shell_command(&cmd, &self.shell);
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Handle the `#` (shell command with expansion) dispatch.
+    fn handle_shell_command_expand(&mut self, total: usize) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
+        let input = self.read_command_line("#")?;
+        let Some(input) = input else {
+            return Ok(());
+        };
+
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        let line_number = self.screen.top_line().saturating_add(1);
+        let expanded =
+            shell::expand_command_string(&input, self.filename.as_deref(), line_number, total, 0);
+
+        self.last_shell_command = Some(expanded.clone());
+        let _ = shell::execute_shell_command(&expanded, &self.shell);
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Handle the `|` (pipe to command) dispatch.
+    fn handle_pipe_to_command(&mut self, total: usize) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
+        // Read the mark character (next keypress).
+        let mark_key = match self.reader.read_key() {
+            Ok(k) => k,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+
+        let Key::Char(mark_char) = mark_key else {
+            return Ok(());
+        };
+
+        // Read the command string.
+        let input = self.read_command_line("|")?;
+        let Some(input) = input else {
+            return Ok(());
+        };
+
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        // Determine the line range: from the mark position to the current top-of-screen.
+        let mark_line = if mark_char == '.' {
+            // '.' means current screen top
+            self.screen.top_line()
+        } else {
+            match self.marks.get(mark_char) {
+                Some(m) => m.line,
+                None => return Ok(()),
+            }
+        };
+
+        let current_top = self.screen.top_line();
+        let start = mark_line.min(current_top);
+        let end = mark_line.max(current_top);
+
+        // Collect lines in the range.
+        let mut content = String::new();
+        for line_num in start..=end.min(total.saturating_sub(1)) {
+            if let Some(line) = self.index.get_line(line_num, &*self.buffer)? {
+                content.push_str(&line);
+                content.push('\n');
+            }
+        }
+
+        let _ = shell::pipe_to_command(&input, &self.shell, &content);
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Handle the `v` (edit file) dispatch.
+    fn handle_edit_file(&mut self) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
+        let Some(filename) = self.filename.clone() else {
+            self.write_status("No file to edit")?;
+            return Ok(());
+        };
+
+        let line_number = self.screen.top_line().saturating_add(1);
+        let cmd = shell::build_editor_command(&self.editor, &filename, line_number);
+        let _ = shell::execute_shell_command(&cmd, &self.shell);
+        // File may have changed — refresh.
+        self.buffer.refresh()?;
+        let new_len = self.buffer.len() as u64;
+        self.index = LineIndex::new(new_len);
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Handle the `s` (save pipe input) dispatch.
+    fn handle_save_pipe_input(&mut self, total: usize) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
+        if !self.is_pipe {
+            self.write_status("Not reading from pipe")?;
+            return Ok(());
+        }
+
+        let input = self.read_command_line("s ")?;
+        let Some(input) = input else {
+            return Ok(());
+        };
+
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        // Collect all buffer content.
+        let mut content = String::new();
+        for line_num in 0..total {
+            if let Some(line) = self.index.get_line(line_num, &*self.buffer)? {
+                content.push_str(&line);
+                content.push('\n');
+            }
+        }
+
+        std::fs::write(&input, content)?;
+        Ok(())
+    }
+
+    /// Read a command line from the user using the line editor.
+    ///
+    /// Returns `Ok(Some(input))` on confirmation, `Ok(None)` on cancellation
+    /// or EOF.
+    fn read_command_line(&mut self, prompt: &str) -> Result<Option<String>> {
+        use crate::line_editor::{LineEditResult, LineEditor};
+
+        let mut editor = LineEditor::new(prompt);
+        let (rows, cols) = self.screen.dimensions();
+        let prompt_row = rows.saturating_sub(1);
+        editor.render(&mut self.writer, prompt_row, 0, cols)?;
+        self.writer.flush()?;
+
+        loop {
+            match self.reader.read_key() {
+                Ok(key) => match editor.process_key(&key) {
+                    LineEditResult::Continue => {
+                        editor.render(&mut self.writer, prompt_row, 0, cols)?;
+                        self.writer.flush()?;
+                    }
+                    LineEditResult::Confirm(s) => return Ok(Some(s)),
+                    LineEditResult::Cancel => return Ok(None),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// Enter basic follow mode: scroll to end and exit immediately.
@@ -693,7 +933,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         let text = render_prompt(&self.prompt_style, &ctx);
-        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
+        paint_prompt(&mut self.writer, &text, rows, cols)?;
 
         Ok(())
     }
@@ -802,6 +1042,46 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[must_use]
     pub fn custom_window_size(&self) -> Option<usize> {
         self.custom_window_size
+    }
+
+    /// Enable or disable security mode (LESSSECURE).
+    ///
+    /// When enabled, shell, pipe, editor, and save commands are blocked.
+    pub fn set_secure_mode(&mut self, secure: bool) {
+        self.secure_mode = secure;
+    }
+
+    /// Return whether security mode is active.
+    #[must_use]
+    pub fn secure_mode(&self) -> bool {
+        self.secure_mode
+    }
+
+    /// Set whether the input is from a pipe.
+    pub fn set_is_pipe(&mut self, is_pipe: bool) {
+        self.is_pipe = is_pipe;
+    }
+
+    /// Return whether the input is from a pipe.
+    #[must_use]
+    pub fn is_pipe(&self) -> bool {
+        self.is_pipe
+    }
+
+    /// Set the shell command to use for `!` commands.
+    pub fn set_shell(&mut self, shell: &str) {
+        shell.clone_into(&mut self.shell);
+    }
+
+    /// Set the editor command to use for the `v` command.
+    pub fn set_editor(&mut self, editor: &str) {
+        editor.clone_into(&mut self.editor);
+    }
+
+    /// Return the last executed shell command, if any.
+    #[must_use]
+    pub fn last_shell_command(&self) -> Option<&str> {
+        self.last_shell_command.as_deref()
     }
 }
 
@@ -1687,5 +1967,175 @@ mod tests {
         assert!(pager.runtime_options().case_insensitive);
         assert!(pager.runtime_options().line_numbers);
         assert_eq!(pager.runtime_options().tab_width, 4);
+    }
+
+    // ── Shell/pipe command tests ────────────────────────────────────
+
+    /// Create a pager with specific settings, run it, and return it.
+    fn run_pager_with_settings(
+        keys: &[u8],
+        content: &[u8],
+        filename: Option<&str>,
+        secure_mode: bool,
+        is_pipe: bool,
+    ) -> Pager<Cursor<Vec<u8>>, Vec<u8>> {
+        let reader = KeyReader::new(Cursor::new(keys.to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, filename.map(String::from));
+        pager.set_secure_mode(secure_mode);
+        pager.set_is_pipe(is_pipe);
+        let _ = pager.run();
+        pager
+    }
+
+    // Test 8: All shell commands blocked when secure_mode is true.
+    // The `!` key triggers ShellCommand. In secure mode it shows "Command not available".
+    #[test]
+    fn test_dispatch_shell_command_blocked_in_secure_mode() {
+        let content = make_test_content(50);
+        // '!' in secure mode: writes status, then 'q' quits normally.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'!');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, None, true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    #[test]
+    fn test_dispatch_edit_file_blocked_in_secure_mode() {
+        let content = make_test_content(50);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'v');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, Some("test.txt"), true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    #[test]
+    fn test_dispatch_save_pipe_input_blocked_in_secure_mode() {
+        let content = make_test_content(50);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b's');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, None, true, true);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    #[test]
+    fn test_dispatch_pipe_to_command_blocked_in_secure_mode() {
+        let content = make_test_content(50);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'|');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, None, true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    #[test]
+    fn test_dispatch_shell_command_expand_blocked_in_secure_mode() {
+        let content = make_test_content(50);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'#');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, None, true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    // Test 11: SavePipeInput fails gracefully when not reading from pipe.
+    #[test]
+    fn test_dispatch_save_pipe_input_fails_when_not_pipe() {
+        let content = make_test_content(50);
+        // 's' when not a pipe shows "Not reading from pipe" then 'q' exits.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b's');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, Some("file.txt"), false, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Not reading from pipe"));
+    }
+
+    // Test 10: SavePipeInput writes buffer content to specified file.
+    #[test]
+    fn test_dispatch_save_pipe_input_writes_content() {
+        let content = b"hello world\n";
+        let tmpdir = std::env::temp_dir();
+        let tmpfile = tmpdir.join("pgr_test_save_pipe_input.txt");
+        // Clean up if it exists from a prior run.
+        let _ = std::fs::remove_file(&tmpfile);
+
+        let filename_bytes = tmpfile.to_str().unwrap().as_bytes();
+        // Build key sequence: 's' then type the filename then Enter then 'q'.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b's');
+        keys.extend_from_slice(filename_bytes);
+        keys.push(b'\r'); // Enter
+        keys.push(b'q');
+
+        let _pager = run_pager_with_settings(&keys, content, None, false, true);
+
+        let saved = std::fs::read_to_string(&tmpfile).unwrap();
+        assert_eq!(saved, "hello world\n");
+
+        // Clean up.
+        let _ = std::fs::remove_file(&tmpfile);
+    }
+
+    // Test: EditFile shows "No file to edit" when no filename.
+    #[test]
+    fn test_dispatch_edit_file_no_filename_shows_message() {
+        let content = make_test_content(50);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'v');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, None, false, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("No file to edit"));
+    }
+
+    // Test: secure_mode accessor works.
+    #[test]
+    fn test_dispatch_secure_mode_accessor_returns_value() {
+        let content = make_test_content(10);
+        let pager = run_pager_with_settings(b"q", &content, None, true, false);
+        assert!(pager.secure_mode());
+    }
+
+    // Test: is_pipe accessor works.
+    #[test]
+    fn test_dispatch_is_pipe_accessor_returns_value() {
+        let content = make_test_content(10);
+        let pager = run_pager_with_settings(b"q", &content, None, false, true);
+        assert!(pager.is_pipe());
+    }
+
+    // Test: set_shell and set_editor work.
+    #[test]
+    fn test_dispatch_set_shell_and_editor() {
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(b"data\n"));
+        let index = LineIndex::new(5);
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.set_shell("/bin/zsh");
+        pager.set_editor("nvim");
+        assert_eq!(pager.shell, "/bin/zsh");
+        assert_eq!(pager.editor, "nvim");
+    }
+
+    // Test: last_shell_command is initially None.
+    #[test]
+    fn test_dispatch_last_shell_command_initially_none() {
+        let content = make_test_content(10);
+        let pager = run_pager(b"q", &content);
+        assert!(pager.last_shell_command().is_none());
     }
 }

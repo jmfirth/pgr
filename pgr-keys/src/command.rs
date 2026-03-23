@@ -73,6 +73,16 @@ pub enum Command {
     QueryOption,
     /// Enter filter mode: prompt for pattern (`&` command).
     Filter,
+    /// Execute a shell command (`!command`).
+    ShellCommand,
+    /// Execute a shell command with prompt-style expansion (`#command`).
+    ShellCommandExpand,
+    /// Pipe lines from a mark to the current screen position to a command (`|mark command`).
+    PipeToCommand,
+    /// Open the current file in the editor (`$VISUAL` or `$EDITOR`).
+    EditFile,
+    /// Save pipe input to a file (`s filename`).
+    SavePipeInput,
 }
 
 #[cfg(test)]
