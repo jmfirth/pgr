@@ -229,8 +229,10 @@ fn render_ansi_only(
     for segment in segments {
         match segment {
             Segment::Escape(esc) => {
-                // Always pass through ANSI escapes (zero display width)
-                if skipped >= horizontal_offset {
+                // Only pass through SGR sequences (color/style); strip all others.
+                // This matches GNU less -R behavior: CSI SGR (ESC [ ... m)
+                // passes through, other CSI/OSC/simple escapes are silently dropped.
+                if ansi::is_sgr_sequence(esc) && skipped >= horizontal_offset {
                     output.push_str(esc);
                 }
             }
@@ -663,7 +665,8 @@ fn render_ansi_only_highlighted(
     for segment in segments {
         match segment {
             Segment::Escape(esc) => {
-                if skipped >= horizontal_offset {
+                // Only pass through SGR sequences; strip non-SGR (matches -R behavior).
+                if ansi::is_sgr_sequence(esc) && skipped >= horizontal_offset {
                     output.push_str(esc);
                 }
                 byte_offset += esc.len();
@@ -1099,6 +1102,39 @@ mod tests {
         let (rendered, width) = render_line("\x1b[31mred\x1b[0m", 0, 80, &config);
         assert_eq!(rendered, "\x1b[31mred\x1b[0m");
         assert_eq!(width, 3);
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_strips_non_sgr_csi() {
+        // Non-SGR CSI sequences (e.g., cursor movement) are stripped in -R mode
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        // ESC[2J = clear screen, ESC[H = cursor home — both non-SGR
+        let (rendered, width) = render_line("\x1b[2JScreen clear\x1b[HHome", 0, 80, &config);
+        assert_eq!(rendered, "Screen clearHome");
+        assert_eq!(width, 16);
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_mixed_sgr_and_non_sgr() {
+        // SGR passes through, non-SGR stripped, text preserved
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let input = "\x1b[31mRed SGR\x1b[0m\x1b[2JScreen clear\x1b[32mGreen SGR\x1b[0m";
+        let (rendered, width) = render_line(input, 0, 80, &config);
+        assert_eq!(
+            rendered,
+            "\x1b[31mRed SGR\x1b[0mScreen clear\x1b[32mGreen SGR\x1b[0m"
+        );
+        // "Red SGR" (7) + "Screen clear" (12) + "Green SGR" (9) = 28
+        assert_eq!(width, 28);
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_strips_cursor_movement() {
+        // ESC[5A = cursor up 5 — non-SGR, should be stripped
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, width) = render_line("before\x1b[5Aafter", 0, 80, &config);
+        assert_eq!(rendered, "beforeafter");
+        assert_eq!(width, 11);
     }
 
     #[test]

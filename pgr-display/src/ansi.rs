@@ -310,7 +310,10 @@ impl AnsiState {
 }
 
 /// Check if an escape sequence is a CSI SGR sequence (ends with 'm').
-fn is_sgr_sequence(esc: &str) -> bool {
+///
+/// SGR (Select Graphic Rendition) sequences have the form `ESC [ <params> m`.
+/// Used by rendering to distinguish SGR from other CSI sequences in `-R` mode.
+pub(crate) fn is_sgr_sequence(esc: &str) -> bool {
     let bytes = esc.as_bytes();
     // CSI SGR: ESC [ <params> m
     bytes.len() >= 3 && bytes[0] == 0x1B && bytes[1] == b'[' && bytes[bytes.len() - 1] == b'm'
