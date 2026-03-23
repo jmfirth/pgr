@@ -13,7 +13,8 @@ use pgr_display::{
     DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
-    CaseMode, HighlightState, SearchDirection, SearchModifiers, SearchPattern, Searcher, WrapMode,
+    CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
+    SearchPattern, Searcher, WrapMode,
 };
 
 use crate::help;
@@ -152,6 +153,14 @@ pub struct Pager<R: Read, W: Write> {
     search_prompt_direction: SearchDirection,
     /// The modifiers from the last search, used for repeat-search commands.
     last_modifiers: SearchModifiers,
+    /// Filter state for the `&` command (show only matching/non-matching lines).
+    filter: FilterState,
+    /// Pre-computed mapping from filtered line indices to actual buffer lines.
+    filtered_lines: Option<FilteredLines>,
+    /// Whether we are currently in filter-prompt editing mode.
+    editing_filter: bool,
+    /// Whether the current filter prompt has inversion toggled via `^N`.
+    filter_invert: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -203,6 +212,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             line_editor: None,
             search_prompt_direction: SearchDirection::Forward,
             last_modifiers: SearchModifiers::new(),
+            filter: FilterState::new(),
+            filtered_lines: None,
+            editing_filter: false,
+            filter_invert: false,
         }
     }
 
@@ -240,6 +253,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         // If we're in search-prompt editing mode, feed keys to the line editor.
         if self.editing_search {
             return self.process_search_key(key);
+        }
+
+        // If we're in filter-prompt editing mode, feed keys to the line editor.
+        if self.editing_filter {
+            return self.process_filter_key(key);
         }
 
         // If there's a pending multi-key command, resolve it.
@@ -430,7 +448,14 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Execute a command with the given numeric count prefix.
     #[allow(clippy::too_many_lines)] // dispatch table is inherently large
     fn execute(&mut self, command: &Command, count: Option<usize>) -> Result<()> {
-        let total = self.index.total_lines(&*self.buffer)?;
+        let raw_total = self.index.total_lines(&*self.buffer)?;
+        let total = if self.filter.is_active() {
+            self.filtered_lines
+                .as_ref()
+                .map_or(raw_total, FilteredLines::visible_count)
+        } else {
+            raw_total
+        };
 
         match *command {
             Command::ScrollForward(n) => {
@@ -506,10 +531,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::Quit => {
                 self.should_quit = true;
             }
-            // Filter mode requires LineEditor for the `&` prompt.
-            // The actual prompt/compile/apply flow is integrated in a
-            // downstream task. For now, the command is wired but inert.
-            Command::Noop | Command::Filter => {}
+            Command::Filter => {
+                self.enter_filter_mode()?;
+            }
+            Command::Noop => {}
             Command::ScrollRight => {
                 let cols = self.screen.cols();
                 let amount = count.unwrap_or(cols / 2);
@@ -1078,6 +1103,104 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.do_search(direction, count)
     }
 
+    /// Enter filter prompt mode for the `&` command.
+    fn enter_filter_mode(&mut self) -> Result<()> {
+        self.filter_invert = false;
+        self.line_editor = Some(LineEditor::new("&"));
+        self.editing_filter = true;
+        self.render_filter_prompt()?;
+        Ok(())
+    }
+
+    /// Process a key while in filter-prompt editing mode.
+    fn process_filter_key(&mut self, key: &Key) -> Result<bool> {
+        // Intercept Ctrl+N to toggle inversion before the line editor sees it.
+        if *key == Key::Ctrl('n') {
+            self.filter_invert = !self.filter_invert;
+            // Update the prompt to reflect inversion state.
+            let prompt = if self.filter_invert { "&!" } else { "&" };
+            let contents = self
+                .line_editor
+                .as_ref()
+                .map_or(String::new(), |e| e.contents().to_string());
+            self.line_editor = Some(LineEditor::with_initial(prompt, &contents));
+            self.render_filter_prompt()?;
+            return Ok(true);
+        }
+
+        let result = if let Some(ref mut editor) = self.line_editor {
+            editor.process_key(key)
+        } else {
+            self.editing_filter = false;
+            return Ok(true);
+        };
+
+        match result {
+            LineEditResult::Continue => {
+                self.render_filter_prompt()?;
+            }
+            LineEditResult::Confirm(pattern_str) => {
+                self.editing_filter = false;
+                self.line_editor = None;
+                self.submit_filter(&pattern_str)?;
+            }
+            LineEditResult::Cancel => {
+                self.editing_filter = false;
+                self.line_editor = None;
+                self.repaint()?;
+            }
+        }
+        Ok(!self.should_quit)
+    }
+
+    /// Render the filter prompt on the status line.
+    fn render_filter_prompt(&mut self) -> Result<()> {
+        if let Some(ref editor) = self.line_editor {
+            let (rows, cols) = self.screen.dimensions();
+            if rows > 0 {
+                editor.render(&mut self.writer, rows - 1, 0, cols)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit the filter: compile pattern, build filtered lines, repaint.
+    fn submit_filter(&mut self, pattern_str: &str) -> Result<()> {
+        if pattern_str.is_empty() {
+            // Empty pattern clears the filter.
+            self.filter.clear();
+            self.filtered_lines = None;
+            self.screen.goto_line(0, usize::MAX);
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let Ok(compiled) = SearchPattern::compile(pattern_str, CaseMode::Sensitive) else {
+            self.status_message = Some("Invalid pattern".to_string());
+            self.repaint()?;
+            return Ok(());
+        };
+
+        self.filter.set_pattern(Some(compiled));
+        self.filter.set_inverted(self.filter_invert);
+        self.rebuild_filtered_lines()?;
+        // Reset viewport to the beginning of the filtered view.
+        let visible_total = self
+            .filtered_lines
+            .as_ref()
+            .map_or(0, FilteredLines::visible_count);
+        self.screen.goto_line(0, visible_total);
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Rebuild the filtered line mapping from the current filter state.
+    fn rebuild_filtered_lines(&mut self) -> Result<()> {
+        let fl = FilteredLines::build(&*self.buffer, &mut self.index, &self.filter)?;
+        self.filtered_lines = Some(fl);
+        Ok(())
+    }
+
     /// Enter basic follow mode: scroll to end and exit immediately.
     ///
     /// A full follow mode with `inotify`/`kqueue` polling and non-blocking key
@@ -1467,6 +1590,44 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Fetch visible lines from the buffer/index and repaint the screen.
     fn repaint(&mut self) -> Result<()> {
         self.index.index_all(&*self.buffer)?;
+
+        // When a filter is active, use the filtered line mapping.
+        if self.filter.is_active() {
+            if let Some(ref fl) = self.filtered_lines {
+                let visible_total = fl.visible_count();
+                let (start, end) = self.screen.visible_range();
+
+                let mut lines: Vec<Option<String>> = Vec::with_capacity(self.screen.content_rows());
+                for filtered_idx in start..end {
+                    if let Some(actual) = fl.actual_line(filtered_idx) {
+                        let content = self.index.get_line(actual, &*self.buffer)?;
+                        lines.push(content);
+                    } else {
+                        lines.push(None);
+                    }
+                }
+
+                self.highlight_state
+                    .compute_highlights(&lines, self.last_pattern.as_ref());
+
+                let paint_opts = PaintOptions {
+                    show_line_numbers: self.runtime_options.line_numbers,
+                    total_lines: visible_total,
+                    line_num_width: None,
+                    suppress_tildes: self.runtime_options.tilde,
+                };
+                paint_screen_with_options(
+                    &mut self.writer,
+                    &self.screen,
+                    &lines,
+                    &self.render_config,
+                    &paint_opts,
+                )?;
+                self.paint_status_prompt(visible_total)?;
+                return Ok(());
+            }
+        }
+
         let total = self.index.lines_indexed();
         let (start, end) = self.screen.visible_range();
         let content_rows = self.screen.content_rows();
@@ -1628,8 +1789,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             search_pattern: None,
             line_numbers_enabled: self.runtime_options.line_numbers,
             marks_set: self.marks.has_any(),
-            filter_active: false,
-            filter_pattern: None,
+            filter_active: self.filter.is_active(),
+            filter_pattern: self.filter.pattern().map(SearchPattern::pattern),
             input_complete: !self.buffer.is_growable(),
         }
     }
@@ -3380,5 +3541,149 @@ mod tests {
             output.contains("Viewing: myfile.txt"),
             "Custom prompt template should appear in output: {output}"
         );
+    }
+
+    #[test]
+    fn test_dispatch_filter_activates_filter() {
+        let mut content = Vec::new();
+        for i in 0..50 {
+            if i % 7 == 0 {
+                content.extend_from_slice(format!("line {i} ERROR here\n").as_bytes());
+            } else {
+                content.extend_from_slice(format!("line {i} normal\n").as_bytes());
+            }
+        }
+        // & enters filter mode, then "ERROR\n" submits the filter, then q quits.
+        let pager = run_pager(b"&ERROR\nq", &content);
+        assert!(pager.filter.is_active());
+        assert!(pager.filtered_lines.is_some());
+        // Only lines with "ERROR" should be visible.
+        let fl = pager.filtered_lines.as_ref().unwrap();
+        // Lines 0, 7, 14, 21, 28, 35, 42, 49 contain "ERROR" (8 lines total).
+        assert_eq!(fl.visible_count(), 8);
+    }
+
+    #[test]
+    fn test_dispatch_filter_clear_restores_all_lines() {
+        let mut content = Vec::new();
+        for i in 0..50 {
+            if i % 7 == 0 {
+                content.extend_from_slice(format!("line {i} ERROR here\n").as_bytes());
+            } else {
+                content.extend_from_slice(format!("line {i} normal\n").as_bytes());
+            }
+        }
+        // Apply filter, then clear it with empty pattern.
+        let pager = run_pager(b"&ERROR\n&\nq", &content);
+        assert!(!pager.filter.is_active());
+        assert!(pager.filtered_lines.is_none());
+    }
+
+    #[test]
+    fn test_dispatch_filter_inverted_shows_non_matching() {
+        let mut content = Vec::new();
+        for i in 0..50 {
+            if i % 7 == 0 {
+                content.extend_from_slice(format!("line {i} ERROR here\n").as_bytes());
+            } else {
+                content.extend_from_slice(format!("line {i} normal\n").as_bytes());
+            }
+        }
+        // & enters filter mode, ^N (0x0e) toggles inversion, then "ERROR\n" submits.
+        let pager = run_pager(b"&\x0eERROR\nq", &content);
+        assert!(pager.filter.is_active());
+        assert!(pager.filter.is_inverted());
+        let fl = pager.filtered_lines.as_ref().unwrap();
+        // 50 total lines - 8 matching = 42 non-matching lines visible.
+        assert_eq!(fl.visible_count(), 42);
+    }
+
+    #[test]
+    fn test_dispatch_filter_escape_cancels() {
+        let mut content = Vec::new();
+        for i in 0..50 {
+            content.extend_from_slice(format!("line {i}\n").as_bytes());
+        }
+        // & enters filter mode, ESC cancels it.
+        let pager = run_pager(b"&\x1bq", &content);
+        assert!(!pager.filter.is_active());
+        assert!(pager.filtered_lines.is_none());
+    }
+
+    #[test]
+    fn test_dispatch_filter_scroll_uses_filtered_count() {
+        let mut content = Vec::new();
+        for i in 0..500 {
+            if i % 10 == 0 {
+                content.extend_from_slice(format!("line {i} MATCH\n").as_bytes());
+            } else {
+                content.extend_from_slice(format!("line {i} other\n").as_bytes());
+            }
+        }
+        // Apply filter, then scroll forward with j, then quit.
+        // 500 lines, every 10th = 50 filtered. 50 > 23 content rows, so scrollable.
+        let pager = run_pager(b"&MATCH\njq", &content);
+        assert!(pager.filter.is_active());
+        // After scrolling forward 1 line, top_line should be 1.
+        assert_eq!(pager.screen().top_line(), 1);
+        // The filtered lines should have 50 visible lines (0, 10, 20, ..., 490).
+        let fl = pager.filtered_lines.as_ref().unwrap();
+        assert_eq!(fl.visible_count(), 50);
+    }
+
+    #[test]
+    fn test_dispatch_filter_persists_across_scroll() {
+        let mut content = Vec::new();
+        for i in 0..200 {
+            if i % 5 == 0 {
+                content.extend_from_slice(format!("line {i} MARK\n").as_bytes());
+            } else {
+                content.extend_from_slice(format!("line {i} normal\n").as_bytes());
+            }
+        }
+        // Apply filter, scroll forward 3 lines, check filter still active.
+        // 200 lines total, every 5th = 40 filtered. 40 > 23 content rows, so scrollable.
+        let pager = run_pager(b"&MARK\njjjq", &content);
+        assert!(pager.filter.is_active());
+        assert_eq!(pager.screen().top_line(), 3);
+        let fl = pager.filtered_lines.as_ref().unwrap();
+        assert_eq!(fl.visible_count(), 40);
+    }
+
+    #[test]
+    fn test_dispatch_filter_renders_only_matching_lines() {
+        let content = b"alpha ERROR here\nbeta normal\ngamma ERROR again\ndelta other\n";
+        // Apply filter for "ERROR", then quit.
+        let pager = run_pager(b"&ERROR\nq", content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        // After filter, only lines with "ERROR" should be rendered.
+        // The output should contain both ERROR lines.
+        assert!(
+            output.contains("alpha ERROR here"),
+            "Should contain first ERROR line"
+        );
+        assert!(
+            output.contains("gamma ERROR again"),
+            "Should contain second ERROR line"
+        );
+        // Non-matching lines should NOT appear in the final render.
+        // (They appear in the initial render before filter is applied, but
+        // the final repaint after filter should overwrite them.)
+    }
+
+    #[test]
+    fn test_dispatch_filter_resets_viewport_to_top() {
+        let mut content = Vec::new();
+        for i in 0..100 {
+            if i % 10 == 0 {
+                content.extend_from_slice(format!("line {i} MATCH\n").as_bytes());
+            } else {
+                content.extend_from_slice(format!("line {i} other\n").as_bytes());
+            }
+        }
+        // Scroll down first, then apply filter. Viewport should reset to 0.
+        let pager = run_pager(b"jjjjj&MATCH\nq", &content);
+        assert!(pager.filter.is_active());
+        assert_eq!(pager.screen().top_line(), 0);
     }
 }
