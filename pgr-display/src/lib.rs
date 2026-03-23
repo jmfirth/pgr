@@ -16,7 +16,10 @@ pub use ansi::{AnsiState, OverstrikeMode};
 pub use color::{Color, ColorConfig, ColorSelector, ColorSpec};
 pub use error::{DisplayError, Result};
 pub use line_numbers::{format_line_number, line_number_width, line_number_width_custom};
-pub use prompt::{eval_prompt, paint_prompt, render_prompt, PromptContext, PromptStyle};
+pub use prompt::{
+    eval_prompt, paint_prompt, render_prompt, PromptContext, PromptStyle, DEFAULT_LONG_PROMPT,
+    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+};
 pub use render::{render_line, render_line_highlighted, RawControlMode, RenderConfig, TabStops};
 pub use screen::Screen;
 pub use squeeze::{is_blank_line, squeeze_visible_lines};

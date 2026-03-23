@@ -7,8 +7,9 @@ use std::io::{Read, Write};
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    paint_prompt, paint_screen, render_prompt, OverstrikeMode, PromptContext, PromptStyle,
-    RawControlMode, RenderConfig, Screen, TabStops,
+    eval_prompt, paint_prompt, paint_screen, OverstrikeMode, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT,
+    DEFAULT_SHORT_PROMPT,
 };
 
 use crate::error::Result;
@@ -69,6 +70,8 @@ pub struct Pager<R: Read, W: Write> {
     file_list: Option<FileList>,
     /// Runtime-mutable options (toggled with `-` prefix at the prompt).
     runtime_options: RuntimeOptions,
+    /// Transient status message that overrides the prompt for one repaint.
+    status_message: Option<String>,
     /// `-e`: quit on second attempt to scroll past EOF.
     quit_at_eof: bool,
     /// `-E`: quit on first scroll past EOF.
@@ -109,6 +112,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             custom_window_size: None,
             file_list: None,
             runtime_options: RuntimeOptions::default(),
+            status_message: None,
             quit_at_eof: false,
             quit_at_first_eof: false,
             eof_seen_count: 0,
@@ -648,30 +652,68 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Render and paint the status prompt on the last row.
+    ///
+    /// If a transient status message is set, it is displayed instead of
+    /// the normal prompt and then cleared. Otherwise the prompt template
+    /// is evaluated from the current pager state.
     fn paint_status_prompt(&mut self, total_lines: usize) -> Result<()> {
         let (rows, cols) = self.screen.dimensions();
         if rows == 0 {
             return Ok(());
         }
 
-        let at_eof = if total_lines == 0 {
-            true
+        // Take the status message first to avoid borrow conflicts with
+        // building the prompt context.
+        let status_msg = self.status_message.take();
+
+        let text = if let Some(msg) = status_msg {
+            msg
         } else {
-            let (_, end) = self.screen.visible_range();
-            end >= total_lines
+            let at_eof = if total_lines == 0 {
+                true
+            } else {
+                let (_, end) = self.screen.visible_range();
+                end >= total_lines
+            };
+
+            let (start, end) = self.screen.visible_range();
+            let bottom_display = end.min(total_lines);
+
+            let ctx = self.build_prompt_context(total_lines, at_eof, start, bottom_display);
+
+            let template = match self.runtime_options.prompt_string {
+                Some(ref custom) => custom.as_str(),
+                None => match self.prompt_style {
+                    PromptStyle::Short => DEFAULT_SHORT_PROMPT,
+                    PromptStyle::Medium => DEFAULT_MEDIUM_PROMPT,
+                    PromptStyle::Long => DEFAULT_LONG_PROMPT,
+                    PromptStyle::Custom(ref t) => t.as_str(),
+                },
+            };
+            eval_prompt(template, &ctx)
         };
 
-        let (start, end) = self.screen.visible_range();
-        let bottom_display = end.min(total_lines);
+        paint_prompt(&mut self.writer, &text, rows, cols)?;
 
+        Ok(())
+    }
+
+    /// Build a `PromptContext` from the current pager state.
+    fn build_prompt_context(
+        &self,
+        total_lines: usize,
+        at_eof: bool,
+        top_line_0: usize,
+        bottom_display: usize,
+    ) -> PromptContext<'_> {
         let (file_index, file_count) = self
             .file_list
             .as_ref()
             .map_or((0, 1), |fl| (fl.current_index(), fl.file_count()));
 
-        let ctx = PromptContext {
+        PromptContext {
             filename: self.filename.as_deref(),
-            top_line: start.saturating_add(1),
+            top_line: top_line_0.saturating_add(1),
             bottom_line: bottom_display,
             total_lines: Some(total_lines),
             total_bytes: self.buffer.len() as u64,
@@ -680,19 +722,25 @@ impl<R: Read, W: Write> Pager<R, W> {
             file_count,
             at_eof,
             is_pipe: false,
-            column: 1,
+            column: self.screen.horizontal_offset().saturating_add(1),
             page_number: None,
             input_line: None,
             pipe_size: None,
             search_active: false,
-            line_numbers_enabled: false,
-            marks_set: false,
-        };
+            search_pattern: None,
+            line_numbers_enabled: self.runtime_options.line_numbers,
+            marks_set: self.marks.has_any(),
+            filter_active: false,
+            filter_pattern: None,
+            input_complete: !self.buffer.is_growable(),
+        }
+    }
 
-        let text = render_prompt(&self.prompt_style, &ctx);
-        paint_prompt(&mut self.writer, &text, rows, cols)?;
-
-        Ok(())
+    /// Set a transient status message that overrides the prompt for one repaint.
+    ///
+    /// The message is displayed on the next repaint and then cleared.
+    pub fn set_status_message(&mut self, msg: String) {
+        self.status_message = Some(msg);
     }
 
     /// Set the raw control mode for rendering.
@@ -1684,5 +1732,54 @@ mod tests {
         assert!(pager.runtime_options().case_insensitive);
         assert!(pager.runtime_options().line_numbers);
         assert_eq!(pager.runtime_options().tab_width, 4);
+    }
+
+    // ── Task 121: integrated prompt rendering ───────────────────────
+
+    /// Task 121 test 11: Transient status messages override the prompt.
+    #[test]
+    fn test_status_message_overrides_prompt_temporarily() {
+        let content = make_test_content(50);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("test.txt".into()));
+        pager.set_status_message("Pattern not found".into());
+        let _ = pager.run();
+
+        // After run, the writer output should contain the transient message
+        // rendered on the status line (in reverse video).
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Pattern not found"),
+            "Status message should appear in output: {output}"
+        );
+    }
+
+    /// Task 121 test 5: Custom -P prompt template renders correctly
+    /// through the pager's rendering pipeline.
+    #[test]
+    fn test_custom_prompt_string_renders_via_runtime_options() {
+        let content = make_test_content(50);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("myfile.txt".into()));
+        let mut opts = RuntimeOptions::default();
+        opts.prompt_string = Some(String::from("Viewing: %f"));
+        pager.set_runtime_options(opts);
+        let _ = pager.run();
+
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Viewing: myfile.txt"),
+            "Custom prompt template should appear in output: {output}"
+        );
     }
 }
