@@ -22,10 +22,10 @@ pub fn squeeze_visible_lines<F>(
     start_line: usize,
     max_lines: usize,
     total_lines: usize,
-    get_line: F,
+    mut get_line: F,
 ) -> Vec<usize>
 where
-    F: Fn(usize) -> Option<String>,
+    F: FnMut(usize) -> Option<String>,
 {
     if max_lines == 0 || total_lines == 0 {
         return Vec::new();

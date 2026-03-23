@@ -8,9 +8,10 @@ use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    clear_screen, eval_prompt, paint_prompt, paint_screen_with_options, OverstrikeMode,
-    PaintOptions, PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, TabStops,
-    DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    clear_screen, eval_prompt, paint_prompt, paint_screen_mapped, paint_screen_with_options,
+    squeeze_visible_lines, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT,
+    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
@@ -1500,7 +1501,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             start.saturating_add(1),
             bottom_display,
             Some(total_lines),
-            self.buffer.len() as u64, // byte offset approximation: total file size at top
+            // Byte offset = end of last visible line (0-indexed).
+            self.index
+                .line_range(bottom_display.saturating_sub(1))
+                .map_or(0, |(_, end)| end),
             self.buffer.len() as u64,
             file_index,
             file_count,
@@ -1688,6 +1692,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         let (start, end) = self.screen.visible_range();
         let content_rows = self.screen.content_rows();
 
+        // Squeeze mode: collapse consecutive blank lines.
+        if self.runtime_options.squeeze_blank_lines {
+            return self.repaint_squeezed(start, content_rows, total);
+        }
+
         let mut lines: Vec<Option<String>> = Vec::with_capacity(content_rows);
         for line_num in start..end {
             if line_num < total {
@@ -1739,6 +1748,72 @@ impl<R: Read, W: Write> Pager<R, W> {
             paint_prompt(&mut self.writer, &prompt_text, prompt_row, cols, None)?;
         } else {
             // Normal case: prompt on the last terminal row.
+            self.paint_status_prompt(total)?;
+        }
+
+        Ok(())
+    }
+
+    /// Repaint with squeeze mode: collapse consecutive blank lines.
+    ///
+    /// Uses [`squeeze_visible_lines`] to determine which buffer lines to
+    /// display, then renders via [`paint_screen_mapped`] so line numbers
+    /// stay correct even when consecutive blanks are collapsed.
+    fn repaint_squeezed(&mut self, start: usize, content_rows: usize, total: usize) -> Result<()> {
+        let mapped = squeeze_visible_lines(start, content_rows, total, |i| {
+            self.index.get_line(i, &*self.buffer).ok().flatten()
+        });
+
+        let visible_total = mapped.len();
+
+        let screen_lines: Vec<ScreenLine> = mapped
+            .iter()
+            .map(|&actual| {
+                let content = self.index.get_line(actual, &*self.buffer).ok().flatten();
+                ScreenLine {
+                    content,
+                    line_number: actual + 1, // 1-based
+                }
+            })
+            .collect();
+
+        // Pad to content_rows with None entries (beyond-EOF tildes).
+        let mut padded: Vec<ScreenLine> = screen_lines;
+        while padded.len() < content_rows {
+            padded.push(ScreenLine {
+                content: None,
+                line_number: 0, // beyond-EOF placeholder
+            });
+        }
+
+        // Compute highlights.
+        let line_contents: Vec<Option<String>> =
+            padded.iter().map(|sl| sl.content.clone()).collect();
+        self.highlight_state
+            .compute_highlights(&line_contents, self.last_pattern.as_ref());
+
+        let paint_opts = PaintOptions {
+            show_line_numbers: self.runtime_options.line_numbers,
+            total_lines: total,
+            line_num_width: None,
+            suppress_tildes: self.runtime_options.tilde,
+        };
+        paint_screen_mapped(
+            &mut self.writer,
+            &self.screen,
+            &padded,
+            &self.render_config,
+            &paint_opts,
+        )?;
+
+        // Short file inline prompt.
+        let short_file = visible_total < content_rows;
+        if short_file {
+            let prompt_row = visible_total + 1;
+            let (_, cols) = self.screen.dimensions();
+            let prompt_text = self.build_short_file_prompt(total);
+            paint_prompt(&mut self.writer, &prompt_text, prompt_row, cols, None)?;
+        } else {
             self.paint_status_prompt(total)?;
         }
 
