@@ -18,3 +18,4 @@ pgr-agent = { path = "../pgr-agent" }
 [dev-dependencies]
 expectrl = "0.8"
 tempfile = "3"
+vt100 = "0.15"
