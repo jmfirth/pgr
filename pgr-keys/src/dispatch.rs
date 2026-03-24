@@ -1932,7 +1932,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             at_eof,
             is_pipe: self.is_pipe,
             column: self.screen.horizontal_offset().saturating_add(1),
-            page_number: None,
+            page_number: {
+                let content_rows = self.screen.content_rows();
+                if content_rows > 0 {
+                    Some(top_line_0 / content_rows + 1)
+                } else {
+                    Some(1)
+                }
+            },
             input_line: None,
             pipe_size: None,
             search_active: self.last_pattern.is_some(),
