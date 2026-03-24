@@ -4,7 +4,9 @@
 //! those commands by mutating the screen state and repainting.
 
 use std::io::{Read, Write};
+use std::os::unix::io::RawFd;
 use std::path::Path;
+use std::time::Duration;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
@@ -17,6 +19,8 @@ use pgr_search::{
     CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
     SearchPattern, Searcher, WrapMode,
 };
+
+use pgr_input::{FileWatcher, FollowEvent};
 
 use crate::help;
 use crate::info;
@@ -167,6 +171,12 @@ pub struct Pager<R: Read, W: Write> {
     /// Whether the next keypress should be absorbed (used to dismiss
     /// option toggle/query status messages, matching GNU less behavior).
     absorb_next_key: bool,
+    /// Raw file descriptor for the key input source (e.g. `/dev/tty`).
+    ///
+    /// When set, follow mode uses kqueue to multiplex between file changes
+    /// and key input. When `None`, follow mode falls back to a simple
+    /// blocking key-read loop.
+    key_fd: Option<RawFd>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -224,6 +234,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             editing_filter: false,
             filter_invert: false,
             absorb_next_key: false,
+            key_fd: None,
         }
     }
 
@@ -1343,13 +1354,38 @@ impl<R: Read, W: Write> Pager<R, W> {
         Ok(())
     }
 
-    /// Enter follow mode: scroll to end and wait for interrupt.
+    /// Enter follow mode: scroll to end, watch for new data, and wait for
+    /// interrupt.
     ///
     /// Scrolls to the end of the buffer and displays "Waiting for data...
-    /// (interrupt to abort)" on the status line. Blocks reading keys until
-    /// Ctrl-C (or `q`/`Q`) is received, then repaints the screen and returns
-    /// to normal viewing mode.
+    /// (interrupt to abort)" on the status line. When a `key_fd` is set and
+    /// the file has a path on disk, uses kqueue to multiplex between file
+    /// change notifications and key input. Otherwise falls back to a simple
+    /// blocking key-read loop.
+    ///
+    /// On new data: refreshes the buffer, re-indexes, scrolls to the new
+    /// end, and repaints. On Ctrl-C (or `q`/`Q`): exits follow mode and
+    /// repaints normally.
     fn follow_mode(&mut self) -> Result<()> {
+        // Refresh and scroll to EOF.
+        self.refresh_and_scroll_to_end()?;
+        self.status_message = Some("Waiting for data... (interrupt to abort)".to_string());
+        self.repaint()?;
+
+        // Try kqueue-based follow if we have the key fd and a file path.
+        let use_kqueue = self.key_fd.is_some() && self.filename.is_some();
+
+        if use_kqueue {
+            self.follow_mode_kqueue()?;
+        } else {
+            self.follow_mode_blocking()?;
+        }
+
+        Ok(())
+    }
+
+    /// Refresh the buffer, rebuild the line index, and scroll to EOF.
+    fn refresh_and_scroll_to_end(&mut self) -> Result<()> {
         self.buffer.refresh()?;
         let new_len = self.buffer.len() as u64;
         self.index = LineIndex::new(new_len);
@@ -1357,10 +1393,89 @@ impl<R: Read, W: Write> Pager<R, W> {
         let total = self.index.lines_indexed();
         let default = total.saturating_sub(self.screen.content_rows());
         self.screen.goto_line(default, total);
-        self.status_message = Some("Waiting for data... (interrupt to abort)".to_string());
-        self.repaint()?;
+        Ok(())
+    }
 
-        // Block reading keys until Ctrl-C exits follow mode.
+    /// Follow mode using kqueue to watch for file changes and key input.
+    #[allow(clippy::cast_possible_wrap)] // fd values are always small positive ints
+    fn follow_mode_kqueue(&mut self) -> Result<()> {
+        let key_fd = self
+            .key_fd
+            .ok_or_else(|| std::io::Error::other("no key fd for follow mode"))?;
+        let filename = self
+            .filename
+            .clone()
+            .ok_or_else(|| std::io::Error::other("no filename for follow mode"))?;
+
+        // Open a fresh fd for the file to watch with kqueue.
+        let watch_file = std::fs::File::open(Path::new(&filename))?;
+        let watch_fd = std::os::unix::io::AsRawFd::as_raw_fd(&watch_file);
+
+        let watcher = FileWatcher::watch(watch_fd)
+            .map_err(|e| std::io::Error::other(format!("kqueue watch failed: {e}")))?;
+
+        loop {
+            let event = watcher
+                .wait_with_key_check(key_fd, Duration::from_millis(500))
+                .map_err(|e| std::io::Error::other(format!("kqueue wait failed: {e}")))?;
+
+            match event {
+                FollowEvent::NewData => {
+                    let old_len = self.buffer.len();
+                    self.buffer.refresh()?;
+                    let new_len = self.buffer.len();
+                    if new_len > old_len {
+                        self.index = LineIndex::new(new_len as u64);
+                        self.index.index_all(&*self.buffer)?;
+                        let total = self.index.lines_indexed();
+                        let target = total.saturating_sub(self.screen.content_rows());
+                        self.screen.goto_line(target, total);
+                        self.status_message =
+                            Some("Waiting for data... (interrupt to abort)".to_string());
+                        self.repaint()?;
+                    }
+                }
+                FollowEvent::KeyReady => {
+                    match self.reader.read_key() {
+                        Ok(Key::Ctrl('c')) => break,
+                        Ok(Key::Char('q' | 'Q')) => {
+                            self.should_quit = true;
+                            return Ok(());
+                        }
+                        Ok(_) => {} // Ignore other keys while in follow mode.
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                FollowEvent::Timeout => {
+                    // Poll-based fallback: also check if the file grew even
+                    // without a kqueue notification (e.g. NFS, some edge cases).
+                    let old_len = self.buffer.len();
+                    self.buffer.refresh()?;
+                    let new_len = self.buffer.len();
+                    if new_len > old_len {
+                        self.index = LineIndex::new(new_len as u64);
+                        self.index.index_all(&*self.buffer)?;
+                        let total = self.index.lines_indexed();
+                        let target = total.saturating_sub(self.screen.content_rows());
+                        self.screen.goto_line(target, total);
+                        self.status_message =
+                            Some("Waiting for data... (interrupt to abort)".to_string());
+                        self.repaint()?;
+                    }
+                }
+            }
+        }
+
+        // Repaint after exiting follow mode.
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Fallback follow mode: blocks reading keys until interrupted.
+    ///
+    /// Used when kqueue is not available (e.g. in tests or for pipe input).
+    fn follow_mode_blocking(&mut self) -> Result<()> {
         loop {
             match self.reader.read_key() {
                 Ok(Key::Ctrl('c')) => break,
@@ -2189,6 +2304,15 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Set the editor command to use for the `v` command.
     pub fn set_editor(&mut self, editor: &str) {
         editor.clone_into(&mut self.editor);
+    }
+
+    /// Set the raw file descriptor for the key input source.
+    ///
+    /// When set, follow mode uses kqueue to efficiently multiplex between
+    /// file change notifications and key input. Typically set to the fd of
+    /// the `/dev/tty` handle used for key reading.
+    pub fn set_key_fd(&mut self, fd: RawFd) {
+        self.key_fd = Some(fd);
     }
 
     /// Return the last executed shell command, if any.

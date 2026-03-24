@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
@@ -29,8 +29,12 @@ enum Storage {
 ///
 /// Empty files always use the `Vec` path because memory-mapping zero bytes is
 /// undefined behavior on some platforms.
+///
+/// The buffer stores the file path so that [`Buffer::refresh`] can re-read the
+/// file to detect new data appended in follow mode.
 pub struct FileBuffer {
     storage: Storage,
+    path: PathBuf,
 }
 
 impl FileBuffer {
@@ -44,6 +48,29 @@ impl FileBuffer {
     ///
     /// Returns an error if the file cannot be opened or read.
     pub fn open(path: &Path) -> Result<Self> {
+        let storage = Self::load_storage(path)?;
+        Ok(Self {
+            storage,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Returns the file path this buffer was opened from.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns a byte slice over the entire buffer contents.
+    fn as_bytes(&self) -> &[u8] {
+        match &self.storage {
+            Storage::Vec(v) => v.as_slice(),
+            Storage::Mmap(m) => m.as_ref(),
+        }
+    }
+
+    /// Load storage from a file path (shared between `open` and `refresh`).
+    fn load_storage(path: &Path) -> Result<Storage> {
         let file = File::open(path)?;
         let metadata = file.metadata()?;
         let len = metadata.len();
@@ -55,24 +82,12 @@ impl FileBuffer {
             })?;
             let mut data = Vec::with_capacity(capacity);
             file.read_to_end(&mut data)?;
-            Ok(Self {
-                storage: Storage::Vec(data),
-            })
+            Ok(Storage::Vec(data))
         } else {
             // SAFETY: The file is open and has a non-zero length. We hold no
             // mutable references to the mapped region. The mapping is read-only.
             let mmap = unsafe { Mmap::map(&file)? };
-            Ok(Self {
-                storage: Storage::Mmap(mmap),
-            })
-        }
-    }
-
-    /// Returns a byte slice over the entire buffer contents.
-    fn as_bytes(&self) -> &[u8] {
-        match &self.storage {
-            Storage::Vec(v) => v.as_slice(),
-            Storage::Mmap(m) => m.as_ref(),
+            Ok(Storage::Mmap(mmap))
         }
     }
 }
@@ -98,6 +113,7 @@ impl Buffer for FileBuffer {
     }
 
     fn refresh(&mut self) -> Result<usize> {
+        self.storage = Self::load_storage(&self.path)?;
         Ok(self.len())
     }
 }
@@ -240,5 +256,55 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let result = FileBuffer::open(dir.path());
         assert!(result.is_err());
+    }
+
+    // ── Path accessor ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_path_returns_opened_path() {
+        let f = make_temp_file(b"data");
+        let buf = FileBuffer::open(f.path()).expect("open failed");
+        assert_eq!(buf.path(), f.path());
+    }
+
+    // ── Refresh detects new data ───────────────────────────────────────
+
+    #[test]
+    fn test_refresh_detects_appended_data() {
+        let f = make_temp_file(b"hello\n");
+        let mut buf = FileBuffer::open(f.path()).expect("open failed");
+        assert_eq!(buf.len(), 6);
+
+        // Append data to the file.
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(f.path())
+                .expect("open for append");
+            file.write_all(b"world\n").expect("append write");
+            file.flush().expect("flush append");
+        }
+
+        let new_len = buf.refresh().expect("refresh failed");
+        assert_eq!(new_len, 12);
+        assert_eq!(buf.len(), 12);
+
+        // Verify the appended content is readable.
+        let mut out = vec![0u8; 6];
+        let n = buf.read_at(6, &mut out).expect("read_at failed");
+        assert_eq!(n, 6);
+        assert_eq!(&out, b"world\n");
+    }
+
+    #[test]
+    fn test_refresh_unchanged_file_returns_same_len() {
+        let content = b"static content\n";
+        let f = make_temp_file(content);
+        let mut buf = FileBuffer::open(f.path()).expect("open failed");
+        let len1 = buf.refresh().expect("refresh 1 failed");
+        let len2 = buf.refresh().expect("refresh 2 failed");
+        assert_eq!(len1, len2);
+        assert_eq!(len1, content.len());
     }
 }

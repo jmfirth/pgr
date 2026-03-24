@@ -153,6 +153,33 @@ impl LineIndex {
         Ok(self.offsets.len())
     }
 
+    /// Updates the known buffer length so that new data can be scanned.
+    ///
+    /// Call this after [`Buffer::refresh`] reports a larger size. The index
+    /// retains all previously scanned offsets and will scan the new region
+    /// lazily on the next [`ensure_line`](Self::ensure_line) or
+    /// [`index_all`](Self::index_all) call.
+    ///
+    /// If the buffer was previously empty and is now non-empty, the first
+    /// line start (offset 0) is automatically recorded.
+    pub fn update_buffer_len(&mut self, new_len: u64) {
+        if new_len > self.buffer_len {
+            // If the index was empty (buffer was zero-length before) and now has
+            // data, seed the first line.
+            if self.offsets.is_empty() && new_len > 0 {
+                self.offsets.push(0);
+            }
+            // If the scan had completed to the old boundary, back up by one byte
+            // so the last byte is re-processed. This handles the case where a
+            // newline was at the end of the old buffer and its following line
+            // start was suppressed by the `< buffer_len` guard in `scan_chunk`.
+            if self.scanned_to == self.buffer_len && self.scanned_to > 0 {
+                self.scanned_to -= 1;
+            }
+            self.buffer_len = new_len;
+        }
+    }
+
     /// Returns the zero-based line number containing the given byte offset.
     ///
     /// Scans forward as needed to find the line. Returns `Ok(None)` if the
@@ -530,5 +557,57 @@ mod tests {
         let mut idx = LineIndex::new(buf.len() as u64);
         assert_eq!(idx.total_lines(&buf).unwrap(), 1);
         assert_eq!(idx.get_line(0, &buf).unwrap().as_deref(), Some(""));
+    }
+
+    // ── update_buffer_len ────────────────────────────────────────────
+
+    #[test]
+    fn test_line_index_update_buffer_len_extends_scannable_range() {
+        // Start with "a\nb\n" (4 bytes, 2 lines).
+        let initial = b"a\nb\n";
+        let buf = SliceBuffer::new(initial);
+        let mut idx = LineIndex::new(initial.len() as u64);
+        assert_eq!(idx.total_lines(&buf).unwrap(), 2);
+
+        // Simulate buffer growing to "a\nb\nc\n" (6 bytes).
+        let grown = b"a\nb\nc\n";
+        let buf2 = SliceBuffer::new(grown);
+        idx.update_buffer_len(grown.len() as u64);
+        assert_eq!(idx.total_lines(&buf2).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_line_index_update_buffer_len_no_change_is_noop() {
+        let data = b"a\nb\n";
+        let buf = SliceBuffer::new(data);
+        let mut idx = LineIndex::new(data.len() as u64);
+        idx.index_all(&buf).unwrap();
+        let lines_before = idx.lines_indexed();
+
+        idx.update_buffer_len(data.len() as u64);
+        assert_eq!(idx.lines_indexed(), lines_before);
+    }
+
+    #[test]
+    fn test_line_index_update_buffer_len_from_empty_seeds_first_line() {
+        let mut idx = LineIndex::new(0);
+        assert_eq!(idx.lines_indexed(), 0);
+
+        // Grow from empty to non-empty.
+        idx.update_buffer_len(5);
+        assert_eq!(idx.lines_indexed(), 1); // line 0 seeded
+    }
+
+    #[test]
+    fn test_line_index_update_buffer_len_smaller_is_ignored() {
+        let data = b"a\nb\nc\n";
+        let buf = SliceBuffer::new(data);
+        let mut idx = LineIndex::new(data.len() as u64);
+        idx.index_all(&buf).unwrap();
+        let lines_before = idx.lines_indexed();
+
+        // Trying to shrink should be ignored.
+        idx.update_buffer_len(2);
+        assert_eq!(idx.lines_indexed(), lines_before);
     }
 }
