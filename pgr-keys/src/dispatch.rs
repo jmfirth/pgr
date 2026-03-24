@@ -179,6 +179,8 @@ pub struct Pager<R: Read, W: Write> {
     every_file_commands: Vec<String>,
     /// Whether initial commands have been executed (prevents re-execution).
     initial_commands_executed: bool,
+    /// Whether the current search (prompt or repeat) should cross file boundaries.
+    cross_file_search: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -240,6 +242,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             initial_commands: Vec::new(),
             every_file_commands: Vec::new(),
             initial_commands_executed: false,
+            cross_file_search: false,
         }
     }
 
@@ -774,6 +777,20 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::FindOpenBracket(open, close) => {
                 self.find_matching_bracket(open, close, false, total)?;
             }
+            Command::SearchNextCrossFile => {
+                self.repeat_search_cross_file(false, count)?;
+            }
+            Command::SearchPrevCrossFile => {
+                self.repeat_search_cross_file(true, count)?;
+            }
+            Command::SearchForwardCrossFile => {
+                self.cross_file_search = true;
+                self.enter_search_mode(SearchDirection::Forward, count)?;
+            }
+            Command::SearchBackwardCrossFile => {
+                self.cross_file_search = true;
+                self.enter_search_mode(SearchDirection::Backward, count)?;
+            }
         }
 
         Ok(())
@@ -1220,7 +1237,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if !modifiers.is_empty() {
                     self.last_modifiers = modifiers;
                 }
-                return self.do_search(direction, count, true);
+                let found = self.do_search(direction, count, true)?;
+                if !found && self.cross_file_search {
+                    self.cross_file_continue(direction, count)?;
+                }
+                self.cross_file_search = false;
+                return Ok(());
             }
             self.repaint()?;
             return Ok(());
@@ -1245,7 +1267,12 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.last_direction = direction;
         self.last_modifiers = modifiers;
         self.highlight_state.clear();
-        self.do_search(direction, count, false)
+        let found = self.do_search(direction, count, false)?;
+        if !found && self.cross_file_search {
+            self.cross_file_continue(direction, count)?;
+        }
+        self.cross_file_search = false;
+        Ok(())
     }
 
     /// Perform a search in the given direction using `last_pattern`.
@@ -1254,16 +1281,18 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// position advances past the current match to avoid re-finding it.
     /// When false (new `/` or `?` search), the start position includes the
     /// current viewport.
+    ///
+    /// Returns `true` if a match was found, `false` otherwise.
     fn do_search(
         &mut self,
         direction: SearchDirection,
         count: Option<usize>,
         is_repeat: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let Some(ref pattern) = self.last_pattern else {
             self.status_message = Some("No previous search pattern".to_string());
             self.repaint()?;
-            return Ok(());
+            return Ok(false);
         };
 
         // Re-compile with current runtime case mode so that toggling -i/-I
@@ -1331,11 +1360,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.screen.set_top_line(line);
                 self.repaint()?;
             }
+            Ok(true)
         } else {
             self.status_message = Some("Pattern not found".to_string());
             self.repaint()?;
+            Ok(false)
         }
-        Ok(())
     }
 
     /// Repeat the last search, optionally reversing direction.
@@ -1355,7 +1385,169 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.last_direction
         };
 
-        self.do_search(direction, count, true)
+        self.do_search(direction, count, true)?;
+        Ok(())
+    }
+
+    /// Repeat the last search with cross-file behavior (ESC-n, ESC-N).
+    ///
+    /// Searches the current file first. If no match is found and a file list
+    /// is present, switches to the next (or previous) file and searches from
+    /// the beginning (or end). Repeats until a match is found or all files
+    /// are exhausted.
+    fn repeat_search_cross_file(&mut self, reverse: bool, count: Option<usize>) -> Result<()> {
+        if self.last_pattern.is_none() {
+            self.status_message = Some("No previous search pattern".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let direction = if reverse {
+            match self.last_direction {
+                SearchDirection::Forward => SearchDirection::Backward,
+                SearchDirection::Backward => SearchDirection::Forward,
+            }
+        } else {
+            self.last_direction
+        };
+
+        let found = self.do_search(direction, count, true)?;
+        if !found {
+            self.cross_file_continue(direction, count)?;
+        }
+        Ok(())
+    }
+
+    /// Continue a cross-file search into adjacent files.
+    ///
+    /// Switches to the next file (forward) or previous file (backward) and
+    /// searches from the beginning or end respectively. Iterates through all
+    /// files until a match is found or the starting file is reached again.
+    fn cross_file_continue(
+        &mut self,
+        direction: SearchDirection,
+        count: Option<usize>,
+    ) -> Result<()> {
+        let file_count = self.file_list.as_ref().map_or(0, FileList::file_count);
+
+        if file_count <= 1 {
+            // Single file or no file list — nothing to cross into.
+            return Ok(());
+        }
+
+        let start_index = self.file_list.as_ref().map_or(0, FileList::current_index);
+
+        for _ in 1..file_count {
+            // Try switching to the next/prev file.
+            let switch_ok = match direction {
+                SearchDirection::Forward => self.try_switch_file_next(),
+                SearchDirection::Backward => self.try_switch_file_prev(),
+            };
+
+            if !switch_ok {
+                // Wrapped around or no more files. In GNU less, cross-file
+                // search does NOT wrap from the last file back to the first
+                // (or vice versa). Stop here.
+                break;
+            }
+
+            // Position the viewport at the beginning (forward) or end (backward)
+            // of the new file so do_search scans the entire file.
+            match direction {
+                SearchDirection::Forward => {
+                    self.screen.set_top_line(0);
+                }
+                SearchDirection::Backward => {
+                    if let Ok(total) = self.index.total_lines(&*self.buffer) {
+                        self.screen.set_top_line(total.saturating_sub(1));
+                    }
+                }
+            }
+
+            // Search from the start/end of the new file (non-repeat so we
+            // include the very first/last line).
+            let found = self.do_search(direction, count, false)?;
+            if found {
+                return Ok(());
+            }
+        }
+
+        // Exhausted all files. Restore original file position.
+        // The "Pattern not found" message is already set by the last do_search.
+        // Switch back to the original file.
+        let current_index = self.file_list.as_ref().map_or(0, FileList::current_index);
+        if current_index != start_index {
+            self.switch_file_goto_impl(start_index)?;
+        }
+        Ok(())
+    }
+
+    /// Try to switch to the next file, returning true on success.
+    ///
+    /// Unlike `switch_file_next`, this does not set a status message on failure.
+    fn try_switch_file_next(&mut self) -> bool {
+        let switched = if let Some(ref mut file_list) = self.file_list {
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+            let old_name = self.filename.clone();
+            if file_list.next().is_err() {
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                return false;
+            }
+            self.previous_file = old_name;
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.apply_current_file_impl(true);
+        }
+        switched
+    }
+
+    /// Try to switch to the previous file, returning true on success.
+    ///
+    /// Unlike `switch_file_prev`, this does not set a status message on failure.
+    fn try_switch_file_prev(&mut self) -> bool {
+        let switched = if let Some(ref mut file_list) = self.file_list {
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+            let old_name = self.filename.clone();
+            if file_list.prev().is_err() {
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                return false;
+            }
+            self.previous_file = old_name;
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.apply_current_file_impl(true);
+        }
+        switched
+    }
+
+    /// Switch to a specific file index without status messages.
+    fn switch_file_goto_impl(&mut self, index: usize) -> Result<()> {
+        let switched = if let Some(ref mut file_list) = self.file_list {
+            file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
+            file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+            let old_name = self.filename.clone();
+            if file_list.goto(index).is_err() {
+                file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                return Ok(());
+            }
+            self.previous_file = old_name;
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.apply_current_file_impl(true);
+            self.repaint()?;
+        }
+        Ok(())
     }
 
     /// Enter filter prompt mode for the `&` command.
@@ -4902,5 +5094,155 @@ mod tests {
         let content = b"no bracket here\nmore text\n";
         let pager = run_pager(b"{q", content);
         assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // ── Task 214: Cross-file search tests ──
+
+    // Test 1: ESC-n finds match in next file when not in current.
+    #[test]
+    fn test_dispatch_esc_n_searches_next_file_on_no_match() {
+        // file1 has "alpha" lines, file2 has "beta" lines with a "target" on line 5.
+        let content1 = b"alpha\nalpha\nalpha\nalpha\nalpha\n".to_vec();
+        let mut content2 = Vec::new();
+        for i in 0..10 {
+            if i == 5 {
+                content2.extend_from_slice(b"target\n");
+            } else {
+                content2.extend_from_slice(b"beta\n");
+            }
+        }
+
+        // Search for "target" in file1 (won't find it), then ESC-n to cross into file2.
+        // /target\n = search for "target", \x1bn = ESC-n (cross-file repeat)
+        let keys = b"/target\n\x1bnq";
+        let pager = run_pager_with_files(
+            keys,
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        // Should have switched to file2 and found "target" at line 5.
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 1);
+        assert_eq!(pager.screen().top_line(), 5);
+    }
+
+    // Test 2: ESC-N finds match in previous file.
+    #[test]
+    fn test_dispatch_esc_upper_n_searches_prev_file() {
+        // file1 has "target" on line 3, file2 has no "target".
+        let mut content1 = Vec::new();
+        for i in 0..10 {
+            if i == 3 {
+                content1.extend_from_slice(b"target\n");
+            } else {
+                content1.extend_from_slice(b"alpha\n");
+            }
+        }
+        let content2 = b"beta\nbeta\nbeta\nbeta\nbeta\n".to_vec();
+
+        // Start on file1, switch to file2, search for "target", then ESC-N
+        // (cross-file reverse) to find it back in file1.
+        // :n = switch to file2, /target\n = search forward (no match), \x1bN = ESC-N
+        let keys = b":n/target\n\x1bNq";
+        let pager = run_pager_with_files(
+            keys,
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        // Should have switched back to file1 and found "target" at line 3.
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+        assert_eq!(pager.screen().top_line(), 3);
+    }
+
+    // Test 3: Single-file ESC-n acts like regular n.
+    #[test]
+    fn test_dispatch_esc_n_single_file_acts_like_regular_n() {
+        let mut content = Vec::new();
+        for i in 0..30 {
+            if i == 5 || i == 15 {
+                content.extend_from_slice(b"target\n");
+            } else {
+                content.extend_from_slice(b"other\n");
+            }
+        }
+
+        // Search for "target", find at line 5, then ESC-n repeats in same file.
+        let keys = b"/target\n\x1bnq";
+        let pager = run_pager(keys, &content);
+        // First search finds line 5, ESC-n finds line 15.
+        assert_eq!(pager.screen().top_line(), 15);
+    }
+
+    // Test 4: "Pattern not found" when no match in any file.
+    #[test]
+    fn test_dispatch_esc_n_pattern_not_found_in_any_file() {
+        let content1 = b"alpha\nalpha\nalpha\n".to_vec();
+        let content2 = b"beta\nbeta\nbeta\n".to_vec();
+
+        // Search for "nonexistent", then ESC-n to cross files — should fail everywhere.
+        let keys = b"/nonexistent\n\x1bnq";
+        let pager = run_pager_with_files(
+            keys,
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        // Should end up back on file1 (restored to original after exhausting all files).
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+        // "Pattern not found" was rendered to output (status_message is transient,
+        // cleared on next keypress).
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Pattern not found"),
+            "Pattern not found message should appear in output"
+        );
+    }
+
+    // Test 5: ESC-/ opens cross-file search prompt, finds in next file.
+    #[test]
+    fn test_dispatch_esc_slash_cross_file_search_forward() {
+        let content1 = b"alpha\nalpha\nalpha\n".to_vec();
+        let mut content2 = Vec::new();
+        for i in 0..10 {
+            if i == 2 {
+                content2.extend_from_slice(b"target\n");
+            } else {
+                content2.extend_from_slice(b"beta\n");
+            }
+        }
+
+        // ESC-/ opens cross-file forward search prompt, type "target\n".
+        let keys = b"\x1b/target\nq";
+        let pager = run_pager_with_files(
+            keys,
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        // Should have switched to file2 and found "target" at line 2.
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 1);
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    // Test 6: ESC-? opens cross-file backward search prompt.
+    #[test]
+    fn test_dispatch_esc_question_cross_file_search_backward() {
+        let mut content1 = Vec::new();
+        for i in 0..10 {
+            if i == 7 {
+                content1.extend_from_slice(b"target\n");
+            } else {
+                content1.extend_from_slice(b"alpha\n");
+            }
+        }
+        let content2 = b"beta\nbeta\nbeta\n".to_vec();
+
+        // Start on file1, switch to file2, then ESC-? for "target" backward cross-file.
+        let keys = b":n\x1b?target\nq";
+        let pager = run_pager_with_files(
+            keys,
+            vec![("file1.txt", &content1), ("file2.txt", &content2)],
+        );
+        // Should have switched back to file1 and found "target" at line 7.
+        let fl = pager.file_list().expect("file list should be set");
+        assert_eq!(fl.current_index(), 0);
+        assert_eq!(pager.screen().top_line(), 7);
     }
 }

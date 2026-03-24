@@ -109,6 +109,14 @@ pub enum Command {
     /// Find matching open bracket by searching backward from bottom line.
     /// The tuple fields are `(open_char, close_char)`, e.g., `('{', '}')`.
     FindOpenBracket(char, char),
+    /// Repeat last search forward, crossing file boundaries. ESC-n.
+    SearchNextCrossFile,
+    /// Repeat last search backward, crossing file boundaries. ESC-N.
+    SearchPrevCrossFile,
+    /// Enter forward search mode with cross-file behavior. ESC-/.
+    SearchForwardCrossFile,
+    /// Enter backward search mode with cross-file behavior. ESC-?.
+    SearchBackwardCrossFile,
 }
 
 #[cfg(test)]
