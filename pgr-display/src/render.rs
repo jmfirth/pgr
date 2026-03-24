@@ -125,6 +125,21 @@ impl TabStops {
     }
 }
 
+impl std::fmt::Display for TabStops {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for stop in &self.stops {
+            if first {
+                first = false;
+            } else {
+                f.write_str(",")?;
+            }
+            write!(f, "{stop}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Parsed binary character format specification.
 ///
 /// Represents the parsed form of `LESSBINFMT` or `LESSUTFBINFMT`.

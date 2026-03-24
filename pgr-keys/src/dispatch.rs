@@ -2921,9 +2921,9 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.render_config.raw_mode = mode;
     }
 
-    /// Set the tab stop width.
-    pub fn set_tab_width(&mut self, width: usize) {
-        self.render_config.tab_stops = TabStops::regular(width);
+    /// Set the tab stop configuration.
+    pub fn set_tab_stops(&mut self, stops: TabStops) {
+        self.render_config.tab_stops = stops;
     }
 
     /// Set the overstrike processing mode.
@@ -3012,7 +3012,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.screen
             .set_chop_mode(self.runtime_options.chop_long_lines);
         self.render_config.raw_mode = self.runtime_options.raw_control_mode;
-        self.render_config.tab_stops = TabStops::regular(self.runtime_options.tab_width);
+        self.render_config.tab_stops = self.runtime_options.tab_stops.clone();
     }
 
     /// Access the screen state (for testing).
@@ -4352,7 +4352,7 @@ mod tests {
         assert!(!pager.runtime_options().case_insensitive);
         assert!(!pager.runtime_options().line_numbers);
         assert!(!pager.runtime_options().chop_long_lines);
-        assert_eq!(pager.runtime_options().tab_width, 8);
+        assert_eq!(pager.runtime_options().tab_stops, TabStops::regular(8));
     }
 
     #[test]
@@ -4366,12 +4366,12 @@ mod tests {
         let mut opts = RuntimeOptions::default();
         opts.case_insensitive = true;
         opts.line_numbers = true;
-        opts.tab_width = 4;
+        opts.tab_stops = TabStops::regular(4);
         pager.set_runtime_options(opts);
 
         assert!(pager.runtime_options().case_insensitive);
         assert!(pager.runtime_options().line_numbers);
-        assert_eq!(pager.runtime_options().tab_width, 4);
+        assert_eq!(pager.runtime_options().tab_stops, TabStops::regular(4));
     }
 
     // ── Shell/pipe command tests ────────────────────────────────────

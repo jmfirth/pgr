@@ -208,9 +208,13 @@ pub struct Options {
     #[arg(short = 'X', long = "no-init")]
     pub no_init: bool,
 
-    /// Set tab stops (default 8).
+    /// Set tab stops as comma-separated column positions (default 8).
+    ///
+    /// A single value sets regular tab stops at that interval.
+    /// Multiple values (e.g., `9,17`) set explicit positions, with the last
+    /// interval repeating for positions beyond the list.
     #[arg(short = 'x', long = "tabs", default_value = "8")]
-    pub tab_width: usize,
+    pub tab_stops: String,
 
     // ── Input flags ───────────────────────────────────────────────────
     /// Force open non-regular files.
@@ -628,7 +632,7 @@ mod tests {
         assert!(!opts.quit_at_first_eof);
         assert!(!opts.quit_if_one_screen);
         assert!(!opts.no_init);
-        assert_eq!(opts.tab_width, 8);
+        assert_eq!(opts.tab_stops, "8");
         assert!(!opts.version);
         assert!(!opts.help);
         // Phase 1 defaults
@@ -678,7 +682,7 @@ mod tests {
         assert!(!opts.quit_at_first_eof);
         assert!(!opts.quit_if_one_screen);
         assert!(!opts.no_init);
-        assert_eq!(opts.tab_width, 8);
+        assert_eq!(opts.tab_stops, "8");
         assert!(!opts.version);
         assert!(!opts.help);
     }
@@ -711,9 +715,15 @@ mod tests {
     }
 
     #[test]
-    fn test_options_dash_x_sets_tab_width() {
+    fn test_options_dash_x_sets_tab_stops_single() {
         let opts = Options::parse_from(["pgr", "-x4", "file.txt"]);
-        assert_eq!(opts.tab_width, 4);
+        assert_eq!(opts.tab_stops, "4");
+    }
+
+    #[test]
+    fn test_options_dash_x_sets_tab_stops_multi() {
+        let opts = Options::parse_from(["pgr", "-x9,17", "file.txt"]);
+        assert_eq!(opts.tab_stops, "9,17");
     }
 
     #[test]

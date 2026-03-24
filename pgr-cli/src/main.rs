@@ -8,6 +8,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use pgr_core::{Buffer, LineIndex, MarkStore};
+use pgr_display::TabStops;
 use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
     find_tag, parse_lesskey_file, resolve_pattern, FileEntry, FileList, KeyReader, LesskeyConfig,
@@ -362,7 +363,8 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
 ) {
     pager.set_raw_mode(options.raw_mode());
     pager.set_prompt_style(options.prompt_style());
-    pager.set_tab_width(options.tab_width);
+    let tab_stops = TabStops::parse(&options.tab_stops).unwrap_or_else(|_| TabStops::regular(8));
+    pager.set_tab_stops(tab_stops.clone());
     pager.set_dimensions(rows, cols);
 
     // Wire all CLI display flags into runtime options (single call).
@@ -372,7 +374,7 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         chop_long_lines: options.chop_long_lines,
         squeeze_blank_lines: options.squeeze_blank_lines,
         raw_control_mode: options.raw_mode(),
-        tab_width: options.tab_width,
+        tab_stops,
         tilde: options.tilde,
         status_column: options.status_column,
         wordwrap: options.wordwrap,
