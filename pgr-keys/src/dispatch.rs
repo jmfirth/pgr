@@ -768,8 +768,110 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.highlight_state.toggle();
                 self.repaint()?;
             }
+            Command::FindCloseBracket(open, close) => {
+                self.find_matching_bracket(open, close, true, total)?;
+            }
+            Command::FindOpenBracket(open, close) => {
+                self.find_matching_bracket(open, close, false, total)?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Find a matching bracket by scanning lines forward or backward.
+    ///
+    /// When `forward` is true, starts at the top visible line and searches
+    /// forward for `close`, tracking nesting via `open`. When false, starts
+    /// at the bottom visible line and searches backward for `open`, tracking
+    /// nesting via `close`.
+    fn find_matching_bracket(
+        &mut self,
+        open: char,
+        close: char,
+        forward: bool,
+        total: usize,
+    ) -> Result<()> {
+        let start = if forward {
+            self.screen.top_line()
+        } else {
+            (self.screen.top_line() + self.screen.content_rows()).min(total.saturating_sub(1))
+        };
+
+        // Verify the starting line contains the expected bracket.
+        let start_bracket = if forward { open } else { close };
+        let start_line = self.index.get_line(start, &*self.buffer)?;
+        let has_start_bracket = start_line
+            .as_ref()
+            .is_some_and(|line| line.contains(start_bracket));
+
+        if !has_start_bracket {
+            self.status_message = Some(format!("No {start_bracket} found on current line"));
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let mut depth: i64 = 0;
+
+        if forward {
+            for line_num in start..total {
+                if let Some(ref content) = self.index.get_line(line_num, &*self.buffer)? {
+                    // Consider only the first bracket character on each line.
+                    let first_open = content.find(open);
+                    let first_close = content.find(close);
+                    match (first_open, first_close) {
+                        (Some(o), Some(c)) => {
+                            if o < c {
+                                depth += 1;
+                            } else {
+                                depth -= 1;
+                            }
+                        }
+                        (Some(_), None) => depth += 1,
+                        (None, Some(_)) => depth -= 1,
+                        (None, None) => {}
+                    }
+                    if depth == 0 {
+                        self.save_last_position();
+                        self.screen.set_top_line(line_num);
+                        self.repaint()?;
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            // Search backward from start line.
+            for line_num in (0..=start).rev() {
+                if let Some(ref content) = self.index.get_line(line_num, &*self.buffer)? {
+                    let first_open = content.find(open);
+                    let first_close = content.find(close);
+                    match (first_open, first_close) {
+                        (Some(o), Some(c)) => {
+                            if c < o {
+                                depth += 1;
+                            } else {
+                                depth -= 1;
+                            }
+                        }
+                        (Some(_), None) => depth -= 1,
+                        (None, Some(_)) => depth += 1,
+                        (None, None) => {}
+                    }
+                    if depth == 0 {
+                        self.save_last_position();
+                        self.screen.set_top_line(line_num);
+                        self.repaint()?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        self.status_message = Some(format!(
+            "No matching {} found",
+            if forward { close } else { open }
+        ));
+        self.repaint()?;
         Ok(())
     }
 
@@ -4719,5 +4821,86 @@ mod tests {
         // Search for "line 10" via initial command with explicit newline.
         let pager = run_pager_with_initial_commands(b"q", &content, vec!["/line 10\n"], vec![]);
         assert_eq!(pager.screen().top_line(), 10);
+    }
+
+    // ── Task 210: Bracket matching tests ──
+
+    #[test]
+    fn test_dispatch_open_brace_finds_matching_close_brace() {
+        // Line 0: {
+        // Line 1: content
+        // Line 2: }
+        let content = b"{\ncontent\n}\nafter\n";
+        let pager = run_pager(b"{q", content);
+        // Starting at top_line 0 which has `{`, should find `}` on line 2.
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    #[test]
+    fn test_dispatch_close_brace_finds_matching_open_brace() {
+        // Line 0: {
+        // Line 1: content
+        // Line 2: }
+        // Screen is 24 rows, content_rows = 23. For a 4-line file, bottom = min(0+23, 3) = 3.
+        // But line 3 ("after") has no `}`, so we need the bottom line to have `}`.
+        // With a 4-line file and top_line=0, bottom = min(23, 3) = 3. Line 3 is "after".
+        // We need to scroll so `}` is at the bottom of the viewport.
+        // Actually, `}` searches backward from bottom visible line. Let's just use a file
+        // where the close brace is visible at the bottom.
+        let content = b"{\ncontent\n}\n";
+        // 3 lines. With top_line=0, bottom = min(0+23, 2) = 2. Line 2 is `}`.
+        let pager = run_pager(b"}q", content);
+        // Should search backward from line 2, find `{` on line 0.
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_brace_matching_nested() {
+        // Line 0: {
+        // Line 1: {
+        // Line 2: }
+        // Line 3: }
+        let content = b"{\n{\n}\n}\nafter\n";
+        let pager = run_pager(b"{q", content);
+        // Starting at line 0 with `{`, nesting: line 0 depth=1, line 1 depth=2,
+        // line 2 depth=1, line 3 depth=0 -> match at line 3.
+        assert_eq!(pager.screen().top_line(), 3);
+    }
+
+    #[test]
+    fn test_dispatch_paren_matching_forward() {
+        // Line 0: (
+        // Line 1: inner
+        // Line 2: )
+        let content = b"(\ninner\n)\nend\n";
+        let pager = run_pager(b"(q", content);
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    #[test]
+    fn test_dispatch_square_bracket_matching_forward() {
+        // Line 0: [
+        // Line 1: item
+        // Line 2: ]
+        let content = b"[\nitem\n]\nend\n";
+        let pager = run_pager(b"[q", content);
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    #[test]
+    fn test_dispatch_bracket_no_match_stays_at_current_line() {
+        // Line 0: { with no matching }
+        let content = b"{\nno close\n";
+        let pager = run_pager(b"{q", content);
+        // Should stay at line 0 (no match found).
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_bracket_no_start_bracket_stays_at_current_line() {
+        // Top line has no `{`, so `{` command should not move.
+        let content = b"no bracket here\nmore text\n";
+        let pager = run_pager(b"{q", content);
+        assert_eq!(pager.screen().top_line(), 0);
     }
 }

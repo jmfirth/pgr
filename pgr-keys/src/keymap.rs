@@ -122,6 +122,13 @@ impl Keymap {
             // Phase 1: ESC-n/ESC-N behave the same as n/N (cross-file in Phase 2)
             (Key::EscSeq('n'), Command::RepeatSearch),
             (Key::EscSeq('N'), Command::RepeatSearchReverse),
+            // Bracket matching
+            (Key::Char('{'), Command::FindCloseBracket('{', '}')),
+            (Key::Char('}'), Command::FindOpenBracket('{', '}')),
+            (Key::Char('('), Command::FindCloseBracket('(', ')')),
+            (Key::Char(')'), Command::FindOpenBracket('(', ')')),
+            (Key::Char('['), Command::FindCloseBracket('[', ']')),
+            (Key::Char(']'), Command::FindOpenBracket('[', ']')),
         ];
 
         Self { bindings }
@@ -505,6 +512,62 @@ mod tests {
         assert_eq!(
             keymap.lookup(&Key::EscSeq('N')),
             Command::RepeatSearchReverse
+        );
+    }
+
+    // ── Task 210: Bracket matching key bindings ──
+
+    #[test]
+    fn test_keymap_open_brace_maps_to_find_close_bracket() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('{')),
+            Command::FindCloseBracket('{', '}')
+        );
+    }
+
+    #[test]
+    fn test_keymap_close_brace_maps_to_find_open_bracket() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('}')),
+            Command::FindOpenBracket('{', '}')
+        );
+    }
+
+    #[test]
+    fn test_keymap_open_paren_maps_to_find_close_bracket() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('(')),
+            Command::FindCloseBracket('(', ')')
+        );
+    }
+
+    #[test]
+    fn test_keymap_close_paren_maps_to_find_open_bracket() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char(')')),
+            Command::FindOpenBracket('(', ')')
+        );
+    }
+
+    #[test]
+    fn test_keymap_open_square_maps_to_find_close_bracket() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char('[')),
+            Command::FindCloseBracket('[', ']')
+        );
+    }
+
+    #[test]
+    fn test_keymap_close_square_maps_to_find_open_bracket() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::Char(']')),
+            Command::FindOpenBracket('[', ']')
         );
     }
 }

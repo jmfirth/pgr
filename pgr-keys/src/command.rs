@@ -103,6 +103,12 @@ pub enum Command {
     RepeatSearchReverse,
     /// Toggle search highlighting (ESC-u).
     ToggleHighlight,
+    /// Find matching close bracket by searching forward from top line.
+    /// The tuple fields are `(open_char, close_char)`, e.g., `('{', '}')`.
+    FindCloseBracket(char, char),
+    /// Find matching open bracket by searching backward from bottom line.
+    /// The tuple fields are `(open_char, close_char)`, e.g., `('{', '}')`.
+    FindOpenBracket(char, char),
 }
 
 #[cfg(test)]
@@ -141,6 +147,30 @@ mod tests {
         assert_ne!(
             Command::GotoBeginning(Some(1)),
             Command::GotoBeginning(None)
+        );
+    }
+
+    #[test]
+    fn test_command_find_close_bracket_equality() {
+        assert_eq!(
+            Command::FindCloseBracket('{', '}'),
+            Command::FindCloseBracket('{', '}')
+        );
+    }
+
+    #[test]
+    fn test_command_find_open_bracket_equality() {
+        assert_eq!(
+            Command::FindOpenBracket('{', '}'),
+            Command::FindOpenBracket('{', '}')
+        );
+    }
+
+    #[test]
+    fn test_command_find_bracket_different_types_not_equal() {
+        assert_ne!(
+            Command::FindCloseBracket('{', '}'),
+            Command::FindOpenBracket('{', '}')
         );
     }
 }
