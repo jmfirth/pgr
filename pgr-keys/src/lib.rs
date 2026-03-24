@@ -15,6 +15,7 @@ pub mod lesskey;
 pub mod line_editor;
 pub mod runtime_options;
 pub mod shell;
+pub mod tags;
 pub mod terminal;
 
 pub use command::Command;
@@ -32,4 +33,5 @@ pub use lesskey::{
 };
 pub use line_editor::{LineEditResult, LineEditor};
 pub use runtime_options::{HiliteMode, OptionError, RuntimeOptions};
+pub use tags::{find_tag, resolve_pattern, TagEntry, TagState};
 pub use terminal::RawTerminal;
