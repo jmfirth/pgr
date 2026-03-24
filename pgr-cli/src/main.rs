@@ -201,6 +201,7 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     let (rows, cols) = raw_terminal.dimensions()?;
 
     let tty_keys = std::fs::File::open("/dev/tty")?;
+    let tty_keys_fd = tty_keys.as_raw_fd();
     let reader = KeyReader::new(tty_keys);
     let writer = std::io::stdout();
 
@@ -211,6 +212,7 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
         index,
         Some(String::from("(standard input)")),
     );
+    pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
 
     pager.run()?;
@@ -296,10 +298,12 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     let (rows, cols) = raw_terminal.dimensions()?;
 
     let tty_keys = std::fs::File::open("/dev/tty")?;
+    let tty_keys_fd = tty_keys.as_raw_fd();
     let reader = KeyReader::new(tty_keys);
     let writer = std::io::stdout();
 
     let mut pager = Pager::new(reader, writer, buffer, index, Some(filename));
+    pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
 
     if file_list.file_count() > 1 {
