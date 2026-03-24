@@ -2,6 +2,7 @@
 //! Terminal rendering, prompt evaluation, ANSI handling, color, and Unicode width.
 
 pub mod ansi;
+pub mod charset;
 pub mod color;
 pub mod error;
 pub mod line_numbers;
@@ -13,6 +14,7 @@ pub mod terminal_output;
 pub mod unicode;
 
 pub use ansi::{AnsiState, OverstrikeMode};
+pub use charset::{CharType, Charset};
 pub use color::{Color, ColorAutoDetect, ColorConfig, ColorSelector, ColorSpec};
 pub use error::{DisplayError, Result};
 pub use line_numbers::{
