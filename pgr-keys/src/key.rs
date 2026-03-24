@@ -39,6 +39,10 @@ pub enum Key {
     CtrlLeft,
     /// Ctrl+Right arrow.
     CtrlRight,
+    /// Mouse scroll wheel up.
+    ScrollUp,
+    /// Mouse scroll wheel down.
+    ScrollDown,
     /// An unrecognized byte sequence.
     Unknown(Vec<u8>),
 }
@@ -66,6 +70,21 @@ mod tests {
     fn test_key_clone_produces_equal_value() {
         let key = Key::Unknown(vec![0x1b, 0x5b, 0x99]);
         assert_eq!(key.clone(), key);
+    }
+
+    #[test]
+    fn test_key_scroll_up_equality() {
+        assert_eq!(Key::ScrollUp, Key::ScrollUp);
+    }
+
+    #[test]
+    fn test_key_scroll_down_equality() {
+        assert_eq!(Key::ScrollDown, Key::ScrollDown);
+    }
+
+    #[test]
+    fn test_key_scroll_up_differs_from_scroll_down() {
+        assert_ne!(Key::ScrollUp, Key::ScrollDown);
     }
 
     #[test]

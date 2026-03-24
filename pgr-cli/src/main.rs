@@ -385,6 +385,17 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         pager.set_exit_follow_on_close(true);
     }
 
+    // Wire mouse support.
+    if options.mouse || options.mouse_reversed {
+        pager.set_mouse_enabled(true);
+        let wheel_lines = options.wheel_lines.unwrap_or(3);
+        if options.mouse_reversed {
+            pager.set_wheel_reversed(wheel_lines);
+        } else {
+            pager.set_wheel_lines(wheel_lines);
+        }
+    }
+
     // Wire initial commands (+cmd / ++cmd).
     if !options.initial_commands.is_empty() {
         pager.set_initial_commands(options.initial_commands.clone());

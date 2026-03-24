@@ -69,12 +69,95 @@ impl<R: Read> KeyReader<R> {
         // Read parameter bytes (digits and semicolons) and the final byte.
         loop {
             let b = self.read_byte()?;
+            if b == b'M' && self.buf.is_empty() {
+                // X11 mouse tracking: ESC[M followed by 3 raw bytes (button, x, y).
+                return self.parse_x11_mouse();
+            }
+            if b == b'<' && self.buf.is_empty() {
+                // SGR mouse tracking: ESC[< followed by params and M/m final byte.
+                return self.parse_sgr_mouse();
+            }
             if (0x40..=0x7E).contains(&b) {
                 // Final byte of CSI sequence.
                 return Ok(self.map_csi_sequence(b));
             }
             self.buf.push(b);
         }
+    }
+
+    /// Parse X11 mouse tracking sequence: ESC[M cb cx cy.
+    ///
+    /// Button byte (cb) has 32 added. Scroll wheel up = 96 (64+32), down = 97 (65+32).
+    fn parse_x11_mouse(&mut self) -> std::io::Result<Key> {
+        let cb = self.read_byte()?;
+        let cx = self.read_byte()?;
+        let cy = self.read_byte()?;
+
+        // cb has 32 added to it. Button 64 = scroll up, 65 = scroll down.
+        let button = cb.wrapping_sub(32);
+        match button {
+            64 => Ok(Key::ScrollUp),
+            65 => Ok(Key::ScrollDown),
+            _ => {
+                // Non-wheel mouse event; report as unknown.
+                Ok(Key::Unknown(vec![0x1B, b'[', b'M', cb, cx, cy]))
+            }
+        }
+    }
+
+    /// Parse SGR mouse tracking sequence: ESC[< params M or ESC[< params m.
+    ///
+    /// Format: ESC[< button;x;y M (press) or ESC[< button;x;y m (release).
+    /// Scroll wheel up = button 64, down = button 65.
+    fn parse_sgr_mouse(&mut self) -> std::io::Result<Key> {
+        self.buf.clear();
+
+        // Read until we hit 'M' (press) or 'm' (release).
+        let final_byte = loop {
+            let b = self.read_byte()?;
+            if b == b'M' || b == b'm' {
+                break b;
+            }
+            self.buf.push(b);
+        };
+
+        // Parse button from the first parameter (before the first ';').
+        let button = self.parse_sgr_button();
+
+        match button {
+            Some(64) => Ok(Key::ScrollUp),
+            Some(65) => Ok(Key::ScrollDown),
+            _ => {
+                // Non-wheel mouse event; report as unknown.
+                let mut raw = vec![0x1B, b'[', b'<'];
+                raw.extend_from_slice(&self.buf);
+                raw.push(final_byte);
+                Ok(Key::Unknown(raw))
+            }
+        }
+    }
+
+    /// Extract the button number from the first parameter in `self.buf`.
+    ///
+    /// The buffer contains `button;x;y` as ASCII digits and semicolons.
+    fn parse_sgr_button(&self) -> Option<u16> {
+        let params = &self.buf;
+        let end = params
+            .iter()
+            .position(|&b| b == b';')
+            .unwrap_or(params.len());
+        let digits = &params[..end];
+        if digits.is_empty() {
+            return None;
+        }
+        let mut value: u16 = 0;
+        for &d in digits {
+            if !d.is_ascii_digit() {
+                return None;
+            }
+            value = value.checked_mul(10)?.checked_add(u16::from(d - b'0'))?;
+        }
+        Some(value)
     }
 
     /// Map a completed CSI sequence (params in `self.buf`, final byte given) to a `Key`.
@@ -424,5 +507,73 @@ mod tests {
         // 0xFF is not a valid UTF-8 leading byte
         let key = parse_key(&[0xFF]);
         assert_eq!(key, Key::Unknown(vec![0xFF]));
+    }
+
+    // ── Mouse input tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_key_reader_x11_mouse_scroll_up_returns_scroll_up() {
+        // ESC[M followed by button=96 (64+32), x=33, y=33
+        assert_eq!(parse_key(&[0x1B, b'[', b'M', 96, 33, 33]), Key::ScrollUp);
+    }
+
+    #[test]
+    fn test_key_reader_x11_mouse_scroll_down_returns_scroll_down() {
+        // ESC[M followed by button=97 (65+32), x=33, y=33
+        assert_eq!(parse_key(&[0x1B, b'[', b'M', 97, 33, 33]), Key::ScrollDown);
+    }
+
+    #[test]
+    fn test_key_reader_x11_mouse_click_returns_unknown() {
+        // ESC[M followed by button=32 (0+32=left click), x=33, y=33
+        let key = parse_key(&[0x1B, b'[', b'M', 32, 33, 33]);
+        match key {
+            Key::Unknown(bytes) => {
+                assert_eq!(bytes[0], 0x1B);
+                assert_eq!(bytes[2], b'M');
+            }
+            other => panic!("expected Key::Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_key_reader_sgr_mouse_scroll_up_returns_scroll_up() {
+        // ESC[<64;10;20M — SGR scroll wheel up
+        assert_eq!(
+            parse_key(&[0x1B, b'[', b'<', b'6', b'4', b';', b'1', b'0', b';', b'2', b'0', b'M']),
+            Key::ScrollUp
+        );
+    }
+
+    #[test]
+    fn test_key_reader_sgr_mouse_scroll_down_returns_scroll_down() {
+        // ESC[<65;10;20M — SGR scroll wheel down
+        assert_eq!(
+            parse_key(&[0x1B, b'[', b'<', b'6', b'5', b';', b'1', b'0', b';', b'2', b'0', b'M']),
+            Key::ScrollDown
+        );
+    }
+
+    #[test]
+    fn test_key_reader_sgr_mouse_click_returns_unknown() {
+        // ESC[<0;10;20M — SGR left click
+        let key = parse_key(&[
+            0x1B, b'[', b'<', b'0', b';', b'1', b'0', b';', b'2', b'0', b'M',
+        ]);
+        match key {
+            Key::Unknown(bytes) => {
+                assert_eq!(bytes[0], 0x1B);
+            }
+            other => panic!("expected Key::Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_key_reader_sgr_mouse_release_scroll_up_returns_scroll_up() {
+        // ESC[<64;10;20m — SGR scroll wheel up (release variant)
+        assert_eq!(
+            parse_key(&[0x1B, b'[', b'<', b'6', b'4', b';', b'1', b'0', b';', b'2', b'0', b'm']),
+            Key::ScrollUp
+        );
     }
 }

@@ -191,6 +191,8 @@ pub struct Pager<R: Read, W: Write> {
     follow_name: bool,
     /// Whether follow mode should exit when the input pipe closes.
     exit_follow_on_close: bool,
+    /// Whether mouse tracking is enabled (`--mouse` or `--MOUSE`).
+    mouse_enabled: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -256,6 +258,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             tag_state: None,
             follow_name: false,
             exit_follow_on_close: false,
+            mouse_enabled: false,
         }
     }
 
@@ -267,6 +270,13 @@ impl<R: Read, W: Write> Pager<R, W> {
     pub fn run(&mut self) -> Result<()> {
         // Enter alternate screen buffer (like GNU less).
         self.writer.write_all(b"\x1b[?1049h")?;
+
+        // Enable mouse tracking if configured.
+        if self.mouse_enabled {
+            self.writer.write_all(crate::terminal::MOUSE_ENABLE)?;
+            self.writer.write_all(crate::terminal::MOUSE_SGR_ENABLE)?;
+        }
+
         self.writer.flush()?;
 
         self.repaint()?;
@@ -283,12 +293,23 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => {
+                    // Disable mouse tracking before exiting.
+                    if self.mouse_enabled {
+                        let _ = self.writer.write_all(crate::terminal::MOUSE_SGR_DISABLE);
+                        let _ = self.writer.write_all(crate::terminal::MOUSE_DISABLE);
+                    }
                     // Exit alternate screen buffer before propagating error.
                     let _ = self.writer.write_all(b"\x1b[?1049l");
                     let _ = self.writer.flush();
                     return Err(e.into());
                 }
             }
+        }
+
+        // Disable mouse tracking before exiting.
+        if self.mouse_enabled {
+            self.writer.write_all(crate::terminal::MOUSE_SGR_DISABLE)?;
+            self.writer.write_all(crate::terminal::MOUSE_DISABLE)?;
         }
 
         // Exit alternate screen buffer.
@@ -3178,6 +3199,31 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.repaint()?;
         Ok(())
     }
+
+    /// Enable mouse tracking for the pager session.
+    ///
+    /// When enabled, the pager sends X11 and SGR mouse tracking escape
+    /// sequences on entry and cleans them up on exit. Scroll wheel
+    /// events are mapped to scroll commands via the keymap.
+    pub fn set_mouse_enabled(&mut self, enabled: bool) {
+        self.mouse_enabled = enabled;
+    }
+
+    /// Set the number of lines scrolled per mouse wheel tick.
+    ///
+    /// Updates the keymap bindings for `ScrollUp` and `ScrollDown`.
+    /// Default is 3 lines.
+    pub fn set_wheel_lines(&mut self, lines: usize) {
+        self.keymap.set_wheel_lines(lines);
+    }
+
+    /// Set reversed mouse wheel direction (`--MOUSE`).
+    ///
+    /// Swaps scroll up/down so that wheel up scrolls forward and
+    /// wheel down scrolls backward.
+    pub fn set_wheel_reversed(&mut self, lines: usize) {
+        self.keymap.set_wheel_reversed(lines);
+    }
 }
 
 #[cfg(test)]
@@ -5705,5 +5751,97 @@ mod tests {
     fn test_keymap_z_upper_starts_pending_command() {
         let result = Pager::<Cursor<Vec<u8>>, Vec<u8>>::check_pending_start(&Key::Char('Z'));
         assert_eq!(result, Some(PendingCommand::ZPrefix));
+    }
+
+    // ── Task 221: Mouse support tests ──
+
+    #[test]
+    fn test_dispatch_mouse_enabled_writes_tracking_sequences_on_run() {
+        let content = make_test_content(50);
+        // Feed 'q' to quit immediately.
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.set_mouse_enabled(true);
+        let _ = pager.run();
+        let output = String::from_utf8_lossy(&pager.writer);
+        // Should contain mouse enable sequences at start.
+        assert!(output.contains("\x1b[?1000h"), "missing X11 mouse enable");
+        assert!(output.contains("\x1b[?1006h"), "missing SGR mouse enable");
+        // Should contain mouse disable sequences at end.
+        assert!(output.contains("\x1b[?1000l"), "missing X11 mouse disable");
+        assert!(output.contains("\x1b[?1006l"), "missing SGR mouse disable");
+    }
+
+    #[test]
+    fn test_dispatch_mouse_disabled_no_tracking_sequences() {
+        let content = make_test_content(50);
+        let pager = run_pager(b"q", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            !output.contains("\x1b[?1000h"),
+            "should not contain mouse enable"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_x11_scroll_up_scrolls_backward() {
+        let content = make_test_content(100);
+        // First scroll down 5 lines, then scroll up with X11 mouse, then quit.
+        let mut keys: Vec<u8> = Vec::new();
+        // 5 x 'j' to scroll down 5 lines
+        keys.extend_from_slice(b"jjjjj");
+        // X11 mouse scroll up: ESC[M followed by button=96 (64+32), x=33, y=33
+        keys.extend_from_slice(&[0x1B, b'[', b'M', 96, 33, 33]);
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Started at 0, scrolled down to 5, then scroll up 3 (default wheel_lines) = 2
+        assert_eq!(pager.screen().top_line(), 2);
+    }
+
+    #[test]
+    fn test_dispatch_x11_scroll_down_scrolls_forward() {
+        let content = make_test_content(100);
+        // X11 mouse scroll down: ESC[M followed by button=97 (65+32), x=33, y=33
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(&[0x1B, b'[', b'M', 97, 33, 33]);
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Default wheel_lines is 3, so should scroll forward 3.
+        assert_eq!(pager.screen().top_line(), 3);
+    }
+
+    #[test]
+    fn test_dispatch_set_wheel_lines_changes_scroll_amount() {
+        let content = make_test_content(100);
+        let mut keys: Vec<u8> = Vec::new();
+        // X11 mouse scroll down
+        keys.extend_from_slice(&[0x1B, b'[', b'M', 97, 33, 33]);
+        keys.push(b'q');
+        let reader = KeyReader::new(Cursor::new(keys));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.set_wheel_lines(7);
+        let _ = pager.run();
+        assert_eq!(pager.screen().top_line(), 7);
+    }
+
+    #[test]
+    fn test_dispatch_sgr_scroll_down_scrolls_forward() {
+        let content = make_test_content(100);
+        let mut keys: Vec<u8> = Vec::new();
+        // SGR mouse scroll down: ESC[<65;10;20M
+        keys.extend_from_slice(&[
+            0x1B, b'[', b'<', b'6', b'5', b';', b'1', b'0', b';', b'2', b'0', b'M',
+        ]);
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert_eq!(pager.screen().top_line(), 3);
     }
 }

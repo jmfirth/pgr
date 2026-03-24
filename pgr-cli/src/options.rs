@@ -262,9 +262,17 @@ pub struct Options {
     #[arg(short = 'J', long = "status-column")]
     pub status_column: bool,
 
-    /// Enable mouse support (Phase 2).
-    #[arg(long = "mouse", hide = true)]
+    /// Enable mouse wheel scrolling.
+    #[arg(long = "mouse")]
     pub mouse: bool,
+
+    /// Enable mouse wheel scrolling with reversed direction.
+    #[arg(long = "MOUSE")]
+    pub mouse_reversed: bool,
+
+    /// Number of lines to scroll per mouse wheel tick (default: 3).
+    #[arg(long = "wheel-lines")]
+    pub wheel_lines: Option<usize>,
 
     /// Follow by name in follow mode: reopen file by path on rename/delete.
     #[arg(long = "follow-name")]
@@ -983,5 +991,46 @@ mod tests {
         let opts = Options::parse_from(["pgr", "file.txt"]);
         assert!(opts.tag.is_none());
         assert!(opts.tag_file.is_none());
+    }
+
+    // ── Task 221: Mouse flags ─────────────────────────────────────────
+
+    #[test]
+    fn test_options_mouse_flag() {
+        let opts = Options::parse_from(["pgr", "--mouse", "file.txt"]);
+        assert!(opts.mouse);
+        assert!(!opts.mouse_reversed);
+    }
+
+    #[test]
+    fn test_options_mouse_reversed_flag() {
+        let opts = Options::parse_from(["pgr", "--MOUSE", "file.txt"]);
+        assert!(opts.mouse_reversed);
+    }
+
+    #[test]
+    fn test_options_wheel_lines_flag() {
+        let opts = Options::parse_from(["pgr", "--wheel-lines", "5", "file.txt"]);
+        assert_eq!(opts.wheel_lines, Some(5));
+    }
+
+    #[test]
+    fn test_options_mouse_with_wheel_lines() {
+        let opts = Options::parse_from(["pgr", "--mouse", "--wheel-lines", "10", "file.txt"]);
+        assert!(opts.mouse);
+        assert_eq!(opts.wheel_lines, Some(10));
+    }
+
+    #[test]
+    fn test_options_wheel_lines_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.wheel_lines.is_none());
+    }
+
+    #[test]
+    fn test_options_mouse_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.mouse);
+        assert!(!opts.mouse_reversed);
     }
 }

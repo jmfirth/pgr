@@ -34,4 +34,4 @@ pub use lesskey::{
 pub use line_editor::{LineEditResult, LineEditor};
 pub use runtime_options::{HiliteMode, OptionError, RuntimeOptions};
 pub use tags::{find_tag, resolve_pattern, TagEntry, TagState};
-pub use terminal::RawTerminal;
+pub use terminal::{RawTerminal, MOUSE_DISABLE, MOUSE_ENABLE, MOUSE_SGR_DISABLE, MOUSE_SGR_ENABLE};
