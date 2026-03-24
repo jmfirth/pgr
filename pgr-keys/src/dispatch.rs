@@ -132,6 +132,8 @@ pub struct Pager<R: Read, W: Write> {
     secure_mode: bool,
     /// Whether the input is from a pipe (not a named file).
     is_pipe: bool,
+    /// Whether this is the first render (for initial bottom-alignment of short files).
+    initial_render: bool,
     /// The last shell command executed (for `!` repeat).
     last_shell_command: Option<String>,
     /// The shell to use for shell commands (from SHELL env or "sh").
@@ -202,6 +204,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             eof_seen_count: 0,
             secure_mode: false,
             is_pipe: false,
+            initial_render: true,
             last_shell_command: None,
             shell: String::from("sh"),
             editor: String::from("vi"),
@@ -1752,16 +1755,13 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.highlight_state
             .compute_highlights(&lines, self.last_pattern.as_ref());
 
-        // For short files, GNU less renders content at the bottom of the
-        // screen (not the top). Calculate the start row offset.
-        // Bottom-align only for genuinely short files (total fits on screen),
-        // not when viewport extends past EOF due to search.
+        // GNU less bottom-aligns short files only on the initial render.
+        // After any keypress, less repaints top-aligned with tildes filling below.
         let visible_content = total.saturating_sub(start);
-        let start_row = if total <= content_rows {
-            // Bottom-align: content_rows - visible_content + 1 (1-based)
+        let start_row = if self.initial_render && total <= content_rows && start == 0 {
             content_rows - visible_content + 1
         } else {
-            0 // default: start at row 1
+            0
         };
 
         let paint_opts = PaintOptions {
@@ -1782,6 +1782,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         // Prompt always on the last terminal row (matching GNU less).
         self.paint_status_prompt(total)?;
 
+        self.initial_render = false;
         Ok(())
     }
 
@@ -1823,7 +1824,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.highlight_state
             .compute_highlights(&line_contents, self.last_pattern.as_ref());
 
-        let start_row = if visible_total < content_rows {
+        let start_row = if self.initial_render && visible_total < content_rows {
             content_rows - visible_total + 1
         } else {
             0
@@ -1845,6 +1846,7 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.paint_status_prompt(total)?;
 
+        self.initial_render = false;
         Ok(())
     }
 
