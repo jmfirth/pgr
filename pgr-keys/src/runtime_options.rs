@@ -70,6 +70,8 @@ pub struct RuntimeOptions {
     pub hilite_unread_all: bool,
     /// Don't show tilde for lines past EOF (`-~`).
     pub tilde: bool,
+    /// Show status column on the left edge (`-J`).
+    pub status_column: bool,
 
     // Value flags (prompted for a value)
     /// Tab stop width (`-x`).
@@ -108,6 +110,7 @@ impl Default for RuntimeOptions {
             hilite_unread: false,
             hilite_unread_all: false,
             tilde: false,
+            status_column: false,
             tab_width: 8,
             jump_target: 1,
             shift_amount: 0,
@@ -239,6 +242,10 @@ impl RuntimeOptions {
                     self.hilite_unread_all,
                 ))
             }
+            'J' => {
+                self.status_column = !self.status_column;
+                Ok(bool_description("Status column", self.status_column))
+            }
             // Value flags cannot be toggled — they require a value.
             'x' | 'j' | '#' | 'z' | 'h' | 'y' => Err(OptionError::RequiresValue(flag)),
             _ => Err(OptionError::UnknownOption(flag)),
@@ -332,6 +339,10 @@ impl RuntimeOptions {
                 self.hilite_unread_all = true;
                 Ok(bool_description("Highlight unread (all)", true))
             }
+            'J' => {
+                self.status_column = true;
+                Ok(bool_description("Status column", true))
+            }
             'x' | 'j' | '#' | 'z' | 'h' | 'y' => Err(OptionError::RequiresValue(flag)),
             _ => Err(OptionError::UnknownOption(flag)),
         }
@@ -409,6 +420,10 @@ impl RuntimeOptions {
             'W' => {
                 self.hilite_unread_all = false;
                 Ok(bool_description("Highlight unread (all)", false))
+            }
+            'J' => {
+                self.status_column = false;
+                Ok(bool_description("Status column", false))
             }
             'x' | 'j' | '#' | 'z' | 'h' | 'y' => Err(OptionError::RequiresValue(flag)),
             _ => Err(OptionError::UnknownOption(flag)),
@@ -510,6 +525,7 @@ impl RuntimeOptions {
                 "Highlight unread (all)",
                 self.hilite_unread_all,
             )),
+            'J' => Ok(bool_description("Status column", self.status_column)),
             'x' => Ok(format!("Tab stops at {}", self.tab_width)),
             'j' => Ok(format!("Jump target at {}", self.jump_target)),
             '#' => Ok(format!("Horizontal shift is {}", self.shift_amount)),
@@ -536,7 +552,7 @@ impl RuntimeOptions {
     /// Returns `true` if toggling the given flag should cause a screen repaint.
     #[must_use]
     pub fn needs_repaint(flag: char) -> bool {
-        matches!(flag, 'N' | 'S' | 's' | 'r' | 'R' | 'x')
+        matches!(flag, 'N' | 'S' | 's' | 'r' | 'R' | 'x' | 'J')
     }
 }
 
@@ -806,6 +822,56 @@ mod tests {
 
         opts.toggle('R').unwrap();
         assert_eq!(opts.raw_control_mode, RawControlMode::Off);
+    }
+
+    // ── Status column (-J) flag ──
+
+    #[test]
+    fn test_toggle_upper_j_flips_status_column() {
+        let mut opts = RuntimeOptions::default();
+        assert!(!opts.status_column);
+
+        let msg = opts.toggle('J').unwrap();
+        assert!(opts.status_column);
+        assert!(msg.contains("ON"), "expected ON in: {msg}");
+
+        let msg = opts.toggle('J').unwrap();
+        assert!(!opts.status_column);
+        assert!(msg.contains("OFF"), "expected OFF in: {msg}");
+    }
+
+    #[test]
+    fn test_set_on_upper_j_sets_status_column_true() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_on('J').unwrap();
+        assert!(opts.status_column);
+        assert!(msg.contains("ON"));
+    }
+
+    #[test]
+    fn test_set_off_upper_j_sets_status_column_false() {
+        let mut opts = RuntimeOptions::default();
+        opts.status_column = true;
+        let msg = opts.set_off('J').unwrap();
+        assert!(!opts.status_column);
+        assert!(msg.contains("OFF"));
+    }
+
+    #[test]
+    fn test_query_upper_j_returns_current_state() {
+        let opts = RuntimeOptions::default();
+        let msg = opts.query('J').unwrap();
+        assert!(msg.contains("OFF"), "expected OFF in: {msg}");
+
+        let mut opts2 = RuntimeOptions::default();
+        opts2.status_column = true;
+        let msg = opts2.query('J').unwrap();
+        assert!(msg.contains("ON"), "expected ON in: {msg}");
+    }
+
+    #[test]
+    fn test_needs_repaint_includes_j() {
+        assert!(RuntimeOptions::needs_repaint('J'));
     }
 
     // ── Additional coverage: set_value for all value flags ──
