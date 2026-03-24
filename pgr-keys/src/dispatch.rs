@@ -76,6 +76,15 @@ impl Buffer for HelpBuffer {
     }
 }
 
+/// The reason the pager exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitReason {
+    /// Normal quit (e.g., `q`, `:q`, `ZZ`).
+    Normal,
+    /// Quit triggered by an interrupt (Ctrl-C).
+    Interrupt,
+}
+
 /// A partially-entered multi-key command awaiting its argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingCommand {
@@ -204,6 +213,10 @@ pub struct Pager<R: Read, W: Write> {
     search_literal_next: bool,
     /// Whether to repaint the screen before exiting (`--redraw-on-quit`).
     redraw_on_quit: bool,
+    /// Whether Ctrl-C should immediately quit (`-K` / `--quit-on-intr`).
+    quit_on_intr: bool,
+    /// The reason the pager exited.
+    exit_reason: ExitReason,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -275,6 +288,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             no_vbell: false,
             search_literal_next: false,
             redraw_on_quit: false,
+            quit_on_intr: false,
+            exit_reason: ExitReason::Normal,
         }
     }
 
@@ -410,6 +425,12 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         let command = self.keymap.lookup(key);
         let count = self.pending_count.take();
+
+        // Track interrupt-triggered quit for exit code conformance.
+        if *key == Key::Ctrl('c') && command == Command::Quit {
+            self.exit_reason = ExitReason::Interrupt;
+        }
+
         self.execute(&command, count)?;
 
         Ok(!self.should_quit)
@@ -1973,7 +1994,14 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn follow_mode_blocking(&mut self) -> Result<()> {
         loop {
             match self.reader.read_key() {
-                Ok(Key::Ctrl('c')) => break,
+                Ok(Key::Ctrl('c')) => {
+                    if self.quit_on_intr {
+                        self.exit_reason = ExitReason::Interrupt;
+                        self.should_quit = true;
+                        return Ok(());
+                    }
+                    break;
+                }
                 Ok(Key::Char('q' | 'Q')) => {
                     self.should_quit = true;
                     return Ok(());
@@ -2021,7 +2049,13 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// `Ok(false)` to continue. Sets `should_quit` on `q`/`Q`.
     fn follow_handle_key(&mut self) -> Result<bool> {
         match self.reader.read_key() {
-            Ok(Key::Ctrl('c')) => Ok(true),
+            Ok(Key::Ctrl('c')) => {
+                if self.quit_on_intr {
+                    self.exit_reason = ExitReason::Interrupt;
+                    self.should_quit = true;
+                }
+                Ok(true)
+            }
             Ok(Key::Char('q' | 'Q')) => {
                 self.should_quit = true;
                 Ok(true)
@@ -2109,7 +2143,14 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn follow_stop_on_match_blocking(&mut self) -> Result<()> {
         loop {
             match self.reader.read_key() {
-                Ok(Key::Ctrl('c')) => break,
+                Ok(Key::Ctrl('c')) => {
+                    if self.quit_on_intr {
+                        self.exit_reason = ExitReason::Interrupt;
+                        self.should_quit = true;
+                        return Ok(());
+                    }
+                    break;
+                }
                 Ok(Key::Char('q' | 'Q')) => {
                     self.should_quit = true;
                     return Ok(());
@@ -3389,6 +3430,23 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// leaving the alternate screen buffer on quit.
     pub fn set_redraw_on_quit(&mut self, enabled: bool) {
         self.redraw_on_quit = enabled;
+    }
+
+    /// Enable `-K` behavior: Ctrl-C immediately quits with exit code 2.
+    ///
+    /// When enabled, an interrupt character (Ctrl-C) causes the pager to
+    /// exit immediately rather than just cancelling the current operation.
+    pub fn set_quit_on_intr(&mut self, enabled: bool) {
+        self.quit_on_intr = enabled;
+    }
+
+    /// The reason the pager exited.
+    ///
+    /// Returns [`ExitReason::Normal`] for quit via `q`, `:q`, `ZZ`, EOF, etc.
+    /// Returns [`ExitReason::Interrupt`] when quit was triggered by Ctrl-C.
+    #[must_use]
+    pub fn exit_reason(&self) -> ExitReason {
+        self.exit_reason
     }
 
     /// Immediately index all lines in the buffer (`--file-size`).
@@ -6303,5 +6361,63 @@ mod tests {
         let pager = run_pager(&keys, &content);
         assert!(pager.last_pattern().is_some());
         assert_eq!(pager.last_pattern().unwrap().pattern(), "alpha");
+    }
+
+    // ── Task 245: Exit code conformance ─────────────────────────────────
+
+    #[test]
+    fn test_dispatch_normal_quit_exit_reason_is_normal() {
+        let content = make_test_content(5);
+        let pager = run_pager(b"q", &content);
+        assert_eq!(pager.exit_reason(), ExitReason::Normal);
+    }
+
+    #[test]
+    fn test_dispatch_ctrl_c_exit_reason_is_interrupt() {
+        let content = make_test_content(5);
+        let pager = run_pager(b"\x03", &content);
+        assert_eq!(pager.exit_reason(), ExitReason::Interrupt);
+    }
+
+    #[test]
+    fn test_dispatch_colon_q_exit_reason_is_normal() {
+        let content = make_test_content(5);
+        let pager = run_pager(b":q", &content);
+        assert_eq!(pager.exit_reason(), ExitReason::Normal);
+    }
+
+    #[test]
+    fn test_dispatch_zz_exit_reason_is_normal() {
+        let content = make_test_content(5);
+        let pager = run_pager(b"ZZ", &content);
+        assert_eq!(pager.exit_reason(), ExitReason::Normal);
+    }
+
+    #[test]
+    fn test_dispatch_quit_on_intr_setter() {
+        let content = make_test_content(5);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        assert!(!pager.quit_on_intr);
+        pager.set_quit_on_intr(true);
+        assert!(pager.quit_on_intr);
+    }
+
+    #[test]
+    fn test_dispatch_exit_reason_default_is_normal() {
+        let content = make_test_content(5);
+        let reader = KeyReader::new(Cursor::new(Vec::new()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let pager = Pager::new(reader, writer, buffer, index, None);
+        assert_eq!(pager.exit_reason(), ExitReason::Normal);
     }
 }
