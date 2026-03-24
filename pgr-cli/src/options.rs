@@ -246,12 +246,12 @@ pub struct Options {
     #[arg(short = 'T', long = "tag-file", hide = true)]
     pub tag_file: Option<String>,
 
-    /// Lesskey file (Phase 2).
+    /// Lesskey binary file (not supported; use --lesskey-src for source format).
     #[arg(short = 'k', long = "lesskey-file", hide = true)]
     pub lesskey_file: Option<String>,
 
-    /// Lesskey source file (Phase 2).
-    #[arg(long = "lesskey-src", hide = true)]
+    /// Lesskey source file to load custom key bindings from.
+    #[arg(long = "lesskey-src")]
     pub lesskey_src: Option<String>,
 
     /// Inline lesskey content (Phase 2).

@@ -31,6 +31,7 @@ use crate::filename::expand_filename;
 use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
+use crate::lesskey::LesskeyConfig;
 use crate::line_editor::{LineEditResult, LineEditor};
 use crate::runtime_options::RuntimeOptions;
 use crate::shell;
@@ -2848,6 +2849,14 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// initial open.
     pub fn set_every_file_commands(&mut self, cmds: Vec<String>) {
         self.every_file_commands = cmds;
+    }
+
+    /// Apply a lesskey configuration to the pager's keymap.
+    ///
+    /// User bindings from the lesskey config override or extend the default
+    /// keymap. This should be called after construction and before `run()`.
+    pub fn apply_lesskey_config(&mut self, config: &LesskeyConfig) {
+        self.keymap.apply_lesskey(config);
     }
 
     /// Execute a command string by converting each byte to a [`Key`] event

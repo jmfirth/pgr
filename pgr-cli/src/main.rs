@@ -5,10 +5,14 @@ mod options;
 
 use std::io::Cursor;
 use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
 
 use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
-use pgr_keys::{FileEntry, FileList, KeyReader, Pager, RawTerminal, RuntimeOptions};
+use pgr_keys::{
+    parse_lesskey_file, FileEntry, FileList, KeyReader, LesskeyConfig, Pager, RawTerminal,
+    RuntimeOptions,
+};
 
 use crate::env::EnvConfig;
 use crate::options::Options;
@@ -227,6 +231,7 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     );
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
+    apply_lesskey(&mut pager, options, &env_config);
 
     if env_config.secure_mode {
         pager.set_secure_mode(true);
@@ -323,6 +328,7 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     let mut pager = Pager::new(reader, writer, buffer, index, Some(filename));
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
+    apply_lesskey(&mut pager, options, &env_config);
 
     if env_config.secure_mode {
         pager.set_secure_mode(true);
@@ -377,6 +383,90 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     }
     if !options.every_file_commands.is_empty() {
         pager.set_every_file_commands(options.every_file_commands.clone());
+    }
+}
+
+/// Discover and load a lesskey source file.
+///
+/// Checks the following locations in priority order:
+/// 1. `--lesskey-src=FILE` command-line flag
+/// 2. `$LESSKEYIN` / `$LESSKEY` environment variable
+/// 3. `~/.lesskey` (legacy path)
+/// 4. `$XDG_CONFIG_HOME/lesskey` or `~/.config/lesskey`
+///
+/// Returns `None` if no lesskey file is found or if parsing fails.
+/// Missing files are silently ignored; I/O errors are logged to stderr.
+fn load_lesskey_config(options: &Options, env_config: &EnvConfig) -> Option<LesskeyConfig> {
+    // 1. --lesskey-src flag takes highest priority
+    if let Some(ref path) = options.lesskey_src {
+        return load_lesskey_from_path(Path::new(path));
+    }
+
+    // 2. $LESSKEYIN / $LESSKEY environment variable
+    if let Some(ref path) = env_config.lesskey {
+        return load_lesskey_from_path(Path::new(path));
+    }
+
+    // 3. ~/.lesskey (legacy path)
+    if let Some(ref home) = env_config.home {
+        let legacy = PathBuf::from(home).join(".lesskey");
+        if let Some(config) = load_lesskey_from_path(&legacy) {
+            return Some(config);
+        }
+    }
+
+    // 4. $XDG_CONFIG_HOME/lesskey or ~/.config/lesskey
+    let xdg_config = env_config
+        .xdg_config_home
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| {
+            env_config
+                .home
+                .as_ref()
+                .map(|h| PathBuf::from(h).join(".config"))
+        });
+    if let Some(config_dir) = xdg_config {
+        let xdg_path = config_dir.join("lesskey");
+        if let Some(config) = load_lesskey_from_path(&xdg_path) {
+            return Some(config);
+        }
+    }
+
+    None
+}
+
+/// Try to load and parse a lesskey source file from the given path.
+///
+/// Returns `None` if the file does not exist. Logs to stderr on I/O errors.
+fn load_lesskey_from_path(path: &std::path::Path) -> Option<LesskeyConfig> {
+    match parse_lesskey_file(path) {
+        Ok(Some(config)) if !config.command_bindings.is_empty() => Some(config),
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!(
+                "pgr: warning: failed to read lesskey file {}: {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Apply lesskey configuration to the pager, if available.
+///
+/// Also emits a warning if the `-k` flag (binary lesskey format) was used.
+fn apply_lesskey<R: std::io::Read, W: std::io::Write>(
+    pager: &mut Pager<R, W>,
+    options: &Options,
+    env_config: &EnvConfig,
+) {
+    if options.lesskey_file.is_some() {
+        eprintln!("pgr: warning: binary lesskey format (-k) is not supported; use --lesskey-src for source format");
+    }
+
+    if let Some(config) = load_lesskey_config(options, env_config) {
+        pager.apply_lesskey_config(&config);
     }
 }
 
@@ -596,5 +686,100 @@ mod tests {
         };
         let result = check_quit_if_one_screen_file(&mut file_list, &env_cfg).unwrap();
         assert!(result);
+    }
+
+    // ── Task 212: lesskey integration tests ──────────────────────────────
+
+    #[test]
+    fn test_load_lesskey_config_from_lesskey_src_flag() {
+        let tmp = make_temp_file(b"x quit\n");
+        let opts = Options::parse_from([
+            "pgr",
+            "--lesskey-src",
+            tmp.path().to_str().unwrap(),
+            "dummy.txt",
+        ]);
+        let env_cfg = EnvConfig::default();
+        let config = load_lesskey_config(&opts, &env_cfg);
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert!(!config.command_bindings.is_empty());
+    }
+
+    #[test]
+    fn test_load_lesskey_config_from_env_lesskey() {
+        let tmp = make_temp_file(b"x quit\n");
+        let opts = Options::parse_from(["pgr", "dummy.txt"]);
+        let env_cfg = EnvConfig {
+            lesskey: Some(tmp.path().to_str().unwrap().to_string()),
+            ..EnvConfig::default()
+        };
+        let config = load_lesskey_config(&opts, &env_cfg);
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn test_load_lesskey_config_default_paths_checked() {
+        // With no lesskey-src, no env, and no home, should return None
+        let opts = Options::parse_from(["pgr", "dummy.txt"]);
+        let env_cfg = EnvConfig::default();
+        let config = load_lesskey_config(&opts, &env_cfg);
+        // No lesskey file exists in any default path in test environment
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn test_load_lesskey_config_missing_file_silently_ignored() {
+        let opts = Options::parse_from([
+            "pgr",
+            "--lesskey-src",
+            "/nonexistent/path/lesskey",
+            "dummy.txt",
+        ]);
+        let env_cfg = EnvConfig::default();
+        let config = load_lesskey_config(&opts, &env_cfg);
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn test_load_lesskey_config_lesskey_src_takes_priority_over_env() {
+        let tmp_src = make_temp_file(b"x quit\n");
+        let tmp_env = make_temp_file(b"y page-forward\n");
+        let opts = Options::parse_from([
+            "pgr",
+            "--lesskey-src",
+            tmp_src.path().to_str().unwrap(),
+            "dummy.txt",
+        ]);
+        let env_cfg = EnvConfig {
+            lesskey: Some(tmp_env.path().to_str().unwrap().to_string()),
+            ..EnvConfig::default()
+        };
+        let config = load_lesskey_config(&opts, &env_cfg);
+        assert!(config.is_some());
+        let config = config.unwrap();
+        // Should get the binding from --lesskey-src (x -> quit), not env
+        assert_eq!(config.command_bindings.len(), 1);
+        assert_eq!(config.command_bindings[0].key, pgr_keys::Key::Char('x'));
+    }
+
+    #[test]
+    fn test_load_lesskey_from_path_nonexistent_returns_none() {
+        let result = load_lesskey_from_path(&PathBuf::from("/no/such/file"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_lesskey_from_path_empty_file_returns_none() {
+        let tmp = make_temp_file(b"");
+        let result = load_lesskey_from_path(&tmp.path().to_path_buf());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_lesskey_from_path_valid_file_returns_config() {
+        let tmp = make_temp_file(b"x quit\n");
+        let result = load_lesskey_from_path(&tmp.path().to_path_buf());
+        assert!(result.is_some());
     }
 }
