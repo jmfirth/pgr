@@ -293,7 +293,7 @@ fn test_conformance_display_chop_with_horizontal_scroll() {
     skip_if_no_less!();
     let path = fixture_path("long_lines.txt");
     let path_str = path.to_str().unwrap();
-    // ESC [ C is the right arrow key sequence.
+    // Right arrow in xterm-256color terminfo = ESC O C (SS3).
     let mut pgr = PagerSession::spawn_pgr(&["-S"], path_str, TEST_ROWS, TEST_COLS);
     let mut less = PagerSession::spawn_less(&["-S"], path_str, TEST_ROWS, TEST_COLS);
 
@@ -301,8 +301,8 @@ fn test_conformance_display_chop_with_horizontal_scroll() {
     less.settle(SETTLE_INITIAL);
 
     // Send right arrow to scroll horizontally.
-    pgr.send_bytes(b"\x1b[C");
-    less.send_bytes(b"\x1b[C");
+    pgr.send_bytes(b"\x1bOC");
+    less.send_bytes(b"\x1bOC");
 
     pgr.settle(SETTLE_KEY);
     less.settle(SETTLE_KEY);

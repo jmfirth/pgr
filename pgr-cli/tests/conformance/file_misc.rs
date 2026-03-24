@@ -249,7 +249,7 @@ fn test_conformance_multiple_marks() {
 /// Sends `-i\n` to toggle case sensitivity. The prompt should briefly
 /// show the state change.
 #[test]
-#[ignore = "pgr - option toggle scrolls instead of toggling option"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_option_toggle_case() {
     skip_if_no_less!();
 
@@ -265,7 +265,7 @@ fn test_conformance_option_toggle_case() {
 ///
 /// Sends `-N\n` to enable line numbers, verifying the display changes.
 #[test]
-#[ignore = "pgr -N line numbers not implemented; option toggle not conformant"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_option_toggle_line_numbers() {
     skip_if_no_less!();
 
@@ -294,7 +294,7 @@ fn test_conformance_option_toggle_chop() {
 ///
 /// Sends `_i\n` to query the case-sensitivity option state.
 #[test]
-#[ignore = "pgr _ option query not conformant with less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_option_query_case() {
     skip_if_no_less!();
 
@@ -315,7 +315,7 @@ fn test_conformance_option_query_case() {
 /// Presses `=` to display file information. The content area should
 /// remain the same; the prompt/status line will differ.
 #[test]
-#[ignore = "pgr = info command causes off-by-one vs less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_info_equals_file_info() {
     skip_if_no_less!();
 
@@ -330,7 +330,7 @@ fn test_conformance_info_equals_file_info() {
 ///
 /// Opens two files and presses `=` to see the multi-file info.
 #[test]
-#[ignore = "pgr multi-file = info not conformant"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_info_equals_multiple_files() {
     skip_if_no_less!();
 
