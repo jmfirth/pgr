@@ -334,6 +334,7 @@ fn test_conformance_display_default_wrapping() {
 ///
 /// After searching with a custom search color, the highlighted matches
 /// should use the specified color. Compare after performing a search.
+/// GNU less 692 requires `--use-color` before any `-D` flag.
 #[test]
 #[ignore = "pgr search scrolls to match line differently than less"]
 fn test_conformance_display_search_color() {
@@ -341,8 +342,8 @@ fn test_conformance_display_search_color() {
     let file = generate_numbered_file(100);
     let path = file.path().to_str().unwrap();
 
-    let mut pgr = PagerSession::spawn_pgr(&["-Ds1"], path, TEST_ROWS, TEST_COLS);
-    let mut less = PagerSession::spawn_less(&["-Ds1"], path, TEST_ROWS, TEST_COLS);
+    let mut pgr = PagerSession::spawn_pgr(&["--use-color", "-Ds1"], path, TEST_ROWS, TEST_COLS);
+    let mut less = PagerSession::spawn_less(&["--use-color", "-Ds1"], path, TEST_ROWS, TEST_COLS);
 
     pgr.settle(SETTLE_INITIAL);
     less.settle(SETTLE_INITIAL);
@@ -366,15 +367,16 @@ fn test_conformance_display_search_color() {
 /// Test 22: `-DP` sets prompt color.
 ///
 /// The prompt line should use the specified color.
+/// GNU less 692 requires `--use-color` before any `-D` flag.
 #[test]
-#[ignore = "less 581 requires --use-color before -D; pgr -D differs"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_prompt_color() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
     let path = file.path().to_str().unwrap();
 
-    let mut pgr = PagerSession::spawn_pgr(&["-DP2"], path, TEST_ROWS, TEST_COLS);
-    let mut less = PagerSession::spawn_less(&["-DP2"], path, TEST_ROWS, TEST_COLS);
+    let mut pgr = PagerSession::spawn_pgr(&["--use-color", "-DP2"], path, TEST_ROWS, TEST_COLS);
+    let mut less = PagerSession::spawn_less(&["--use-color", "-DP2"], path, TEST_ROWS, TEST_COLS);
 
     pgr.settle(SETTLE_INITIAL);
     less.settle(SETTLE_INITIAL);
@@ -392,15 +394,18 @@ fn test_conformance_display_prompt_color() {
 /// Test 23: `-DN` sets line number color with `-N`.
 ///
 /// Line numbers should be rendered in the specified color.
+/// GNU less 692 requires `--use-color` before any `-D` flag.
 #[test]
-#[ignore = "pgr -N line numbers not implemented; less 581 -D requires --use-color"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_line_number_color() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
     let path = file.path().to_str().unwrap();
 
-    let mut pgr = PagerSession::spawn_pgr(&["-N", "-DN2"], path, TEST_ROWS, TEST_COLS);
-    let mut less = PagerSession::spawn_less(&["-N", "-DN2"], path, TEST_ROWS, TEST_COLS);
+    let mut pgr =
+        PagerSession::spawn_pgr(&["--use-color", "-N", "-DN2"], path, TEST_ROWS, TEST_COLS);
+    let mut less =
+        PagerSession::spawn_less(&["--use-color", "-N", "-DN2"], path, TEST_ROWS, TEST_COLS);
 
     pgr.settle(SETTLE_INITIAL);
     less.settle(SETTLE_INITIAL);
