@@ -9,6 +9,12 @@ use crate::log_file::LogWriter;
 /// Default read chunk size for pulling data from the pipe.
 const PIPE_READ_CHUNK: usize = 64 * 1024;
 
+/// Default buffer size when auto-allocation is disabled (`-B`).
+///
+/// This provides enough space for a single screen of content (roughly 64 KiB),
+/// matching the read chunk size.
+const DEFAULT_DISABLED_AUTO_ALLOC_SIZE: usize = 64 * 1024;
+
 /// A growable buffer backed by a `Read` source (pipe, stdin, or any stream).
 ///
 /// Data is read incrementally via [`Buffer::refresh`]. The buffer stores all
@@ -21,6 +27,13 @@ pub struct PipeBuffer<R: Read> {
     eof: bool,
     /// Optional log writer for tee-ing data to a file (`-o` / `-O`).
     log_writer: Option<LogWriter>,
+    /// Maximum buffer size in bytes. `None` means unlimited growth.
+    max_buffer_bytes: Option<usize>,
+    /// Total number of bytes discarded from the front of the buffer
+    /// when the buffer limit was exceeded. Used to translate logical
+    /// offsets (from the consumer's perspective) to physical indices
+    /// into `data`.
+    bytes_discarded: usize,
 }
 
 impl<R: Read> PipeBuffer<R> {
@@ -32,6 +45,8 @@ impl<R: Read> PipeBuffer<R> {
             source,
             eof: false,
             log_writer: None,
+            max_buffer_bytes: None,
+            bytes_discarded: 0,
         }
     }
 
@@ -46,22 +61,77 @@ impl<R: Read> PipeBuffer<R> {
     pub fn set_log_writer(&mut self, writer: LogWriter) {
         self.log_writer = Some(writer);
     }
+
+    /// Sets the maximum buffer size in kilobytes (`-b N`).
+    ///
+    /// When the buffer grows beyond this limit, the oldest data is discarded
+    /// from the front. This controls memory usage for large pipe inputs.
+    pub fn set_buffer_limit(&mut self, kb: usize) {
+        self.max_buffer_bytes = Some(kb * 1024);
+    }
+
+    /// Disables automatic buffer allocation beyond a minimal amount (`-B`).
+    ///
+    /// Limits the buffer to [`DEFAULT_DISABLED_AUTO_ALLOC_SIZE`] bytes,
+    /// discarding oldest data when the limit is exceeded.
+    pub fn disable_auto_alloc(&mut self) {
+        self.max_buffer_bytes = Some(DEFAULT_DISABLED_AUTO_ALLOC_SIZE);
+    }
+
+    /// Returns the number of bytes that have been discarded from the front
+    /// of the buffer due to size limits.
+    #[must_use]
+    pub fn bytes_discarded(&self) -> usize {
+        self.bytes_discarded
+    }
+
+    /// Enforces the buffer size limit by discarding oldest data from the front.
+    fn enforce_limit(&mut self) {
+        if let Some(max) = self.max_buffer_bytes {
+            if self.data.len() > max {
+                let excess = self.data.len() - max;
+                self.data.drain(..excess);
+                self.bytes_discarded += excess;
+            }
+        }
+    }
 }
 
 impl<R: Read + Send> Buffer for PipeBuffer<R> {
     fn len(&self) -> usize {
-        self.data.len()
+        self.bytes_discarded + self.data.len()
     }
 
     fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.bytes_discarded == 0 && self.data.is_empty()
     }
 
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> pgr_core::Result<usize> {
-        if offset >= self.data.len() {
+        // Offset is logical (from the consumer's perspective, counting from
+        // byte 0 of the original stream). Translate to a physical index into
+        // `self.data`, which may have had its front truncated.
+        if offset < self.bytes_discarded {
+            // The requested region starts in data that has been discarded.
+            // Calculate how many bytes of the request fall in discarded range.
+            let skip = self.bytes_discarded - offset;
+            if skip >= buf.len() {
+                // Entire request is in the discarded region.
+                return Ok(0);
+            }
+            // Partial overlap: read what we still have from physical index 0.
+            let available = &self.data[..];
+            let remaining_buf = &mut buf[skip..];
+            let to_copy = available.len().min(remaining_buf.len());
+            remaining_buf[..to_copy].copy_from_slice(&available[..to_copy]);
+            // Zero out the leading bytes that were in the discarded region.
+            buf[..skip].fill(0);
+            return Ok(skip + to_copy);
+        }
+        let physical = offset - self.bytes_discarded;
+        if physical >= self.data.len() {
             return Ok(0);
         }
-        let available = &self.data[offset..];
+        let available = &self.data[physical..];
         let to_copy = available.len().min(buf.len());
         buf[..to_copy].copy_from_slice(&available[..to_copy]);
         Ok(to_copy)
@@ -73,7 +143,7 @@ impl<R: Read + Send> Buffer for PipeBuffer<R> {
 
     fn refresh(&mut self) -> pgr_core::Result<usize> {
         if self.eof {
-            return Ok(self.data.len());
+            return Ok(self.bytes_discarded + self.data.len());
         }
 
         let mut chunk = vec![0u8; PIPE_READ_CHUNK];
@@ -87,9 +157,10 @@ impl<R: Read + Send> Buffer for PipeBuffer<R> {
                 let _ = writer.write_chunk(&chunk[..n]);
             }
             self.data.extend_from_slice(&chunk[..n]);
+            self.enforce_limit();
         }
 
-        Ok(self.data.len())
+        Ok(self.bytes_discarded + self.data.len())
     }
 }
 
@@ -305,5 +376,125 @@ mod tests {
         let result: bool = stdin_is_pipe();
         // Just verify it's a bool by using it
         let _ = result;
+    }
+
+    // ── 13. test_pipe_buffer_set_buffer_limit_enforces_max ──────────
+
+    #[test]
+    fn test_pipe_buffer_set_buffer_limit_enforces_max() {
+        // 10 bytes of data, limit of 1 KB (1024 bytes) — no truncation.
+        let data = b"0123456789";
+        let source = Cursor::new(data.to_vec());
+        let mut buf = PipeBuffer::new(source);
+        buf.set_buffer_limit(1); // 1 KB
+        buf.refresh().expect("refresh failed");
+
+        assert_eq!(buf.data.len(), 10);
+        assert_eq!(buf.bytes_discarded, 0);
+    }
+
+    // ── 14. test_pipe_buffer_limit_discards_oldest_data ─────────────
+
+    #[test]
+    fn test_pipe_buffer_limit_discards_oldest_data() {
+        // Use a chunked reader that delivers 5 bytes at a time.
+        // Total data: 20 bytes, limit: very small (we set bytes directly).
+        let data: Vec<u8> = (0..20).collect();
+        let source = ChunkedReader::new(data, 5);
+        let mut buf = PipeBuffer::new(source);
+        // Set a limit of 10 bytes via direct field access in test.
+        buf.max_buffer_bytes = Some(10);
+
+        // First refresh: 5 bytes, under limit.
+        buf.refresh().expect("refresh 1 failed");
+        assert_eq!(buf.data.len(), 5);
+        assert_eq!(buf.bytes_discarded, 0);
+
+        // Second refresh: 10 bytes total, at limit.
+        buf.refresh().expect("refresh 2 failed");
+        assert_eq!(buf.data.len(), 10);
+        assert_eq!(buf.bytes_discarded, 0);
+
+        // Third refresh: 15 bytes read, limit is 10 → 5 discarded.
+        buf.refresh().expect("refresh 3 failed");
+        assert_eq!(buf.data.len(), 10);
+        assert_eq!(buf.bytes_discarded, 5);
+
+        // Fourth refresh: 20 bytes read, limit is 10 → 10 discarded.
+        buf.refresh().expect("refresh 4 failed");
+        assert_eq!(buf.data.len(), 10);
+        assert_eq!(buf.bytes_discarded, 10);
+
+        // The remaining data should be bytes 10..20.
+        let mut out = vec![0u8; 10];
+        let n = buf.read_at(10, &mut out).expect("read_at failed");
+        assert_eq!(n, 10);
+        let expected: Vec<u8> = (10..20).collect();
+        assert_eq!(&out[..n], &expected);
+    }
+
+    // ── 15. test_pipe_buffer_read_at_discarded_region_returns_zero ───
+
+    #[test]
+    fn test_pipe_buffer_read_at_discarded_region_returns_zero() {
+        let data: Vec<u8> = (0..20).collect();
+        let source = Cursor::new(data);
+        let mut buf = PipeBuffer::new(source);
+        buf.max_buffer_bytes = Some(10);
+
+        // Read all data — only last 10 bytes remain.
+        buf.refresh().expect("refresh failed");
+        assert_eq!(buf.bytes_discarded, 10);
+
+        // Reading from the fully-discarded region with a small buffer
+        // should return 0 when entirely in discarded range.
+        let mut out = vec![0u8; 5];
+        let n = buf.read_at(0, &mut out).expect("read_at failed");
+        assert_eq!(n, 0);
+    }
+
+    // ── 16. test_pipe_buffer_len_includes_discarded ─────────────────
+
+    #[test]
+    fn test_pipe_buffer_len_includes_discarded() {
+        let data: Vec<u8> = (0..20).collect();
+        let source = Cursor::new(data);
+        let mut buf = PipeBuffer::new(source);
+        buf.max_buffer_bytes = Some(10);
+
+        buf.refresh().expect("refresh failed");
+        // len() reports the total logical length (discarded + retained).
+        assert_eq!(buf.len(), 20);
+        assert_eq!(buf.bytes_discarded(), 10);
+    }
+
+    // ── 17. test_pipe_buffer_disable_auto_alloc ─────────────────────
+
+    #[test]
+    fn test_pipe_buffer_disable_auto_alloc() {
+        let source = Cursor::new(Vec::<u8>::new());
+        let mut buf = PipeBuffer::new(source);
+        buf.disable_auto_alloc();
+        assert_eq!(buf.max_buffer_bytes, Some(DEFAULT_DISABLED_AUTO_ALLOC_SIZE));
+    }
+
+    // ── 18. test_pipe_buffer_set_buffer_limit_converts_kb ───────────
+
+    #[test]
+    fn test_pipe_buffer_set_buffer_limit_converts_kb() {
+        let source = Cursor::new(Vec::<u8>::new());
+        let mut buf = PipeBuffer::new(source);
+        buf.set_buffer_limit(64);
+        assert_eq!(buf.max_buffer_bytes, Some(64 * 1024));
+    }
+
+    // ── 19. test_pipe_buffer_no_limit_by_default ────────────────────
+
+    #[test]
+    fn test_pipe_buffer_no_limit_by_default() {
+        let source = Cursor::new(Vec::<u8>::new());
+        let buf = PipeBuffer::new(source);
+        assert!(buf.max_buffer_bytes.is_none());
+        assert_eq!(buf.bytes_discarded(), 0);
     }
 }

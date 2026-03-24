@@ -18,6 +18,19 @@ use pgr_keys::{
 use crate::env::EnvConfig;
 use crate::options::Options;
 
+/// Applies buffer size limits from `-b` / `-B` flags to a [`PipeBuffer`].
+///
+/// If `-b N` is set, limits the buffer to N kilobytes.
+/// If `-B` is set, disables automatic buffer allocation (small default limit).
+/// `-b` takes precedence over `-B` when both are specified.
+fn apply_buffer_limits<R: std::io::Read>(pipe: &mut PipeBuffer<R>, options: &Options) {
+    if let Some(kb) = options.buffer_size {
+        pipe.set_buffer_limit(kb);
+    } else if options.auto_buffers {
+        pipe.disable_auto_alloc();
+    }
+}
+
 /// Query terminal dimensions without entering raw mode.
 ///
 /// Uses `TIOCGWINSZ` on `/dev/tty`. Falls back to `(24, 80)`.
@@ -108,8 +121,9 @@ fn file_entry_with_preproc(
 /// Create a [`FileEntry`] backed by stdin via a [`PipeBuffer`].
 ///
 /// Used when `-` is specified as a filename in the file list.
-fn file_entry_from_stdin() -> FileEntry {
-    let pipe = PipeBuffer::new(std::io::stdin());
+fn file_entry_from_stdin(options: &Options) -> FileEntry {
+    let mut pipe = PipeBuffer::new(std::io::stdin());
+    apply_buffer_limits(&mut pipe, options);
     let buffer: Box<dyn Buffer> = Box::new(pipe);
     let buf_len = buffer.len() as u64;
     let index = LineIndex::new(buf_len);
@@ -249,6 +263,7 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
     let env_config = EnvConfig::from_env();
 
     let mut pipe = PipeBuffer::new(std::io::stdin());
+    apply_buffer_limits(&mut pipe, options);
 
     // Wire log file (`-o` / `-O`) for stdin input.
     if let Some(log_writer) = open_log_file(options)? {
@@ -318,7 +333,7 @@ fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
     let mut entries: Vec<FileEntry> = Vec::with_capacity(options.files.len());
     for path in &options.files {
         if path.to_str() == Some("-") {
-            entries.push(file_entry_from_stdin());
+            entries.push(file_entry_from_stdin(options));
         } else {
             entries.push(file_entry_with_preproc(path, preprocessor.as_ref())?);
         }
@@ -339,7 +354,8 @@ fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
     let first_path = options.files.first();
     let (buffer, index): (Box<dyn Buffer>, LineIndex) = if let Some(path) = first_path {
         if path.to_str() == Some("-") {
-            let pipe = PipeBuffer::new(std::io::stdin());
+            let mut pipe = PipeBuffer::new(std::io::stdin());
+            apply_buffer_limits(&mut pipe, options);
             let buf: Box<dyn Buffer> = Box::new(pipe);
             let len = buf.len() as u64;
             (buf, LineIndex::new(len))
@@ -366,7 +382,8 @@ fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
             loaded.into_parts()
         }
     } else {
-        let pipe = PipeBuffer::new(std::io::stdin());
+        let mut pipe = PipeBuffer::new(std::io::stdin());
+        apply_buffer_limits(&mut pipe, options);
         let buf: Box<dyn Buffer> = Box::new(pipe);
         let len = buf.len() as u64;
         (buf, LineIndex::new(len))
@@ -834,7 +851,8 @@ mod tests {
 
     #[test]
     fn test_file_entry_from_stdin_metadata() {
-        let entry = file_entry_from_stdin();
+        let opts = Options::parse_from(["pgr", "-"]);
+        let entry = file_entry_from_stdin(&opts);
         assert!(entry.path.is_none());
         assert_eq!(entry.display_name, "(standard input)");
     }
