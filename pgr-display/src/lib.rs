@@ -4,23 +4,22 @@
 pub mod ansi;
 pub mod charset;
 pub mod color;
-pub mod hyperlink;
-pub mod termcap;
 pub mod error;
+pub mod hyperlink;
 pub mod line_numbers;
 pub mod prompt;
 pub mod render;
 pub mod screen;
 pub mod squeeze;
+pub mod termcap;
 pub mod terminal_output;
 pub mod unicode;
 
 pub use ansi::{AnsiState, OverstrikeMode};
 pub use charset::{CharType, Charset};
-pub use hyperlink::{parse_osc8, strip_osc8, HyperlinkSpan};
-pub use termcap::TermcapOverrides;
 pub use color::{Color, ColorAutoDetect, ColorConfig, ColorSelector, ColorSpec};
 pub use error::{DisplayError, Result};
+pub use hyperlink::{parse_osc8, strip_osc8, HyperlinkSpan};
 pub use line_numbers::{
     format_line_number, format_line_number_colored, line_number_width, line_number_width_custom,
 };
@@ -34,6 +33,7 @@ pub use render::{
 };
 pub use screen::Screen;
 pub use squeeze::{is_blank_line, squeeze_visible_lines};
+pub use termcap::TermcapOverrides;
 pub use terminal_output::{
     clear_screen, paint_error_message, paint_screen, paint_screen_mapped,
     paint_screen_with_options, PaintOptions, ScreenLine,

@@ -90,6 +90,14 @@ pub struct PromptContext<'a> {
     pub filter_pattern: Option<&'a str>,
     /// Whether the input has been fully read (for pipe/stdin `?x` conditional).
     pub input_complete: bool,
+    /// Number of OSC 8 hyperlinks currently visible on screen (for `%g`/`%G`).
+    pub hyperlink_count: usize,
+    /// Current horizontal shift amount in columns (for `%C`).
+    pub horizontal_shift: usize,
+    /// Current tag name, if tags subsystem is active (for `%T`).
+    pub current_tag: Option<&'a str>,
+    /// Whether we are waiting for data from a slow pipe (for `%W`).
+    pub waiting_for_data: bool,
 }
 
 /// Render the prompt string for the given style and context.
@@ -233,6 +241,10 @@ fn eval_recursive(
 /// | `u` | Filter (un-filter) is active |
 /// | `x` | First file in the file list |
 /// | `B` | Total bytes known (always true) |
+/// | `g` | Hyperlinks on screen (count > 0) |
+/// | `C` | Horizontal shift is active (> 0) |
+/// | `T` | A tag is active |
+/// | `W` | Waiting for data from a slow pipe |
 fn evaluate_condition(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>) -> bool {
     let flag = chars[*pos];
     *pos += 1;
@@ -261,6 +273,10 @@ fn evaluate_condition(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>) 
         's' | 'S' => !ctx.is_pipe || ctx.pipe_size.is_some(),
         'u' => ctx.filter_active,
         'x' => ctx.file_index == 0,
+        'g' => ctx.hyperlink_count > 0,
+        'C' => ctx.horizontal_shift > 0,
+        'T' => ctx.current_tag.is_some(),
+        'W' => ctx.waiting_for_data,
         _ => false,
     }
 }
@@ -289,7 +305,7 @@ fn skip_condition_flag(chars: &[char], pos: &mut usize) {
                 *pos += 1;
             }
         }
-        _ => {} // Single-character flags: a, b, B, e, f, L, m, n, s, S, t, u, x
+        _ => {} // Single-character flags: a, b, B, C, e, f, g, L, m, n, s, S, t, T, u, W, x
     }
 }
 
@@ -492,8 +508,27 @@ fn expand_escape(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>, out: 
                 let _ = write!(out, "{}", ctx.total_bytes);
             }
         }
-        't' | 'T' | 'x' => {
-            // Stubs: tags and next-file are deferred to later phases
+        'g' => {
+            let _ = write!(out, "{}", ctx.hyperlink_count);
+        }
+        'G' => {
+            if ctx.hyperlink_count > 0 {
+                let _ = write!(out, "{}", ctx.hyperlink_count);
+            }
+        }
+        'C' => {
+            let _ = write!(out, "{}", ctx.horizontal_shift);
+        }
+        'T' => {
+            out.push_str(ctx.current_tag.unwrap_or(""));
+        }
+        'W' => {
+            if ctx.waiting_for_data {
+                out.push('W');
+            }
+        }
+        't' | 'x' => {
+            // Stubs: tab stops and next-file are deferred to later phases
         }
         _ => {
             // Unknown escape: pass through literally
@@ -625,6 +660,10 @@ mod tests {
             filter_active: false,
             filter_pattern: None,
             input_complete: true,
+            hyperlink_count: 0,
+            horizontal_shift: 0,
+            current_tag: None,
+            waiting_for_data: false,
         }
     }
 
@@ -652,6 +691,10 @@ mod tests {
             filter_active: false,
             filter_pattern: None,
             input_complete: true,
+            hyperlink_count: 0,
+            horizontal_shift: 0,
+            current_tag: None,
+            waiting_for_data: false,
         }
     }
 
@@ -686,6 +729,10 @@ mod tests {
             filter_active: false,
             filter_pattern: None,
             input_complete: true,
+            hyperlink_count: 0,
+            horizontal_shift: 0,
+            current_tag: None,
+            waiting_for_data: false,
         }
     }
 
@@ -1298,5 +1345,111 @@ mod tests {
         ctx.file_index = 1;
         ctx.file_count = 3;
         assert_eq!(eval_prompt("?xfirst.", &ctx), "");
+    }
+
+    // ===== Task 226: prompt escapes %g, %G, %C, %T, %W =====
+
+    /// Task 226 test 1: `%g` shows hyperlink count, including zero.
+    #[test]
+    fn test_eval_prompt_percent_g_shows_hyperlink_count() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%g", &ctx), "0");
+        ctx.hyperlink_count = 5;
+        assert_eq!(eval_prompt("%g", &ctx), "5");
+    }
+
+    /// Task 226 test 2: `%G` shows hyperlink count only when non-zero.
+    #[test]
+    fn test_eval_prompt_percent_upper_g_hides_zero_hyperlinks() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%G", &ctx), "");
+        ctx.hyperlink_count = 3;
+        assert_eq!(eval_prompt("%G", &ctx), "3");
+    }
+
+    /// Task 226 test 3: `%C` shows horizontal shift amount.
+    #[test]
+    fn test_eval_prompt_percent_upper_c_shows_horizontal_shift() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%C", &ctx), "0");
+        ctx.horizontal_shift = 42;
+        assert_eq!(eval_prompt("%C", &ctx), "42");
+    }
+
+    /// Task 226 test 4: `%T` shows tag name when set, empty otherwise.
+    #[test]
+    fn test_eval_prompt_percent_upper_t_shows_tag_name() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%T", &ctx), "");
+        ctx.current_tag = Some("v1.0");
+        assert_eq!(eval_prompt("%T", &ctx), "v1.0");
+    }
+
+    /// Task 226 test 5: `%W` shows "W" when waiting, empty otherwise.
+    #[test]
+    fn test_eval_prompt_percent_upper_w_shows_waiting_indicator() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%W", &ctx), "");
+        ctx.waiting_for_data = true;
+        assert_eq!(eval_prompt("%W", &ctx), "W");
+    }
+
+    /// Task 226 test 6: `?g` conditional true when hyperlinks present.
+    #[test]
+    fn test_eval_prompt_condition_g_hyperlinks_present() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?glinks.", &ctx), "");
+        ctx.hyperlink_count = 2;
+        assert_eq!(eval_prompt("?glinks.", &ctx), "links");
+    }
+
+    /// Task 226 test 7: `?C` conditional true when horizontal shift > 0.
+    #[test]
+    fn test_eval_prompt_condition_upper_c_horizontal_shift() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?Cshifted.", &ctx), "");
+        ctx.horizontal_shift = 10;
+        assert_eq!(eval_prompt("?Cshifted.", &ctx), "shifted");
+    }
+
+    /// Task 226 test 8: `?T` conditional true when tag is active.
+    #[test]
+    fn test_eval_prompt_condition_upper_t_tag_active() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?Ttagged.", &ctx), "");
+        ctx.current_tag = Some("release");
+        assert_eq!(eval_prompt("?Ttagged.", &ctx), "tagged");
+    }
+
+    /// Task 226 test 9: `?W` conditional true when waiting for data.
+    #[test]
+    fn test_eval_prompt_condition_upper_w_waiting() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?Wwaiting.", &ctx), "");
+        ctx.waiting_for_data = true;
+        assert_eq!(eval_prompt("?Wwaiting.", &ctx), "waiting");
+    }
+
+    /// Task 226 test 10: Conditionals with escapes combined.
+    #[test]
+    fn test_eval_prompt_new_escapes_combined_with_conditionals() {
+        let mut ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        ctx.hyperlink_count = 3;
+        ctx.horizontal_shift = 8;
+        ctx.current_tag = Some("main");
+        ctx.waiting_for_data = true;
+        assert_eq!(
+            eval_prompt("?g%g links.?C shift=%C.?T tag=%T.?W[%W].", &ctx),
+            "3 links shift=8 tag=main[W]"
+        );
+    }
+
+    /// Task 226 test 11: skip_condition_flag handles new flags during skip.
+    #[test]
+    fn test_eval_prompt_skip_new_conditionals_in_false_branch() {
+        let ctx = eval_ctx(Some("test.txt"), 1, 24, Some(100), 0, 5000);
+        // Outer ?a is false (search_active=false), so entire block is skipped.
+        // Inner ?g, ?C, ?T, ?W must be properly skipped.
+        assert_eq!(eval_prompt("?a?glinks.?Cshift.?Ttag.?Wwait..", &ctx), "");
     }
 }

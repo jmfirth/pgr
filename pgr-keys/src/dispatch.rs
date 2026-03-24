@@ -3018,6 +3018,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             filter_active: self.filter.is_active(),
             filter_pattern: self.filter.pattern().map(SearchPattern::pattern),
             input_complete: !self.buffer.is_growable(),
+            hyperlink_count: 0,
+            horizontal_shift: self.screen.horizontal_offset(),
+            current_tag: None,
+            waiting_for_data: false,
         }
     }
 
