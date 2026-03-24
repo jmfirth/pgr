@@ -258,8 +258,8 @@ pub struct Options {
     #[arg(long = "lesskey-content", hide = true)]
     pub lesskey_content: Option<String>,
 
-    /// Show status column (Phase 2).
-    #[arg(short = 'J', long = "status-column", hide = true)]
+    /// Show status column on the left edge, indicating search matches and marks.
+    #[arg(short = 'J', long = "status-column")]
     pub status_column: bool,
 
     /// Enable mouse support (Phase 2).

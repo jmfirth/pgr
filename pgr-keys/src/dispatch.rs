@@ -1922,12 +1922,23 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.highlight_state
                     .compute_highlights(&lines, self.last_pattern.as_ref());
 
+                let status_column_chars = if self.runtime_options.status_column {
+                    let buf_lines: Vec<Option<usize>> = (start..end)
+                        .map(|filtered_idx| fl.actual_line(filtered_idx))
+                        .collect();
+                    self.build_status_column_chars(&buf_lines)
+                } else {
+                    Vec::new()
+                };
+
                 let paint_opts = PaintOptions {
                     show_line_numbers: self.runtime_options.line_numbers,
                     total_lines: visible_total,
                     line_num_width: None,
                     suppress_tildes: self.runtime_options.tilde,
                     start_row: 0,
+                    show_status_column: self.runtime_options.status_column,
+                    status_column_chars,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -1964,6 +1975,22 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.highlight_state
             .compute_highlights(&lines, self.last_pattern.as_ref());
 
+        // Build status column data if enabled.
+        let status_column_chars = if self.runtime_options.status_column {
+            let buf_lines: Vec<Option<usize>> = (start..end)
+                .map(|line_num| {
+                    if line_num < total {
+                        Some(line_num)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            self.build_status_column_chars(&buf_lines)
+        } else {
+            Vec::new()
+        };
+
         // GNU less bottom-aligns short files only on the initial render.
         // After any keypress, less repaints top-aligned with tildes filling below.
         let visible_content = total.saturating_sub(start);
@@ -1979,6 +2006,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             line_num_width: None,
             suppress_tildes: self.runtime_options.tilde,
             start_row,
+            show_status_column: self.runtime_options.status_column,
+            status_column_chars,
         };
         paint_screen_with_options(
             &mut self.writer,
@@ -2033,6 +2062,23 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.highlight_state
             .compute_highlights(&line_contents, self.last_pattern.as_ref());
 
+        // Build status column data if enabled.
+        let status_column_chars = if self.runtime_options.status_column {
+            let buf_lines: Vec<Option<usize>> = padded
+                .iter()
+                .map(|sl| {
+                    if sl.content.is_some() {
+                        Some(sl.line_number.saturating_sub(1)) // back to 0-based
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            self.build_status_column_chars(&buf_lines)
+        } else {
+            Vec::new()
+        };
+
         let start_row = if self.initial_render && visible_total < content_rows {
             content_rows - visible_total + 1
         } else {
@@ -2044,6 +2090,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             line_num_width: None,
             suppress_tildes: self.runtime_options.tilde,
             start_row,
+            show_status_column: self.runtime_options.status_column,
+            status_column_chars,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -2057,6 +2105,46 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.initial_render = false;
         Ok(())
+    }
+
+    /// Build per-line status column characters for the visible lines.
+    ///
+    /// For each visible line at a given buffer line number, the character is:
+    /// - A mark letter if the line has a user mark set (first mark wins)
+    /// - `'*'` if the line has a search match (from highlight state)
+    /// - `' '` otherwise
+    ///
+    /// `buffer_line_numbers` maps each visible line index to its 0-based buffer
+    /// line number, or `None` for beyond-EOF lines.
+    fn build_status_column_chars(&self, buffer_line_numbers: &[Option<usize>]) -> Vec<char> {
+        let highlights = self.highlight_state.highlights();
+        let mark_list = self.marks.list();
+
+        buffer_line_numbers
+            .iter()
+            .enumerate()
+            .map(|(vis_idx, maybe_buf_line)| {
+                let Some(buf_line) = maybe_buf_line else {
+                    return ' ';
+                };
+
+                // Check if this buffer line has a mark.
+                for &(mark_char, mark) in &mark_list {
+                    if mark.line == *buf_line {
+                        return mark_char;
+                    }
+                }
+
+                // Check if this line has a search match.
+                if let Some(line_highlights) = highlights.get(vis_idx) {
+                    if !line_highlights.is_empty() {
+                        return '*';
+                    }
+                }
+
+                ' '
+            })
+            .collect()
     }
 
     /// Render and paint the status prompt on the last row.

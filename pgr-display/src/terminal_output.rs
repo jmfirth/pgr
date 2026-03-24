@@ -37,6 +37,18 @@ pub struct PaintOptions {
     /// Default 0 means start at row 1. Used to offset short files
     /// so content appears at the bottom of the screen (matching less).
     pub start_row: usize,
+    /// Whether to display a 1-character status column on the left (`-J` flag).
+    ///
+    /// When active, a single column is reserved before line numbers (if both
+    /// are active). Each line shows `*` for search matches, a mark letter for
+    /// marked lines, or a space otherwise.
+    pub show_status_column: bool,
+    /// Per-line status column characters, parallel to the lines slice.
+    ///
+    /// Each entry is the character to display in the status column for that
+    /// line index. Typically `' '` (space), `'*'` (search match), or a mark
+    /// letter (`'a'`..`'z'`). Only used when `show_status_column` is `true`.
+    pub status_column_chars: Vec<char>,
 }
 
 /// Paint the full screen content to the terminal.
@@ -83,6 +95,8 @@ pub fn paint_screen_with_options<W: Write>(
     let h_offset = screen.horizontal_offset();
     let chop_mode = screen.chop_mode();
 
+    let status_col_width = usize::from(options.show_status_column);
+
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
             line_numbers::line_number_width_custom(options.total_lines, custom)
@@ -93,7 +107,8 @@ pub fn paint_screen_with_options<W: Write>(
         0
     };
 
-    let content_cols = cols.saturating_sub(ln_width);
+    let margin_width = status_col_width + ln_width;
+    let content_cols = cols.saturating_sub(margin_width);
 
     // Move cursor to starting row (may be offset for short files).
     let first_row = if options.start_row > 0 {
@@ -113,6 +128,17 @@ pub fn paint_screen_with_options<W: Write>(
         }
 
         if let Some(Some(line_text)) = lines.get(line_idx) {
+            if options.show_status_column {
+                let ch = options
+                    .status_column_chars
+                    .get(line_idx)
+                    .copied()
+                    .unwrap_or(' ');
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                writer.write_all(s.as_bytes())?;
+            }
+
             if options.show_line_numbers {
                 let line_num = screen.top_line() + line_idx + 1;
                 let formatted = line_numbers::format_line_number(line_num, ln_width);
@@ -147,7 +173,7 @@ pub fn paint_screen_with_options<W: Write>(
                 let rows_used = if cols == 0 {
                     1
                 } else {
-                    let total_display = ln_width + width;
+                    let total_display = margin_width + width;
                     if total_display <= cols {
                         1
                     } else {
@@ -160,6 +186,9 @@ pub fn paint_screen_with_options<W: Write>(
                 screen_row += rows_used;
             }
         } else {
+            if options.show_status_column {
+                writer.write_all(b" ")?;
+            }
             if !options.suppress_tildes {
                 writer.write_all(b"~")?;
             }
@@ -183,6 +212,7 @@ pub fn paint_screen_with_options<W: Write>(
 /// # Errors
 ///
 /// Returns an I/O error if writing to `writer` fails.
+#[allow(clippy::too_many_lines)] // Status column adds branches to each rendering path
 pub fn paint_screen_mapped<W: Write>(
     writer: &mut W,
     screen: &Screen,
@@ -195,6 +225,8 @@ pub fn paint_screen_mapped<W: Write>(
     let h_offset = screen.horizontal_offset();
     let chop_mode = screen.chop_mode();
 
+    let status_col_width = usize::from(options.show_status_column);
+
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
             line_numbers::line_number_width_custom(options.total_lines, custom)
@@ -205,7 +237,8 @@ pub fn paint_screen_mapped<W: Write>(
         0
     };
 
-    let content_cols = cols.saturating_sub(ln_width);
+    let margin_width = status_col_width + ln_width;
+    let content_cols = cols.saturating_sub(margin_width);
 
     // Move cursor to starting row (may be offset for short files).
     let first_row = if options.start_row > 0 {
@@ -225,6 +258,17 @@ pub fn paint_screen_mapped<W: Write>(
 
         if let Some(sl) = screen_lines.get(line_idx) {
             if let Some(ref line_text) = sl.content {
+                if options.show_status_column {
+                    let ch = options
+                        .status_column_chars
+                        .get(line_idx)
+                        .copied()
+                        .unwrap_or(' ');
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    writer.write_all(s.as_bytes())?;
+                }
+
                 if options.show_line_numbers {
                     let formatted = line_numbers::format_line_number(sl.line_number, ln_width);
                     writer.write_all(formatted.as_bytes())?;
@@ -254,7 +298,7 @@ pub fn paint_screen_mapped<W: Write>(
                     let rows_used = if cols == 0 {
                         1
                     } else {
-                        let total_display = ln_width + width;
+                        let total_display = margin_width + width;
                         if total_display <= cols {
                             1
                         } else {
@@ -265,6 +309,9 @@ pub fn paint_screen_mapped<W: Write>(
                     screen_row += rows_used;
                 }
             } else {
+                if options.show_status_column {
+                    writer.write_all(b" ")?;
+                }
                 if !options.suppress_tildes {
                     writer.write_all(b"~")?;
                 }
@@ -272,6 +319,9 @@ pub fn paint_screen_mapped<W: Write>(
                 screen_row += 1;
             }
         } else {
+            if options.show_status_column {
+                writer.write_all(b" ")?;
+            }
             if !options.suppress_tildes {
                 writer.write_all(b"~")?;
             }
@@ -489,6 +539,7 @@ mod tests {
             line_num_width: None,
             suppress_tildes: false,
             start_row: 0,
+            ..PaintOptions::default()
         };
         let output =
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
@@ -527,6 +578,7 @@ mod tests {
             line_num_width: None,
             suppress_tildes: false,
             start_row: 0,
+            ..PaintOptions::default()
         };
         let output_ln =
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
@@ -591,6 +643,7 @@ mod tests {
             line_num_width: None,
             suppress_tildes: false,
             start_row: 0,
+            ..PaintOptions::default()
         };
         let output =
             capture_output(|w| paint_screen_mapped(w, &screen, &screen_lines, &config, &options));
@@ -870,5 +923,226 @@ mod tests {
         assert!(output_str.contains("short 1"));
         assert!(output_str.contains("short 2"));
         assert!(output_str.contains("short 3"));
+    }
+
+    // --- Status column rendering tests ---
+
+    #[test]
+    fn test_paint_screen_status_column_shows_chars() {
+        let screen = Screen::new(4, 80); // 3 content rows
+        let lines: Vec<Option<String>> = vec![
+            Some("alpha".to_string()),
+            Some("beta".to_string()),
+            Some("gamma".to_string()),
+        ];
+
+        let config = RenderConfig::default();
+        let options = PaintOptions {
+            show_status_column: true,
+            status_column_chars: vec!['*', 'a', ' '],
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // The status chars should appear before each line's content
+        assert!(
+            output_str.contains("*alpha"),
+            "expected '*' before 'alpha': {output_str}"
+        );
+        assert!(
+            output_str.contains("abeta"),
+            "expected 'a' before 'beta': {output_str}"
+        );
+        assert!(
+            output_str.contains(" gamma"),
+            "expected space before 'gamma': {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_status_column_search_match_indicator() {
+        let screen = Screen::new(3, 80); // 2 content rows
+        let lines: Vec<Option<String>> =
+            vec![Some("match line".to_string()), Some("no match".to_string())];
+
+        let config = RenderConfig::default();
+        let options = PaintOptions {
+            show_status_column: true,
+            status_column_chars: vec!['*', ' '],
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(
+            output_str.contains("*match line"),
+            "expected '*' before match line: {output_str}"
+        );
+        assert!(
+            output_str.contains(" no match"),
+            "expected space before non-match line: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_status_column_with_line_numbers() {
+        let screen = Screen::new(3, 80); // 2 content rows
+        let lines: Vec<Option<String>> = vec![Some("hello".to_string()), Some("world".to_string())];
+
+        let config = RenderConfig::default();
+        let options = PaintOptions {
+            show_status_column: true,
+            status_column_chars: vec!['*', 'b'],
+            show_line_numbers: true,
+            total_lines: 10,
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // Status column char comes before line number
+        assert!(
+            output_str.contains("*      1 hello"),
+            "expected status char before line number: {output_str}"
+        );
+        assert!(
+            output_str.contains("b      2 world"),
+            "expected mark 'b' before line number: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_status_column_reduces_content_width() {
+        // 20 columns total. Status column takes 1 -> 19 for content.
+        let mut screen = Screen::new(2, 20); // 1 content row
+        screen.set_chop_mode(true);
+        let lines: Vec<Option<String>> = vec![Some(
+            "this is a longer line that should be truncated".to_string(),
+        )];
+
+        let config = RenderConfig::default();
+
+        // Without status column: 20 cols of content
+        let output_no_status = capture_output(|w| paint_screen(w, &screen, &lines, &config));
+        let str_no_status = String::from_utf8_lossy(&output_no_status);
+
+        // With status column: 19 cols of content
+        let options = PaintOptions {
+            show_status_column: true,
+            status_column_chars: vec![' '],
+            ..PaintOptions::default()
+        };
+        let output_status =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let str_status = String::from_utf8_lossy(&output_status);
+
+        // Without status: "this is a longer li>" (19 chars + ">")
+        assert!(
+            str_no_status.contains("this is a longer li>"),
+            "expected chopped line without status: {str_no_status}"
+        );
+        // With status: " this is a longer l>" (space + 18 chars + ">")
+        assert!(
+            str_status.contains("this is a longer l>"),
+            "expected chopped line with status: {str_status}"
+        );
+        // The status version should not contain the longer substring
+        assert!(
+            !str_status.contains("this is a longer li>"),
+            "status column should reduce content width: {str_status}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_status_column_beyond_eof_shows_space() {
+        let screen = Screen::new(4, 80); // 3 content rows
+        let lines: Vec<Option<String>> = vec![Some("only line".to_string()), None, None];
+
+        let config = RenderConfig::default();
+        let options = PaintOptions {
+            show_status_column: true,
+            status_column_chars: vec!['*'],
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // First line has status char
+        assert!(
+            output_str.contains("*only line"),
+            "expected '*' before content: {output_str}"
+        );
+        // Beyond-EOF lines should have space before tilde
+        assert!(
+            output_str.contains(" ~"),
+            "expected space before tilde for beyond-EOF lines: {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_mapped_status_column_shows_chars() {
+        let screen = Screen::new(4, 80); // 3 content rows
+        let screen_lines = vec![
+            ScreenLine {
+                content: Some("first".to_string()),
+                line_number: 1,
+            },
+            ScreenLine {
+                content: Some("second".to_string()),
+                line_number: 2,
+            },
+            ScreenLine {
+                content: None,
+                line_number: 0,
+            },
+        ];
+
+        let config = RenderConfig::default();
+        let options = PaintOptions {
+            show_status_column: true,
+            status_column_chars: vec!['*', 'a', ' '],
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_mapped(w, &screen, &screen_lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+
+        assert!(
+            output_str.contains("*first"),
+            "expected '*' before 'first': {output_str}"
+        );
+        assert!(
+            output_str.contains("asecond"),
+            "expected 'a' before 'second': {output_str}"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_no_status_column_no_prefix() {
+        let screen = Screen::new(3, 80);
+        let lines: Vec<Option<String>> = vec![Some("content".to_string()), None];
+
+        let config = RenderConfig::default();
+        let options = PaintOptions {
+            show_status_column: false,
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+
+        // No status column prefix — content starts immediately after cursor positioning
+        assert!(output_str.contains("content"));
+        // Tilde should not be preceded by a space (no status column)
+        // The tilde follows a cursor-move escape, not a space
+        assert!(
+            !output_str.contains(" ~"),
+            "should not have space before tilde without status column: {output_str}"
+        );
     }
 }

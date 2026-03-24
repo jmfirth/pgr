@@ -347,6 +347,7 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         raw_control_mode: options.raw_mode(),
         tab_width: options.tab_width,
         tilde: options.tilde,
+        status_column: options.status_column,
         ..RuntimeOptions::default()
     };
     pager.set_runtime_options(rt);
