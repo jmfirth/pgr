@@ -18,6 +18,7 @@ use pgr_display::BinFmt;
 /// Holds all less-related environment variables needed for pager operation.
 /// Variables are read once at startup and stored here.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // Each bool maps to a distinct env var flag from the less man page
 pub struct EnvConfig {
     /// LESS: default command-line options.
     pub less_options: Vec<String>,
@@ -112,6 +113,41 @@ pub struct EnvConfig {
 
     /// LESSANSIENDCHARS: characters recognized as ending ANSI sequences.
     pub ansi_end_chars: Option<String>,
+
+    // --- Task 246: batch 2 environment variables ---
+    /// LESSCHARDEF: custom character type definitions.
+    /// Each character in the string defines the type of the corresponding character
+    /// (`.` = normal, `c` = control, `b` = binary).
+    pub chardef: Option<String>,
+
+    /// LESSMETACHARS: shell metacharacters that need quoting in filenames.
+    pub meta_chars: Option<String>,
+
+    /// LESSMETAESCAPE: prefix character used to escape metacharacters.
+    pub meta_escape: Option<String>,
+
+    /// LESSECHO: external program for filename expansion with metacharacter handling.
+    pub lessecho: Option<String>,
+
+    /// `LESS_DATA_DELAY`: delay (in tenths of a second) before showing
+    /// "waiting for data" message when reading from a pipe.
+    pub data_delay: Option<usize>,
+
+    /// `LESS_SIGUSR1`: when set (non-empty), enables USR1 signal handling
+    /// to reopen the current file.
+    pub sigusr1: bool,
+
+    /// `LESS_UNSUPPORT`: space-separated list of option letters to silently ignore
+    /// when encountered on the command line.
+    pub unsupport: Option<String>,
+
+    /// `LESSNOCONFIG`: when set (non-empty), disables all env-based configuration.
+    /// The `LESS` environment variable and lesskey files are ignored.
+    pub no_config: bool,
+
+    /// `POSIXLY_CORRECT`: when set (non-empty), enforces strict POSIX option ordering
+    /// (options must precede operands).
+    pub posixly_correct: bool,
 }
 
 impl EnvConfig {
@@ -119,10 +155,24 @@ impl EnvConfig {
     ///
     /// This is called once at startup. Unknown or unparseable numeric values
     /// are silently ignored (stored as `None`).
+    ///
+    /// When `LESSNOCONFIG` is set (non-empty), the `LESS` environment variable
+    /// and lesskey-related variables are not read. System variables like
+    /// `HOME`, `TERM`, `SHELL`, `COLUMNS`, `LINES`, and the XDG variables
+    /// are still read because they are not less-specific configuration.
     #[must_use]
     pub fn from_env() -> Self {
-        let less_options = read_less_env();
+        // Task 246: check LESSNOCONFIG first — it suppresses LESS env config.
+        let no_config = env_is_set("LESSNOCONFIG");
 
+        // When LESSNOCONFIG is active, skip the LESS env var.
+        let less_options = if no_config {
+            Vec::new()
+        } else {
+            read_less_env()
+        };
+
+        // LESSCHARSET is a less-specific config but describes encoding, always read it.
         let charset = env_nonempty("LESSCHARSET");
         let less_edit = env_nonempty("LESSEDIT");
         let visual = env_nonempty("VISUAL");
@@ -144,10 +194,7 @@ impl EnvConfig {
         // Task 206: batch 1 env vars
         let bin_fmt = env_nonempty("LESSBINFMT");
         let utf_bin_fmt = env_nonempty("LESSUTFBINFMT");
-        let is_more = std::env::var("LESS_IS_MORE")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_some();
+        let is_more = env_is_set("LESS_IS_MORE");
         let less_columns = env_parse_usize("LESS_COLUMNS");
         let less_lines = env_parse_usize("LESS_LINES");
         let shell_lines = env_parse_usize("LESS_SHELL_LINES");
@@ -159,11 +206,26 @@ impl EnvConfig {
         let lessclose = env_nonempty("LESSCLOSE");
 
         // LESSKEY takes precedence over LESSKEYIN when both are set.
-        let lesskey = env_nonempty("LESSKEY").or_else(|| env_nonempty("LESSKEYIN"));
+        // When LESSNOCONFIG is active, skip lesskey files.
+        let lesskey = if no_config {
+            None
+        } else {
+            env_nonempty("LESSKEY").or_else(|| env_nonempty("LESSKEYIN"))
+        };
 
         let histfile = env_nonempty("LESSHISTFILE");
         let ansi_mid_chars = env_nonempty("LESSANSIMIDCHARS");
         let ansi_end_chars = env_nonempty("LESSANSIENDCHARS");
+
+        // Task 246: batch 2 env vars
+        let chardef = env_nonempty("LESSCHARDEF");
+        let meta_chars = env_nonempty("LESSMETACHARS");
+        let meta_escape = env_nonempty("LESSMETAESCAPE");
+        let lessecho = env_nonempty("LESSECHO");
+        let data_delay = env_parse_usize("LESS_DATA_DELAY");
+        let sigusr1 = env_is_set("LESS_SIGUSR1");
+        let unsupport = env_nonempty("LESS_UNSUPPORT");
+        let posixly_correct = env_is_set("POSIXLY_CORRECT");
 
         Self {
             less_options,
@@ -195,6 +257,15 @@ impl EnvConfig {
             histsize,
             ansi_mid_chars,
             ansi_end_chars,
+            chardef,
+            meta_chars,
+            meta_escape,
+            lessecho,
+            data_delay,
+            sigusr1,
+            unsupport,
+            no_config,
+            posixly_correct,
         }
     }
 
@@ -354,6 +425,15 @@ impl EnvConfig {
                 | "keyfile"
                 | "tag"
         )
+    }
+
+    /// Returns whether a command-line option letter should be silently ignored.
+    ///
+    /// Checks the `LESS_UNSUPPORT` variable, which contains a string of option
+    /// letters that should be accepted without effect.
+    #[must_use]
+    pub fn is_unsupported_option(&self, flag: char) -> bool {
+        self.unsupport.as_ref().is_some_and(|s| s.contains(flag))
     }
 }
 
@@ -548,6 +628,11 @@ pub fn split_flags_and_commands(tokens: &[String]) -> (Vec<String>, Vec<String>,
 /// Read an environment variable, returning `None` if not set or empty.
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
+/// Check whether an environment variable is set to a non-empty value.
+fn env_is_set(key: &str) -> bool {
+    std::env::var(key).ok().filter(|v| !v.is_empty()).is_some()
 }
 
 /// Read an environment variable and parse it as `usize`.
@@ -1524,5 +1609,218 @@ mod tests {
     fn test_history_file_path_no_home_returns_none() {
         let cfg = EnvConfig::default();
         assert_eq!(cfg.history_file_path(), None);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 246: batch 2 env var tests
+    // ---------------------------------------------------------------------------
+
+    // Test 71: LESSCHARDEF stored correctly
+    #[test]
+    fn test_env_config_lesschardef_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSCHARDEF", "..bc")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.chardef.as_deref(), Some("..bc"));
+    }
+
+    // Test 72: LESSMETACHARS stored correctly
+    #[test]
+    fn test_env_config_lessmetachars_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSMETACHARS", " ;|&<>()")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.meta_chars.as_deref(), Some(" ;|&<>()"));
+    }
+
+    // Test 73: LESSMETAESCAPE stored correctly
+    #[test]
+    fn test_env_config_lessmetaescape_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSMETAESCAPE", "\\")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.meta_escape.as_deref(), Some("\\"));
+    }
+
+    // Test 74: LESSECHO stored correctly
+    #[test]
+    fn test_env_config_lessecho_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSECHO", "/usr/bin/lessecho")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.lessecho.as_deref(), Some("/usr/bin/lessecho"));
+    }
+
+    // Test 75: LESS_DATA_DELAY parsed as usize
+    #[test]
+    fn test_env_config_less_data_delay_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_DATA_DELAY", "20")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.data_delay, Some(20));
+    }
+
+    // Test 76: LESS_DATA_DELAY non-numeric silently ignored
+    #[test]
+    fn test_env_config_less_data_delay_invalid_ignored() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_DATA_DELAY", "abc")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.data_delay.is_none());
+    }
+
+    // Test 77: LESS_SIGUSR1 set -> sigusr1 = true
+    #[test]
+    fn test_env_config_less_sigusr1_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_SIGUSR1", "1")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.sigusr1);
+    }
+
+    // Test 78: LESS_SIGUSR1 not set -> sigusr1 = false
+    #[test]
+    fn test_env_config_less_sigusr1_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&["LESS_SIGUSR1"]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(!cfg.sigusr1);
+    }
+
+    // Test 79: LESS_UNSUPPORT stored correctly
+    #[test]
+    fn test_env_config_less_unsupport_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_UNSUPPORT", "xXkK")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.unsupport.as_deref(), Some("xXkK"));
+    }
+
+    // Test 80: is_unsupported_option returns true for listed flags
+    #[test]
+    fn test_env_config_is_unsupported_option_match() {
+        let cfg = EnvConfig {
+            unsupport: Some("xXkK".to_string()),
+            ..EnvConfig::default()
+        };
+        assert!(cfg.is_unsupported_option('x'));
+        assert!(cfg.is_unsupported_option('X'));
+        assert!(cfg.is_unsupported_option('k'));
+        assert!(cfg.is_unsupported_option('K'));
+    }
+
+    // Test 81: is_unsupported_option returns false for unlisted flags
+    #[test]
+    fn test_env_config_is_unsupported_option_no_match() {
+        let cfg = EnvConfig {
+            unsupport: Some("xXkK".to_string()),
+            ..EnvConfig::default()
+        };
+        assert!(!cfg.is_unsupported_option('R'));
+        assert!(!cfg.is_unsupported_option('S'));
+    }
+
+    // Test 82: is_unsupported_option returns false when unsupport is None
+    #[test]
+    fn test_env_config_is_unsupported_option_none() {
+        let cfg = EnvConfig::default();
+        assert!(!cfg.is_unsupported_option('x'));
+    }
+
+    // Test 83: LESSNOCONFIG set -> no_config = true
+    #[test]
+    fn test_env_config_lessnoconfig_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSNOCONFIG", "1")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.no_config);
+    }
+
+    // Test 84: LESSNOCONFIG not set -> no_config = false
+    #[test]
+    fn test_env_config_lessnoconfig_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&["LESSNOCONFIG"]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(!cfg.no_config);
+    }
+
+    // Test 85: LESSNOCONFIG suppresses LESS env var
+    #[test]
+    fn test_env_config_lessnoconfig_suppresses_less_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSNOCONFIG", "1"), ("LESS", "-R -S")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.less_options.is_empty());
+    }
+
+    // Test 86: LESSNOCONFIG suppresses LESSKEY
+    #[test]
+    fn test_env_config_lessnoconfig_suppresses_lesskey() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSNOCONFIG", "1"), ("LESSKEY", "/home/user/.lesskey")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.lesskey.is_none());
+    }
+
+    // Test 87: POSIXLY_CORRECT set -> posixly_correct = true
+    #[test]
+    fn test_env_config_posixly_correct_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("POSIXLY_CORRECT", "1")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.posixly_correct);
+    }
+
+    // Test 88: POSIXLY_CORRECT not set -> posixly_correct = false
+    #[test]
+    fn test_env_config_posixly_correct_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&["POSIXLY_CORRECT"]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(!cfg.posixly_correct);
+    }
+
+    // Test 89: all batch 2 vars default to None/false when unset
+    #[test]
+    fn test_env_config_batch2_missing_vars_use_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&[
+            "LESSCHARDEF",
+            "LESSMETACHARS",
+            "LESSMETAESCAPE",
+            "LESSECHO",
+            "LESS_DATA_DELAY",
+            "LESS_SIGUSR1",
+            "LESS_UNSUPPORT",
+            "LESSNOCONFIG",
+            "POSIXLY_CORRECT",
+        ]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.chardef.is_none());
+        assert!(cfg.meta_chars.is_none());
+        assert!(cfg.meta_escape.is_none());
+        assert!(cfg.lessecho.is_none());
+        assert!(cfg.data_delay.is_none());
+        assert!(!cfg.sigusr1);
+        assert!(cfg.unsupport.is_none());
+        assert!(!cfg.no_config);
+        assert!(!cfg.posixly_correct);
     }
 }
