@@ -413,6 +413,17 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     if !options.every_file_commands.is_empty() {
         pager.set_every_file_commands(options.every_file_commands.clone());
     }
+
+    // Wire terminal behavior flags.
+    if options.no_keypad {
+        pager.set_no_keypad(true);
+    }
+    if options.no_vbell {
+        pager.set_no_vbell(true);
+    }
+    if options.redraw_on_quit {
+        pager.set_redraw_on_quit(true);
+    }
 }
 
 /// Discover and load a lesskey source file.
