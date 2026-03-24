@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
-    parse_lesskey_file, FileEntry, FileList, KeyReader, LesskeyConfig, Pager, RawTerminal,
-    RuntimeOptions,
+    find_tag, parse_lesskey_file, resolve_pattern, FileEntry, FileList, KeyReader, LesskeyConfig,
+    Pager, RawTerminal, RuntimeOptions, TagState,
 };
 
 use crate::env::EnvConfig;
@@ -470,6 +470,63 @@ fn apply_lesskey<R: std::io::Read, W: std::io::Write>(
     }
 }
 
+fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<()> {
+    let tags_file_path = options.tag_file.as_deref().unwrap_or("tags");
+    let tags_path = std::path::Path::new(tags_file_path);
+
+    let entries = find_tag(tag, tags_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if entries.is_empty() {
+        anyhow::bail!("tag not found: {tag}");
+    }
+
+    let first = &entries[0];
+    let file_path = &first.file;
+    let tag_state = TagState::new(entries.clone());
+
+    // Resolve the pattern to a line number if possible.
+    let target_line = std::fs::read_to_string(file_path)
+        .ok()
+        .and_then(|content| resolve_pattern(&first.pattern, &content));
+
+    let loaded = LoadedFile::open(file_path)?;
+    let display_name = file_path.display().to_string();
+    let (buffer, index) = loaded.into_parts();
+
+    let env_config = EnvConfig::from_env();
+
+    let tty_raw = std::fs::File::open("/dev/tty")?;
+    let raw_terminal = RawTerminal::enter(tty_raw.as_raw_fd())?;
+    let (detected_rows, detected_cols) = raw_terminal.dimensions()?;
+    let (rows, cols) = env_config.effective_dimensions(detected_rows, detected_cols);
+
+    let tty_keys = std::fs::File::open("/dev/tty")?;
+    let tty_keys_fd = tty_keys.as_raw_fd();
+    let reader = KeyReader::new(tty_keys);
+    let writer = std::io::stdout();
+
+    let mut pager = Pager::new(reader, writer, buffer, index, Some(display_name));
+    pager.set_key_fd(tty_keys_fd);
+    configure_pager(&mut pager, options, rows, cols);
+    pager.set_tag_state(tag_state);
+
+    if env_config.secure_mode {
+        pager.set_secure_mode(true);
+    }
+
+    // Position at the tag's location via an initial command.
+    if let Some(line) = target_line {
+        // +Ng jumps to 1-based line N.
+        pager.set_initial_commands(vec![format!("{}g", line + 1)]);
+    }
+
+    pager.run()?;
+    drop(pager);
+    drop(raw_terminal);
+    drop(tty_raw);
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let options = Options::parse();
 
@@ -481,6 +538,10 @@ fn main() -> anyhow::Result<()> {
     if options.help {
         <Options as clap::Parser>::parse_from(["pgr", "--help"]);
         return Ok(());
+    }
+
+    if let Some(ref tag) = options.tag {
+        return run_tag_mode(&options, tag);
     }
 
     if is_stdin_mode(&options) {

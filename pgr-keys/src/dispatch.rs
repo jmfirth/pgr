@@ -35,6 +35,7 @@ use crate::lesskey::LesskeyConfig;
 use crate::line_editor::{LineEditResult, LineEditor};
 use crate::runtime_options::RuntimeOptions;
 use crate::shell;
+use crate::tags::TagState;
 use crate::Command;
 
 /// A read-only buffer backed by a static byte slice, used for the help screen.
@@ -184,6 +185,8 @@ pub struct Pager<R: Read, W: Write> {
     initial_commands_executed: bool,
     /// Whether the current search (prompt or repeat) should cross file boundaries.
     cross_file_search: bool,
+    /// Tag navigation state for `t`/`T` commands (populated by `-t` flag).
+    tag_state: Option<TagState>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -246,6 +249,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             every_file_commands: Vec::new(),
             initial_commands_executed: false,
             cross_file_search: false,
+            tag_state: None,
         }
     }
 
@@ -801,6 +805,12 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::SearchBackwardCrossFile => {
                 self.cross_file_search = true;
                 self.enter_search_mode(SearchDirection::Backward, count)?;
+            }
+            Command::NextTag => {
+                self.navigate_tag_next()?;
+            }
+            Command::PrevTag => {
+                self.navigate_tag_prev()?;
             }
         }
 
@@ -2918,6 +2928,47 @@ impl<R: Read, W: Write> Pager<R, W> {
         for cmd in &cmds {
             self.execute_command_string(cmd)?;
         }
+        Ok(())
+    }
+
+    /// Set the tag navigation state (populated from `-t` CLI flag).
+    pub fn set_tag_state(&mut self, state: TagState) {
+        self.tag_state = Some(state);
+    }
+
+    /// Navigate to the next tag match (`t` command).
+    fn navigate_tag_next(&mut self) -> Result<()> {
+        let msg = if let Some(ref mut state) = self.tag_state {
+            if state.advance().is_some() {
+                let idx = state.current_index();
+                let total = state.count();
+                Some(format!("tag {} of {total}", idx + 1))
+            } else {
+                Some(String::from("No next tag"))
+            }
+        } else {
+            Some(String::from("No tags"))
+        };
+        self.status_message = msg;
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Navigate to the previous tag match (`T` command).
+    fn navigate_tag_prev(&mut self) -> Result<()> {
+        let msg = if let Some(ref mut state) = self.tag_state {
+            if state.go_back().is_some() {
+                let idx = state.current_index();
+                let total = state.count();
+                Some(format!("tag {} of {total}", idx + 1))
+            } else {
+                Some(String::from("No previous tag"))
+            }
+        } else {
+            Some(String::from("No tags"))
+        };
+        self.status_message = msg;
+        self.repaint()?;
         Ok(())
     }
 }

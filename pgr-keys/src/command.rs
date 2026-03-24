@@ -117,6 +117,10 @@ pub enum Command {
     SearchForwardCrossFile,
     /// Enter backward search mode with cross-file behavior. ESC-?.
     SearchBackwardCrossFile,
+    /// Go to the next tag match in the tag list. `t`.
+    NextTag,
+    /// Go to the previous tag match in the tag list. `T`.
+    PrevTag,
 }
 
 #[cfg(test)]
@@ -180,5 +184,20 @@ mod tests {
             Command::FindCloseBracket('{', '}'),
             Command::FindOpenBracket('{', '}')
         );
+    }
+
+    #[test]
+    fn test_command_next_tag_equality() {
+        assert_eq!(Command::NextTag, Command::NextTag);
+    }
+
+    #[test]
+    fn test_command_prev_tag_equality() {
+        assert_eq!(Command::PrevTag, Command::PrevTag);
+    }
+
+    #[test]
+    fn test_command_next_tag_differs_from_prev_tag() {
+        assert_ne!(Command::NextTag, Command::PrevTag);
     }
 }

@@ -237,13 +237,13 @@ pub struct Options {
     #[arg(short = 'O', long = "LOG-FILE")]
     pub log_file_overwrite: Option<String>,
 
-    // ── Phase 2 flags (accepted, not yet wired) ──────────────────────
-    /// Start at tag (Phase 2).
-    #[arg(short = 't', long = "tag", hide = true)]
+    // ── Tag flags ─────────────────────────────────────────────────────
+    /// Open the file containing the specified tag.
+    #[arg(short = 't', long = "tag")]
     pub tag: Option<String>,
 
-    /// Tag file path (Phase 2).
-    #[arg(short = 'T', long = "tag-file", hide = true)]
+    /// Use the specified tags file (default: "tags").
+    #[arg(short = 'T', long = "tag-file")]
     pub tag_file: Option<String>,
 
     /// Lesskey binary file (not supported; use --lesskey-src for source format).
@@ -944,5 +944,26 @@ mod tests {
     fn test_options_bare_plus_plus_ignored() {
         let opts = Options::parse_from(["pgr", "++", "file.txt"]);
         assert!(opts.every_file_commands.is_empty());
+    }
+
+    // ── Task 215: Tag flags ─────────────────────────────────────────
+
+    #[test]
+    fn test_options_dash_t_sets_tag() {
+        let opts = Options::parse_from(["pgr", "-t", "main"]);
+        assert_eq!(opts.tag.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_options_dash_upper_t_sets_tag_file() {
+        let opts = Options::parse_from(["pgr", "-T", "TAGS", "file.txt"]);
+        assert_eq!(opts.tag_file.as_deref(), Some("TAGS"));
+    }
+
+    #[test]
+    fn test_options_tag_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.tag.is_none());
+        assert!(opts.tag_file.is_none());
     }
 }

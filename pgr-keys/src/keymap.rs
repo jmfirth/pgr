@@ -132,6 +132,9 @@ impl Keymap {
             // Cross-file search with new pattern (ESC-/, ESC-?)
             (Key::EscSeq('/'), Command::SearchForwardCrossFile),
             (Key::EscSeq('?'), Command::SearchBackwardCrossFile),
+            // Tag navigation
+            (Key::Char('t'), Command::NextTag),
+            (Key::Char('T'), Command::PrevTag),
         ];
 
         Self { bindings }
@@ -593,5 +596,19 @@ mod tests {
             keymap.lookup(&Key::Char(']')),
             Command::FindOpenBracket('[', ']')
         );
+    }
+
+    // ── Task 215: Tag navigation key bindings ──
+
+    #[test]
+    fn test_keymap_t_maps_to_next_tag() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('t')), Command::NextTag);
+    }
+
+    #[test]
+    fn test_keymap_upper_t_maps_to_prev_tag() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('T')), Command::PrevTag);
     }
 }
