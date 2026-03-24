@@ -2466,9 +2466,28 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.file_list.as_ref()
     }
 
+    /// Fetch the pinned header line contents (lines `0..header_lines`).
+    fn fetch_header_lines(&mut self) -> Result<Vec<Option<String>>> {
+        let header_count = self.screen.header_lines();
+        let mut headers = Vec::with_capacity(header_count);
+        let total = self.index.lines_indexed();
+        for i in 0..header_count {
+            if i < total {
+                let content = self.index.get_line(i, &*self.buffer)?;
+                headers.push(content);
+            } else {
+                headers.push(None);
+            }
+        }
+        Ok(headers)
+    }
+
     /// Fetch visible lines from the buffer/index and repaint the screen.
+    #[allow(clippy::too_many_lines)] // Rendering paths for filter, squeeze, and normal modes with header support
     fn repaint(&mut self) -> Result<()> {
         self.index.index_all(&*self.buffer)?;
+
+        let header_line_contents = self.fetch_header_lines()?;
 
         // When a filter is active, use the filtered line mapping.
         if self.filter.is_active() {
@@ -2506,6 +2525,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     start_row: 0,
                     show_status_column: self.runtime_options.status_column,
                     status_column_chars,
+                    header_line_contents,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -2525,7 +2545,7 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         // Squeeze mode: collapse consecutive blank lines.
         if self.runtime_options.squeeze_blank_lines {
-            return self.repaint_squeezed(start, content_rows, total);
+            return self.repaint_squeezed(start, content_rows, total, header_line_contents);
         }
 
         let mut lines: Vec<Option<String>> = Vec::with_capacity(content_rows);
@@ -2575,6 +2595,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             start_row,
             show_status_column: self.runtime_options.status_column,
             status_column_chars,
+            header_line_contents,
         };
         paint_screen_with_options(
             &mut self.writer,
@@ -2596,7 +2617,13 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Uses [`squeeze_visible_lines`] to determine which buffer lines to
     /// display, then renders via [`paint_screen_mapped`] so line numbers
     /// stay correct even when consecutive blanks are collapsed.
-    fn repaint_squeezed(&mut self, start: usize, content_rows: usize, total: usize) -> Result<()> {
+    fn repaint_squeezed(
+        &mut self,
+        start: usize,
+        content_rows: usize,
+        total: usize,
+        header_line_contents: Vec<Option<String>>,
+    ) -> Result<()> {
         let mapped = squeeze_visible_lines(start, content_rows, total, |i| {
             self.index.get_line(i, &*self.buffer).ok().flatten()
         });
@@ -2659,6 +2686,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             start_row,
             show_status_column: self.runtime_options.status_column,
             status_column_chars,
+            header_line_contents,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -2846,6 +2874,14 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Set the terminal dimensions, delegating to the internal screen state.
     pub fn set_dimensions(&mut self, rows: usize, cols: usize) {
         self.screen.resize(rows, cols);
+    }
+
+    /// Set the number of pinned header lines (`--header=N`).
+    ///
+    /// Header lines from the beginning of the file are always visible at
+    /// the top of the screen and reduce the scrollable content area.
+    pub fn set_header_lines(&mut self, n: usize) {
+        self.screen.set_header_lines(n);
     }
 
     /// Set the prompt style used for the status line.
@@ -5705,5 +5741,77 @@ mod tests {
     fn test_keymap_z_upper_starts_pending_command() {
         let result = Pager::<Cursor<Vec<u8>>, Vec<u8>>::check_pending_start(&Key::Char('Z'));
         assert_eq!(result, Some(PendingCommand::ZPrefix));
+    }
+
+    // ── Header lines dispatch tests ──────────────────────────────────
+
+    /// Create a pager with header lines set, run it, and return it.
+    fn run_pager_with_headers(
+        keys: &[u8],
+        content: &[u8],
+        header_lines: usize,
+    ) -> Pager<Cursor<Vec<u8>>, Vec<u8>> {
+        let reader = KeyReader::new(Cursor::new(keys.to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("test.txt".into()));
+        pager.set_header_lines(header_lines);
+        let _ = pager.run();
+        pager
+    }
+
+    #[test]
+    fn test_dispatch_header_lines_pins_first_n_lines() {
+        let content = make_test_content(50);
+        let pager = run_pager_with_headers(b"q", &content, 3);
+        // With 3 header lines, top_line starts at 3 (first scrollable line)
+        assert_eq!(pager.screen().top_line(), 3);
+        assert_eq!(pager.screen().header_lines(), 3);
+    }
+
+    #[test]
+    fn test_dispatch_header_lines_scroll_does_not_move_headers() {
+        let content = make_test_content(50);
+        // Scroll forward 5 lines with 3 header lines
+        let pager = run_pager_with_headers(b"jjjjjq", &content, 3);
+        // top_line should be 3 + 5 = 8
+        assert_eq!(pager.screen().top_line(), 8);
+        // Header lines value unchanged
+        assert_eq!(pager.screen().header_lines(), 3);
+    }
+
+    #[test]
+    fn test_dispatch_header_lines_content_area_reduced() {
+        let content = make_test_content(50);
+        let pager = run_pager_with_headers(b"q", &content, 3);
+        // Default screen is 24x80: 23 content rows - 3 header = 20 scrollable
+        assert_eq!(pager.screen().content_rows(), 20);
+    }
+
+    #[test]
+    fn test_dispatch_header_lines_scroll_backward_clamps_at_headers() {
+        let content = make_test_content(50);
+        // Scroll forward 2 then backward 10 should clamp at header_lines (3)
+        let pager = run_pager_with_headers(b"jjkkkkkkkkkkq", &content, 3);
+        assert_eq!(pager.screen().top_line(), 3);
+    }
+
+    #[test]
+    fn test_dispatch_header_lines_renders_header_content() {
+        let content = b"HEADER1\nHEADER2\nHEADER3\nline 3\nline 4\nline 5\nline 6\nline 7\n";
+        let pager = run_pager_with_headers(b"q", content, 3);
+        let output = String::from_utf8_lossy(&pager.writer);
+        // Header lines should be rendered with reverse video
+        assert!(
+            output.contains("\x1b[7m"),
+            "expected reverse video in output"
+        );
+        // Header content should appear
+        assert!(output.contains("HEADER1"), "expected HEADER1 in output");
+        assert!(output.contains("HEADER2"), "expected HEADER2 in output");
+        assert!(output.contains("HEADER3"), "expected HEADER3 in output");
     }
 }

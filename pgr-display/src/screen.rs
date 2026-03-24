@@ -7,6 +7,8 @@
 ///
 /// The screen reserves the last row for the prompt/status line, so
 /// `content_rows` is always `rows - 1` (or 0 if `rows` is 0).
+/// When header lines are configured, they are subtracted from the
+/// scrollable content area.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
     top_line: usize,
@@ -15,6 +17,7 @@ pub struct Screen {
     content_rows: usize,
     horizontal_offset: usize,
     chop_mode: bool,
+    header_lines: usize,
 }
 
 impl Screen {
@@ -30,11 +33,14 @@ impl Screen {
             content_rows: rows.saturating_sub(1),
             horizontal_offset: 0,
             chop_mode: false,
+            header_lines: 0,
         }
     }
 
-    /// Return the range of visible lines as `(top_line, top_line + content_rows)`.
+    /// Return the range of scrollable visible lines as `(top_line, top_line + content_rows)`.
     ///
+    /// When header lines are active, this range covers only the scrollable
+    /// content area (the header lines are rendered separately).
     /// The end of the range is exclusive and may exceed the document length.
     #[must_use]
     pub fn visible_range(&self) -> (usize, usize) {
@@ -44,60 +50,64 @@ impl Screen {
     /// Scroll forward (down) by `n` lines, clamping so the last line of
     /// the file is still visible on screen.
     ///
-    /// For files shorter than `content_rows`, `top_line` stays at 0.
+    /// For files shorter than `content_rows`, `top_line` stays at the
+    /// minimum scrollable position (`header_lines` when headers are active).
     /// For longer files, `top_line` never exceeds `total_lines - content_rows`.
     ///
     /// Returns the new `top_line` value.
     pub fn scroll_forward(&mut self, n: usize, total_lines: usize) -> usize {
         let max_top = total_lines.saturating_sub(self.content_rows);
-        self.top_line = (self.top_line + n).min(max_top);
+        self.top_line = (self.top_line + n).min(max_top).max(self.header_lines);
         self.top_line
     }
 
     /// Scroll forward (down) by `n` lines without clamping at `total_lines`.
     ///
-    /// Allows scrolling beyond the end of the file. Returns the new `top_line`.
+    /// Allows scrolling beyond the end of the file. Still respects
+    /// `header_lines` as the minimum. Returns the new `top_line`.
     pub fn scroll_forward_unclamped(&mut self, n: usize) -> usize {
-        self.top_line = self.top_line.saturating_add(n);
+        self.top_line = self.top_line.saturating_add(n).max(self.header_lines);
         self.top_line
     }
 
-    /// Scroll backward (up) by `n` lines, clamping at line 0.
+    /// Scroll backward (up) by `n` lines, clamping at the first scrollable
+    /// line (which is `header_lines` when headers are active, or 0 otherwise).
     ///
     /// Returns the new `top_line` value.
     pub fn scroll_backward(&mut self, n: usize) -> usize {
-        self.top_line = self.top_line.saturating_sub(n);
+        self.top_line = self.top_line.saturating_sub(n).max(self.header_lines);
         self.top_line
     }
 
     /// Jump directly to a line number, clamped so the last line of
     /// the file is still visible on screen.
     ///
-    /// For files shorter than `content_rows`, `top_line` stays at 0.
+    /// When header lines are active, the minimum `top_line` is
+    /// `header_lines` (since lines `0..header_lines` are pinned).
     /// For longer files, `top_line` never exceeds `total_lines - content_rows`.
     ///
     /// Returns the new `top_line` value.
     pub fn goto_line(&mut self, line: usize, total_lines: usize) -> usize {
         let max_top = total_lines.saturating_sub(self.content_rows);
-        self.top_line = line.min(max_top);
+        self.top_line = line.min(max_top).max(self.header_lines);
         self.top_line
     }
 
-    /// Set `top_line` directly without clamping.
+    /// Set `top_line` directly without upper clamping.
     ///
     /// Used by search to place the found match at the top of the viewport,
     /// even when the match is near the end of the file (GNU less shows
     /// tilde lines below EOF rather than preventing the match from being
-    /// at the top).
+    /// at the top). Still respects `header_lines` as the minimum.
     pub fn set_top_line(&mut self, line: usize) {
-        self.top_line = line;
+        self.top_line = line.max(self.header_lines);
     }
 
     /// Update the terminal dimensions (e.g., after a `SIGWINCH` resize).
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.rows = rows;
         self.cols = cols;
-        self.content_rows = rows.saturating_sub(1);
+        self.content_rows = rows.saturating_sub(1).saturating_sub(self.header_lines);
     }
 
     /// Return the terminal dimensions as `(rows, cols)`.
@@ -144,6 +154,26 @@ impl Screen {
     /// Set chop mode on or off.
     pub fn set_chop_mode(&mut self, chop: bool) {
         self.chop_mode = chop;
+    }
+
+    /// Return the number of pinned header lines.
+    #[must_use]
+    pub fn header_lines(&self) -> usize {
+        self.header_lines
+    }
+
+    /// Set the number of pinned header lines.
+    ///
+    /// Header lines are always rendered at the top of the screen from the
+    /// beginning of the file, reducing the scrollable content area.
+    /// Recalculates `content_rows` and clamps `top_line` so it never
+    /// falls below the first scrollable line.
+    pub fn set_header_lines(&mut self, n: usize) {
+        self.header_lines = n;
+        self.content_rows = self.rows.saturating_sub(1).saturating_sub(n);
+        if self.top_line < n {
+            self.top_line = n;
+        }
     }
 }
 
@@ -325,5 +355,94 @@ mod tests {
         let mut screen = Screen::new(24, 80);
         let top = screen.scroll_forward(100, 1);
         assert_eq!(top, 0);
+    }
+
+    // ── Header lines tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_screen_header_lines_default_is_zero() {
+        let screen = Screen::new(25, 80);
+        assert_eq!(screen.header_lines(), 0);
+    }
+
+    #[test]
+    fn test_screen_set_header_lines_reduces_content_rows() {
+        // 25 rows - 1 prompt - 3 header = 21 content rows
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        assert_eq!(screen.header_lines(), 3);
+        assert_eq!(screen.content_rows(), 21);
+    }
+
+    #[test]
+    fn test_screen_set_header_lines_clamps_top_line() {
+        // top_line starts at 0, setting header_lines=3 forces top_line to 3
+        let mut screen = Screen::new(25, 80);
+        assert_eq!(screen.top_line(), 0);
+        screen.set_header_lines(3);
+        assert_eq!(screen.top_line(), 3);
+    }
+
+    #[test]
+    fn test_screen_scroll_backward_clamps_at_header_lines() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        screen.scroll_forward(10, 1000);
+        // Scroll backward by a large amount should clamp at header_lines (3)
+        let top = screen.scroll_backward(100);
+        assert_eq!(top, 3);
+    }
+
+    #[test]
+    fn test_screen_goto_line_clamps_at_header_lines() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        // goto_line(0) should clamp to header_lines (3)
+        let top = screen.goto_line(0, 1000);
+        assert_eq!(top, 3);
+    }
+
+    #[test]
+    fn test_screen_scroll_forward_with_headers_respects_min() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        // Short file: top stays at header_lines minimum
+        let top = screen.scroll_forward(1, 5);
+        assert_eq!(top, 3);
+    }
+
+    #[test]
+    fn test_screen_visible_range_with_headers() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        // top_line = 3, content_rows = 21
+        assert_eq!(screen.visible_range(), (3, 24));
+    }
+
+    #[test]
+    fn test_screen_resize_preserves_header_lines() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        screen.resize(40, 120);
+        // 40 rows - 1 prompt - 3 header = 36 content rows
+        assert_eq!(screen.content_rows(), 36);
+        assert_eq!(screen.header_lines(), 3);
+    }
+
+    #[test]
+    fn test_screen_set_top_line_clamps_at_header_lines() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        screen.set_top_line(1);
+        assert_eq!(screen.top_line(), 3);
+    }
+
+    #[test]
+    fn test_screen_scroll_forward_unclamped_with_headers() {
+        let mut screen = Screen::new(25, 80);
+        screen.set_header_lines(3);
+        // Start at header_lines=3, scroll unclamped by 200
+        let top = screen.scroll_forward_unclamped(200);
+        assert_eq!(top, 203);
     }
 }
