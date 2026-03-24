@@ -11,6 +11,7 @@ pub mod info;
 pub mod key;
 pub mod key_reader;
 pub mod keymap;
+pub mod lesskey;
 pub mod line_editor;
 pub mod runtime_options;
 pub mod shell;
@@ -26,6 +27,9 @@ pub use info::format_file_info;
 pub use key::Key;
 pub use key_reader::KeyReader;
 pub use keymap::Keymap;
+pub use lesskey::{
+    action_name_count, parse_lesskey_file, parse_lesskey_source, LesskeyBinding, LesskeyConfig,
+};
 pub use line_editor::{LineEditResult, LineEditor};
 pub use runtime_options::{HiliteMode, OptionError, RuntimeOptions};
 pub use terminal::RawTerminal;
