@@ -207,10 +207,15 @@ pub fn paint_screen_mapped<W: Write>(
 
     let content_cols = cols.saturating_sub(ln_width);
 
-    // Move cursor to top-left
-    move_cursor(writer, 1, 1)?;
+    // Move cursor to starting row (may be offset for short files).
+    let first_row = if options.start_row > 0 {
+        options.start_row
+    } else {
+        1
+    };
+    move_cursor(writer, first_row, 1)?;
 
-    let mut screen_row: usize = 1;
+    let mut screen_row: usize = first_row;
     let mut line_idx: usize = 0;
 
     while screen_row <= content_rows {

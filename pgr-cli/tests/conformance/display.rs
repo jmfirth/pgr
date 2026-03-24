@@ -233,7 +233,7 @@ fn test_conformance_display_line_numbers_with_chop() {
 ///
 /// With `-s`, sequences of blank lines are collapsed to a single blank line.
 #[test]
-#[ignore = "pgr -s squeeze blank lines off-by-one vs less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_squeeze_multiple_blanks() {
     skip_if_no_less!();
     let path = fixture_path("blank_groups.txt");
@@ -245,7 +245,7 @@ fn test_conformance_display_squeeze_multiple_blanks() {
 ///
 /// A single blank line between content should not be removed by squeeze.
 #[test]
-#[ignore]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_squeeze_preserves_single_blanks() {
     skip_if_no_less!();
     // Create a file with only single blank lines between content.
@@ -259,7 +259,7 @@ fn test_conformance_display_squeeze_preserves_single_blanks() {
 ///
 /// Leading blank lines at the start of the file should be squeezed.
 #[test]
-#[ignore = "pgr -s squeeze blank lines off-by-one vs less"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_squeeze_at_file_start() {
     skip_if_no_less!();
     let content = "\n\n\n\nFirst content line\nSecond content line\n";
