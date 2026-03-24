@@ -3,7 +3,7 @@
 //! These options can be toggled interactively while the pager is running,
 //! mirroring the behavior of GNU less's `-` command prefix.
 
-use pgr_display::RawControlMode;
+use pgr_display::{RawControlMode, TabStops};
 
 /// Search highlighting mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,8 +78,8 @@ pub struct RuntimeOptions {
     pub incsearch: bool,
 
     // Value flags (prompted for a value)
-    /// Tab stop width (`-x`).
-    pub tab_width: usize,
+    /// Tab stop configuration (`-x`).
+    pub tab_stops: TabStops,
     /// Target line for search results (`-j`).
     pub jump_target: usize,
     /// Horizontal scroll amount (`-#`).
@@ -123,7 +123,7 @@ impl Default for RuntimeOptions {
             status_column: false,
             wordwrap: false,
             incsearch: false,
-            tab_width: 8,
+            tab_stops: TabStops::regular(8),
             jump_target: 1,
             shift_amount: 0,
             window_size: None,
@@ -456,9 +456,11 @@ impl RuntimeOptions {
     pub fn set_value(&mut self, flag: char, value: &str) -> Result<String, OptionError> {
         match flag {
             'x' => {
-                let n = parse_usize(flag, value)?;
-                self.tab_width = n;
-                Ok(format!("Tab stops at {n}"))
+                let stops =
+                    TabStops::parse(value).map_err(|e| OptionError::InvalidValue('x', e))?;
+                let desc = format!("Tab stops at {value}");
+                self.tab_stops = stops;
+                Ok(desc)
             }
             'j' => {
                 let n = parse_usize(flag, value)?;
@@ -555,7 +557,7 @@ impl RuntimeOptions {
                 self.hilite_unread_all,
             )),
             'J' => Ok(bool_description("Status column", self.status_column)),
-            'x' => Ok(format!("Tab stops at {}", self.tab_width)),
+            'x' => Ok(format!("Tab stops at {}", self.tab_stops)),
             'j' => Ok(format!("Jump target at {}", self.jump_target)),
             '#' => Ok(format!("Horizontal shift is {}", self.shift_amount)),
             'z' => match self.window_size {
@@ -745,14 +747,24 @@ mod tests {
         assert!(matches!(err, OptionError::UnknownOption('Z')));
     }
 
-    // ── Test 10: set_value('x', "4") sets tab width to 4 ──
+    // ── Test 10: set_value('x', "4") sets tab stops to regular(4) ──
 
     #[test]
-    fn test_set_value_x_sets_tab_width() {
+    fn test_set_value_x_sets_tab_stops() {
         let mut opts = RuntimeOptions::default();
         let msg = opts.set_value('x', "4").unwrap();
-        assert_eq!(opts.tab_width, 4);
+        assert_eq!(opts.tab_stops, TabStops::regular(4));
         assert!(msg.contains('4'));
+    }
+
+    #[test]
+    fn test_set_value_x_sets_multi_tab_stops() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('x', "9,17").unwrap();
+        assert_eq!(opts.tab_stops.next_stop(0), 9);
+        assert_eq!(opts.tab_stops.next_stop(9), 17);
+        assert_eq!(opts.tab_stops.next_stop(17), 25);
+        assert!(msg.contains("9,17"));
     }
 
     // ── Test 11: set_value('x', "abc") returns InvalidValue error ──
@@ -785,7 +797,7 @@ mod tests {
     #[test]
     fn test_query_value_flags_returns_numeric_value() {
         let mut opts = RuntimeOptions::default();
-        opts.tab_width = 4;
+        opts.tab_stops = TabStops::regular(4);
         let msg = opts.query('x').unwrap();
         assert!(msg.contains('4'), "expected 4 in: {msg}");
 
