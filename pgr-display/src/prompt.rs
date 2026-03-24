@@ -29,7 +29,7 @@ pub const DEFAULT_MEDIUM_PROMPT: &str = "?f%f .?e(END) :?pB%pB\\%..";
 /// Matches less's default long prompt: filename, multi-file indicator, line
 /// range, byte offset and size, then `(END)` at EOF or percentage.
 pub const DEFAULT_LONG_PROMPT: &str =
-    "?f%f .?n?m(file %i of %m) ..?ltlines %lt-%lb?L/%L. .?bbyte %bB?s/%s. .?e(END) :?pB%pB\\%..";
+    "?f%f .?n?m(file %i of %m) ..?ltlines %lt-%lb?L/%L. :byte %bB?s/%s. .?e(END) :?pB%pB\\%..";
 
 /// Prompt style, matching less's `-m` / `-M` flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,8 +524,15 @@ pub fn paint_prompt<W: Write>(
     write!(writer, "\x1b[{screen_rows};1H")?;
     // Clear the entire line
     write!(writer, "\x1b[2K")?;
-    // Truncate prompt to screen width
-    let display_text: String = prompt_text.chars().take(screen_cols).collect();
+    // Truncate prompt to screen width using left-truncation (matching less
+    // behavior). When the prompt is too long, leading characters are removed
+    // so that the right side (line info, percentage) remains visible.
+    let char_count = prompt_text.chars().count();
+    let display_text: String = if char_count > screen_cols {
+        prompt_text.chars().skip(char_count - screen_cols).collect()
+    } else {
+        prompt_text.to_string()
+    };
     // Render with configured color or fallback to reverse video
     let sgr = prompt_sgr.unwrap_or("\x1b[7m");
     write!(writer, "{sgr}{display_text}\x1b[0m")?;
@@ -697,37 +704,36 @@ mod tests {
         let ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
         assert_eq!(
             render_prompt(&PromptStyle::Long, &ctx),
-            "data.log lines 10-33/200 byte 1500/10000 15%"
+            "data.log lines 10-33/200 15%"
         );
     }
 
     /// Long prompt with unknown total omits the total line count.
+    /// Line info is still shown (lines are known), byte section is skipped.
     #[test]
     fn test_render_prompt_long_file_unknown_total_omits_total() {
         let ctx = file_ctx("data.log", false, 10, 33, None, 1500, 10000);
         assert_eq!(
             render_prompt(&PromptStyle::Long, &ctx),
-            "data.log lines 10-33 byte 1500/10000 15%"
+            "data.log lines 10-33 15%"
         );
     }
 
-    /// Long prompt for pipe shows lines and percent.
+    /// Long prompt for pipe shows lines and percent (no byte info when
+    /// line numbers are known). Matches less 692 behavior.
     #[test]
     fn test_render_prompt_long_pipe_shows_lines_and_percent() {
         let ctx = pipe_ctx(false, 4096, 8192);
-        assert_eq!(
-            render_prompt(&PromptStyle::Long, &ctx),
-            "lines 1-24 byte 4096 50%"
-        );
+        assert_eq!(render_prompt(&PromptStyle::Long, &ctx), "lines 1-24 50%");
     }
 
-    /// Long prompt at EOF shows all info plus (END).
+    /// Long prompt at EOF shows line info plus (END), no byte section.
     #[test]
     fn test_render_prompt_long_at_eof_shows_end_with_filename() {
         let ctx = file_ctx("readme.txt", true, 90, 100, Some(100), 5000, 5000);
         assert_eq!(
             render_prompt(&PromptStyle::Long, &ctx),
-            "readme.txt lines 90-100/100 byte 5000/5000 (END) "
+            "readme.txt lines 90-100/100 (END) "
         );
     }
 
@@ -783,10 +789,7 @@ mod tests {
     #[test]
     fn test_render_prompt_long_pipe_at_eof_returns_end() {
         let ctx = pipe_ctx(true, 8192, 8192);
-        assert_eq!(
-            render_prompt(&PromptStyle::Long, &ctx),
-            "lines 1-24 byte 8192 (END) "
-        );
+        assert_eq!(render_prompt(&PromptStyle::Long, &ctx), "lines 1-24 (END) ");
     }
 
     /// Medium prompt with zero-byte file shows filename only.
@@ -1226,7 +1229,7 @@ mod tests {
         let ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
         assert_eq!(
             eval_prompt(DEFAULT_LONG_PROMPT, &ctx),
-            "data.log lines 10-33/200 byte 1500/10000 15%"
+            "data.log lines 10-33/200 15%"
         );
     }
 
