@@ -265,6 +265,12 @@ pub struct Options {
 
     /// Enable mouse wheel scrolling.
     #[arg(long = "mouse")]
+    /// Pin header lines at top of screen (format: L[,C[,N]]).
+    #[arg(long = "header")]
+    pub header: Option<String>,
+
+    /// Enable mouse support (Phase 2).
+    #[arg(long = "mouse", hide = true)]
     pub mouse: bool,
 
     /// Enable mouse wheel scrolling with reversed direction.
@@ -443,6 +449,22 @@ impl Options {
         } else {
             CaseMode::Sensitive
         }
+    }
+
+    /// Parse the `--header` flag into `(lines, cols, gap)`.
+    ///
+    /// Accepts formats: `L`, `L,C`, or `L,C,N`. Defaults to 0 for
+    /// omitted components. Returns `(0, 0, 0)` if no header flag is set.
+    #[must_use]
+    pub fn header_params(&self) -> (usize, usize, usize) {
+        let Some(ref raw) = self.header else {
+            return (0, 0, 0);
+        };
+        let parts: Vec<&str> = raw.split(',').collect();
+        let lines = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let cols = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let gap = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        (lines, cols, gap)
     }
 }
 
@@ -1093,5 +1115,38 @@ mod tests {
         let opts = Options::parse_from(["pgr", "file.txt"]);
         assert!(!opts.mouse);
         assert!(!opts.mouse_reversed);
+    }
+
+    // ── Header flag tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_options_header_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.header.is_none());
+        assert_eq!(opts.header_params(), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_options_header_lines_only() {
+        let opts = Options::parse_from(["pgr", "--header=3", "file.txt"]);
+        assert_eq!(opts.header_params(), (3, 0, 0));
+    }
+
+    #[test]
+    fn test_options_header_lines_and_cols() {
+        let opts = Options::parse_from(["pgr", "--header=3,2", "file.txt"]);
+        assert_eq!(opts.header_params(), (3, 2, 0));
+    }
+
+    #[test]
+    fn test_options_header_lines_cols_and_gap() {
+        let opts = Options::parse_from(["pgr", "--header=3,2,1", "file.txt"]);
+        assert_eq!(opts.header_params(), (3, 2, 1));
+    }
+
+    #[test]
+    fn test_options_header_invalid_values_default_to_zero() {
+        let opts = Options::parse_from(["pgr", "--header=abc", "file.txt"]);
+        assert_eq!(opts.header_params(), (0, 0, 0));
     }
 }

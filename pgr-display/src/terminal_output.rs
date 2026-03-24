@@ -49,6 +49,11 @@ pub struct PaintOptions {
     /// line index. Typically `' '` (space), `'*'` (search match), or a mark
     /// letter (`'a'`..`'z'`). Only used when `show_status_column` is `true`.
     pub status_column_chars: Vec<char>,
+    /// Header lines to render before the scrollable content.
+    ///
+    /// These are always taken from the beginning of the file and rendered
+    /// with reverse video. Only used when `--header=N` is active.
+    pub header_line_contents: Vec<Option<String>>,
 }
 
 /// Paint the full screen content to the terminal.
@@ -83,6 +88,7 @@ pub fn paint_screen<W: Write>(
 /// # Errors
 ///
 /// Returns an I/O error if writing to `writer` fails.
+#[allow(clippy::too_many_lines)] // Rendering dispatch for chop/wrap modes with headers and status columns
 pub fn paint_screen_with_options<W: Write>(
     writer: &mut W,
     screen: &Screen,
@@ -120,9 +126,24 @@ pub fn paint_screen_with_options<W: Write>(
 
     // Track the current terminal row (1-based) to account for wrapped lines.
     let mut screen_row: usize = first_row;
+
+    // Render pinned header lines (reverse video) before scrollable content.
+    let header_count = options.header_line_contents.len();
+    screen_row = paint_header_lines(
+        writer,
+        screen,
+        options,
+        config,
+        ln_width,
+        content_cols,
+        screen_row,
+    )?;
+
+    // Total rows available for scrollable content (accounts for header rows).
+    let scrollable_rows = content_rows + header_count;
     let mut line_idx: usize = 0;
 
-    while screen_row <= content_rows {
+    while screen_row <= scrollable_rows {
         if screen_row > 1 {
             move_cursor(writer, screen_row, 1)?;
         }
@@ -203,6 +224,65 @@ pub fn paint_screen_with_options<W: Write>(
     Ok(())
 }
 
+/// Render pinned header lines with reverse video.
+///
+/// Writes each header line in reverse video at the current `screen_row`,
+/// incrementing it for each line rendered. Returns the updated `screen_row`.
+///
+/// # Errors
+///
+/// Returns an I/O error if writing to `writer` fails.
+fn paint_header_lines<W: Write>(
+    writer: &mut W,
+    screen: &Screen,
+    options: &PaintOptions,
+    config: &RenderConfig,
+    ln_width: usize,
+    content_cols: usize,
+    mut screen_row: usize,
+) -> std::io::Result<usize> {
+    let (_, cols) = screen.dimensions();
+    let h_offset = screen.horizontal_offset();
+    let chop_mode = screen.chop_mode();
+
+    for (i, header_line) in options.header_line_contents.iter().enumerate() {
+        if screen_row > 1 {
+            move_cursor(writer, screen_row, 1)?;
+        }
+        writer.write_all(b"\x1b[7m")?;
+        if let Some(text) = header_line {
+            if options.show_status_column {
+                writer.write_all(b" ")?;
+            }
+            if options.show_line_numbers {
+                let line_num = i + 1;
+                let formatted = line_numbers::format_line_number(line_num, ln_width);
+                writer.write_all(formatted.as_bytes())?;
+            }
+            if chop_mode {
+                let (rendered, width) = render::render_line(text, h_offset, content_cols, config);
+                if content_cols > 0 {
+                    let full_width = render::line_display_width(text, config);
+                    let truncated_right = full_width > h_offset + content_cols;
+                    let (chopped, _) =
+                        render::apply_chop_markers(&rendered, width, h_offset, truncated_right);
+                    writer.write_all(chopped.as_bytes())?;
+                } else {
+                    writer.write_all(rendered.as_bytes())?;
+                }
+            } else {
+                let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
+                let (rendered, _) = render::render_line(text, h_offset, render_width, config);
+                writer.write_all(rendered.as_bytes())?;
+            }
+        }
+        clear_to_eol(writer)?;
+        writer.write_all(b"\x1b[0m")?;
+        screen_row += 1;
+    }
+    Ok(screen_row)
+}
+
 /// Paint the screen with explicit line-number-to-content mappings.
 ///
 /// Each entry in `screen_lines` pairs optional content with the actual
@@ -249,9 +329,23 @@ pub fn paint_screen_mapped<W: Write>(
     move_cursor(writer, first_row, 1)?;
 
     let mut screen_row: usize = first_row;
+
+    // Render pinned header lines (reverse video) before scrollable content.
+    let header_count = options.header_line_contents.len();
+    screen_row = paint_header_lines(
+        writer,
+        screen,
+        options,
+        config,
+        ln_width,
+        content_cols,
+        screen_row,
+    )?;
+
+    let scrollable_rows = content_rows + header_count;
     let mut line_idx: usize = 0;
 
-    while screen_row <= content_rows {
+    while screen_row <= scrollable_rows {
         if screen_row > 1 {
             move_cursor(writer, screen_row, 1)?;
         }
@@ -1143,6 +1237,75 @@ mod tests {
         assert!(
             !output_str.contains(" ~"),
             "should not have space before tilde without status column: {output_str}"
+        );
+    }
+
+    // ── Header lines rendering tests ─────────────────────────────────
+
+    #[test]
+    fn test_paint_screen_header_lines_rendered_with_reverse_video() {
+        let mut screen = Screen::new(10, 80);
+        screen.set_header_lines(2);
+        let config = RenderConfig::default();
+        let lines = vec![
+            Some("scrollable line 1".to_string()),
+            Some("scrollable line 2".to_string()),
+        ];
+        let options = PaintOptions {
+            header_line_contents: vec![Some("header 1".to_string()), Some("header 2".to_string())],
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+        // Reverse video escape \x1b[7m should precede header content
+        assert!(output_str.contains("\x1b[7m"), "expected reverse video");
+        assert!(output_str.contains("header 1"), "expected header 1");
+        assert!(output_str.contains("header 2"), "expected header 2");
+        // Reset escape \x1b[0m should follow each header line
+        assert!(output_str.contains("\x1b[0m"), "expected SGR reset");
+        // Scrollable content should also appear
+        assert!(
+            output_str.contains("scrollable line 1"),
+            "expected scrollable content"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_no_headers_by_default() {
+        let screen = Screen::new(10, 80);
+        let config = RenderConfig::default();
+        let lines = vec![Some("line 1".to_string())];
+        let options = PaintOptions::default();
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+        // No reverse video when no headers
+        assert!(
+            !output_str.contains("\x1b[7m"),
+            "should not have reverse video without headers"
+        );
+    }
+
+    #[test]
+    fn test_paint_screen_header_with_line_numbers() {
+        let mut screen = Screen::new(10, 80);
+        screen.set_header_lines(1);
+        let config = RenderConfig::default();
+        let lines = vec![Some("content".to_string())];
+        let options = PaintOptions {
+            show_line_numbers: true,
+            total_lines: 50,
+            header_line_contents: vec![Some("header".to_string())],
+            ..PaintOptions::default()
+        };
+        let output =
+            capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
+        let output_str = String::from_utf8_lossy(&output);
+        // Header line number should be 1 (first line of file)
+        assert!(
+            output_str.contains("1"),
+            "expected line number 1 for header: {output_str}"
         );
     }
 }

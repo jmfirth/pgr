@@ -400,6 +400,12 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         }
     }
 
+    // Wire header lines (--header=N,C,G).
+    let (header_lines, _header_cols, _header_gap) = options.header_params();
+    if header_lines > 0 {
+        pager.set_header_lines(header_lines);
+    }
+
     // Wire initial commands (+cmd / ++cmd).
     if !options.initial_commands.is_empty() {
         pager.set_initial_commands(options.initial_commands.clone());
