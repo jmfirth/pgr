@@ -226,6 +226,10 @@ impl<R: Read, W: Write> Pager<R, W> {
     ///
     /// Returns an error if key reading, buffer access, or terminal output fails.
     pub fn run(&mut self) -> Result<()> {
+        // Enter alternate screen buffer (like GNU less).
+        self.writer.write_all(b"\x1b[?1049h")?;
+        self.writer.flush()?;
+
         self.repaint()?;
 
         loop {
@@ -236,9 +240,18 @@ impl<R: Read, W: Write> Pager<R, W> {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    // Exit alternate screen buffer before propagating error.
+                    let _ = self.writer.write_all(b"\x1b[?1049l");
+                    let _ = self.writer.flush();
+                    return Err(e.into());
+                }
             }
         }
+
+        // Exit alternate screen buffer.
+        self.writer.write_all(b"\x1b[?1049l")?;
+        self.writer.flush()?;
 
         Ok(())
     }
@@ -1675,6 +1688,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     total_lines: visible_total,
                     line_num_width: None,
                     suppress_tildes: self.runtime_options.tilde,
+                    start_row: 0,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -1707,29 +1721,26 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
-        // For short files where all content is visible, GNU less renders the
-        // prompt inline right after the last content line instead of on the
-        // last terminal row. Rows below the inline prompt are blank (not tildes).
-        let visible_content = total.saturating_sub(start);
-        let short_file = visible_content < content_rows;
-
-        if short_file {
-            // Replace beyond-EOF entries after the prompt position with blank
-            // content so they render as blank rows instead of tildes.
-            for line in lines.iter_mut().skip(visible_content + 1) {
-                *line = Some(String::new());
-            }
-        }
-
         // Compute highlights for the visible lines.
         self.highlight_state
             .compute_highlights(&lines, self.last_pattern.as_ref());
+
+        // For short files, GNU less renders content at the bottom of the
+        // screen (not the top). Calculate the start row offset.
+        let visible_content = total.saturating_sub(start);
+        let start_row = if visible_content < content_rows {
+            // Bottom-align: content_rows - visible_content + 1 (1-based)
+            content_rows - visible_content + 1
+        } else {
+            0 // default: start at row 1
+        };
 
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
             line_num_width: None,
             suppress_tildes: self.runtime_options.tilde,
+            start_row,
         };
         paint_screen_with_options(
             &mut self.writer,
@@ -1739,17 +1750,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             &paint_opts,
         )?;
 
-        if short_file {
-            // Render prompt inline after the last content line.
-            // The 1-based ANSI row is visible_content + 1.
-            let prompt_row = visible_content + 1;
-            let (_, cols) = self.screen.dimensions();
-            let prompt_text = self.build_short_file_prompt(total);
-            paint_prompt(&mut self.writer, &prompt_text, prompt_row, cols, None)?;
-        } else {
-            // Normal case: prompt on the last terminal row.
-            self.paint_status_prompt(total)?;
-        }
+        // Prompt always on the last terminal row (matching GNU less).
+        self.paint_status_prompt(total)?;
 
         Ok(())
     }
@@ -1792,11 +1794,17 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.highlight_state
             .compute_highlights(&line_contents, self.last_pattern.as_ref());
 
+        let start_row = if visible_total < content_rows {
+            content_rows - visible_total + 1
+        } else {
+            0
+        };
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
             line_num_width: None,
             suppress_tildes: self.runtime_options.tilde,
+            start_row,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -1806,39 +1814,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             &paint_opts,
         )?;
 
-        // Short file inline prompt.
-        let short_file = visible_total < content_rows;
-        if short_file {
-            let prompt_row = visible_total + 1;
-            let (_, cols) = self.screen.dimensions();
-            let prompt_text = self.build_short_file_prompt(total);
-            paint_prompt(&mut self.writer, &prompt_text, prompt_row, cols, None)?;
-        } else {
-            self.paint_status_prompt(total)?;
-        }
+        self.paint_status_prompt(total)?;
 
         Ok(())
-    }
-
-    /// Build prompt text for short files displayed inline after content.
-    fn build_short_file_prompt(&mut self, total_lines: usize) -> String {
-        if let Some(msg) = self.status_message.take() {
-            return msg;
-        }
-        let at_eof = true;
-        let (start, end) = self.screen.visible_range();
-        let bottom_display = end.min(total_lines);
-        let ctx = self.build_prompt_context(total_lines, at_eof, start, bottom_display);
-        let template = match self.runtime_options.prompt_string {
-            Some(ref custom) => custom.as_str(),
-            None => match self.prompt_style {
-                PromptStyle::Short => DEFAULT_SHORT_PROMPT,
-                PromptStyle::Medium => DEFAULT_MEDIUM_PROMPT,
-                PromptStyle::Long => DEFAULT_LONG_PROMPT,
-                PromptStyle::Custom(ref t) => t.as_str(),
-            },
-        };
-        eval_prompt(template, &ctx)
     }
 
     /// Render and paint the status prompt on the last row.

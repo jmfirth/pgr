@@ -33,6 +33,10 @@ pub struct PaintOptions {
     /// Suppress tilde display for lines past EOF (`--tilde` / `-~` flag).
     /// When true, beyond-EOF rows are rendered as blank instead of `~`.
     pub suppress_tildes: bool,
+    /// Starting terminal row (1-based) for content rendering.
+    /// Default 0 means start at row 1. Used to offset short files
+    /// so content appears at the bottom of the screen (matching less).
+    pub start_row: usize,
 }
 
 /// Paint the full screen content to the terminal.
@@ -91,11 +95,16 @@ pub fn paint_screen_with_options<W: Write>(
 
     let content_cols = cols.saturating_sub(ln_width);
 
-    // Move cursor to top-left
-    move_cursor(writer, 1, 1)?;
+    // Move cursor to starting row (may be offset for short files).
+    let first_row = if options.start_row > 0 {
+        options.start_row
+    } else {
+        1
+    };
+    move_cursor(writer, first_row, 1)?;
 
     // Track the current terminal row (1-based) to account for wrapped lines.
-    let mut screen_row: usize = 1;
+    let mut screen_row: usize = first_row;
     let mut line_idx: usize = 0;
 
     while screen_row <= content_rows {
@@ -280,7 +289,7 @@ pub fn paint_screen_mapped<W: Write>(
 ///
 /// Returns an I/O error if writing to `writer` fails.
 pub fn clear_screen<W: Write>(writer: &mut W) -> std::io::Result<()> {
-    writer.write_all(b"\x1b[2J")?;
+    writer.write_all(b"\x1b[2J\x1b[H")?;
     writer.flush()
 }
 
@@ -366,7 +375,7 @@ mod tests {
     #[test]
     fn test_clear_screen_emits_correct_escape() {
         let output = capture_output(|w| clear_screen(w));
-        assert_eq!(output, b"\x1b[2J");
+        assert_eq!(output, b"\x1b[2J\x1b[H");
     }
 
     #[test]
