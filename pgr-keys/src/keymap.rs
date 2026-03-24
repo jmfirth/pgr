@@ -2,6 +2,7 @@
 
 use crate::command::Command;
 use crate::key::Key;
+use crate::lesskey::LesskeyConfig;
 
 /// A mapping from key events to pager commands.
 ///
@@ -124,6 +125,29 @@ impl Keymap {
         ];
 
         Self { bindings }
+    }
+
+    /// Apply lesskey configuration, overriding or extending the keymap.
+    ///
+    /// User bindings from the lesskey config take priority over defaults.
+    /// If a key already has a binding, the existing binding is replaced.
+    /// If the key is new, it is prepended so it takes priority.
+    pub fn apply_lesskey(&mut self, config: &LesskeyConfig) {
+        for binding in &config.command_bindings {
+            let mut found = false;
+            for (existing_key, existing_cmd) in &mut self.bindings {
+                if *existing_key == binding.key {
+                    *existing_cmd = binding.command.clone();
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Prepend so user bindings are found first by lookup
+                self.bindings
+                    .insert(0, (binding.key.clone(), binding.command.clone()));
+            }
+        }
     }
 
     /// Look up the command bound to the given key.
