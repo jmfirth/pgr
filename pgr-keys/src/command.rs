@@ -49,6 +49,8 @@ pub enum Command {
     WindowBackward,
     /// Enter follow mode (tail -f). `F`.
     FollowMode,
+    /// Enter follow mode that stops when a search pattern matches new data. `ESC-F`.
+    FollowModeStopOnMatch,
     /// Repaint with buffer refresh (reload). `R`.
     RepaintRefresh,
     /// Scroll forward N file lines (ignoring long wrapped lines). ESC-j.
@@ -179,6 +181,19 @@ mod tests {
         assert_ne!(
             Command::FindCloseBracket('{', '}'),
             Command::FindOpenBracket('{', '}')
+        );
+    }
+
+    #[test]
+    fn test_command_follow_mode_stop_on_match_differs_from_follow_mode() {
+        assert_ne!(Command::FollowMode, Command::FollowModeStopOnMatch);
+    }
+
+    #[test]
+    fn test_command_follow_mode_stop_on_match_equality() {
+        assert_eq!(
+            Command::FollowModeStopOnMatch,
+            Command::FollowModeStopOnMatch
         );
     }
 }

@@ -266,9 +266,13 @@ pub struct Options {
     #[arg(long = "mouse", hide = true)]
     pub mouse: bool,
 
-    /// Follow by name in follow mode (Phase 2).
-    #[arg(long = "follow-name", hide = true)]
+    /// Follow by name in follow mode: reopen file by path on rename/delete.
+    #[arg(long = "follow-name")]
     pub follow_name: bool,
+
+    /// Exit follow mode when the input pipe closes (EOF on stdin).
+    #[arg(long = "exit-follow-on-close")]
+    pub exit_follow_on_close: bool,
 
     // ── Meta flags ────────────────────────────────────────────────────
     /// Print version information and exit.
@@ -862,6 +866,20 @@ mod tests {
         assert!(opts.status_column);
         assert!(opts.mouse);
         assert!(opts.follow_name);
+    }
+
+    #[test]
+    fn test_options_exit_follow_on_close_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--exit-follow-on-close", "file.txt"]);
+        assert!(opts.exit_follow_on_close);
+    }
+
+    #[test]
+    fn test_options_follow_name_and_exit_follow_on_close_combined() {
+        let opts =
+            Options::parse_from(["pgr", "--follow-name", "--exit-follow-on-close", "file.txt"]);
+        assert!(opts.follow_name);
+        assert!(opts.exit_follow_on_close);
     }
 
     #[test]
