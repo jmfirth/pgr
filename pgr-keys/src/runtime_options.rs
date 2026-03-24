@@ -72,6 +72,10 @@ pub struct RuntimeOptions {
     pub tilde: bool,
     /// Show status column on the left edge (`-J`).
     pub status_column: bool,
+    /// Wrap long lines at word boundaries (`--wordwrap`).
+    pub wordwrap: bool,
+    /// Enable incremental search (`--incsearch`).
+    pub incsearch: bool,
 
     // Value flags (prompted for a value)
     /// Tab stop width (`-x`).
@@ -86,6 +90,8 @@ pub struct RuntimeOptions {
     pub max_back_scroll: Option<usize>,
     /// Maximum forward scroll limit (`-y`).
     pub max_forw_scroll: Option<usize>,
+    /// Horizontal shift amount when a search match is off-screen (`--match-shift`).
+    pub match_shift: Option<usize>,
 
     // String flags — per-slot custom prompt overrides (`-Ps`, `-Pm`, `-PM`)
     /// Custom short prompt template (`-Ps` or unprefixed `-P`).
@@ -115,12 +121,15 @@ impl Default for RuntimeOptions {
             hilite_unread_all: false,
             tilde: false,
             status_column: false,
+            wordwrap: false,
+            incsearch: false,
             tab_width: 8,
             jump_target: 1,
             shift_amount: 0,
             window_size: None,
             max_back_scroll: None,
             max_forw_scroll: None,
+            match_shift: None,
             prompt_string_short: None,
             prompt_string_medium: None,
             prompt_string_long: None,
@@ -1084,5 +1093,46 @@ mod tests {
     fn test_option_error_display_invalid_value() {
         let err = OptionError::InvalidValue('x', "abc".to_owned());
         assert_eq!(err.to_string(), "invalid value for -x: abc");
+    }
+
+    // ── Task 222: Long flags batch 1 ────────────────────────────────
+
+    #[test]
+    fn test_default_wordwrap_is_false() {
+        let opts = RuntimeOptions::default();
+        assert!(!opts.wordwrap);
+    }
+
+    #[test]
+    fn test_default_incsearch_is_false() {
+        let opts = RuntimeOptions::default();
+        assert!(!opts.incsearch);
+    }
+
+    #[test]
+    fn test_default_match_shift_is_none() {
+        let opts = RuntimeOptions::default();
+        assert!(opts.match_shift.is_none());
+    }
+
+    #[test]
+    fn test_wordwrap_can_be_set() {
+        let mut opts = RuntimeOptions::default();
+        opts.wordwrap = true;
+        assert!(opts.wordwrap);
+    }
+
+    #[test]
+    fn test_incsearch_can_be_set() {
+        let mut opts = RuntimeOptions::default();
+        opts.incsearch = true;
+        assert!(opts.incsearch);
+    }
+
+    #[test]
+    fn test_match_shift_can_be_set() {
+        let mut opts = RuntimeOptions::default();
+        opts.match_shift = Some(10);
+        assert_eq!(opts.match_shift, Some(10));
     }
 }

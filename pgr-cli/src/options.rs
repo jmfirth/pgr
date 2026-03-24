@@ -287,6 +287,23 @@ pub struct Options {
     #[arg(long = "exit-follow-on-close")]
     pub exit_follow_on_close: bool,
 
+    // ── Long-only display/search flags ─────────────────────────────
+    /// Wrap long lines at word boundaries instead of character boundaries.
+    #[arg(long = "wordwrap")]
+    pub wordwrap: bool,
+
+    /// Enable incremental search (display updates as you type the pattern).
+    #[arg(long = "incsearch")]
+    pub incsearch: bool,
+
+    /// When a search match is off-screen in chop mode, shift horizontally by N positions.
+    #[arg(long = "match-shift")]
+    pub match_shift: Option<usize>,
+
+    /// Set default search modifiers (D=past-EOF, O=only-one, F=first-match, W=wrap).
+    #[arg(long = "search-options")]
+    pub search_opts: Option<String>,
+
     // ── Meta flags ────────────────────────────────────────────────────
     /// Print version information and exit.
     #[arg(short = 'V', long = "version")]
@@ -464,6 +481,47 @@ impl Options {
         let gap = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
         (lines, cols, gap)
     }
+
+    /// Parse the `--search-options` flag into a [`SearchModifiers`].
+    ///
+    /// The option string is a sequence of characters:
+    /// - `D` or `d`: past-EOF (maps to `from_first`)
+    /// - `O` or `o`: only-one (maps to `keep_position`)
+    /// - `F` or `f`: first-match (maps to `from_first`)
+    /// - `W` or `w`: wrap-around (maps to `wrap`)
+    ///
+    /// Unknown characters are silently ignored. Returns default modifiers
+    /// if no `--search-options` flag was provided.
+    #[must_use]
+    #[allow(dead_code)] // Wired when search integration uses default modifiers
+    pub fn search_default_modifiers(&self) -> pgr_search::SearchModifiers {
+        let Some(ref opts_str) = self.search_opts else {
+            return pgr_search::SearchModifiers::new();
+        };
+        parse_search_options(opts_str)
+    }
+}
+
+/// Parse a `--search-options` string into [`SearchModifiers`].
+///
+/// Recognized characters (case-insensitive):
+/// - `D` / `F`: sets `from_first` (search past EOF / start from first file)
+/// - `O`: sets `keep_position` (only highlight, don't move)
+/// - `W`: sets `wrap` (wrap around at boundaries)
+///
+/// Unknown characters are silently ignored.
+#[allow(dead_code)] // Wired when search integration uses default modifiers
+fn parse_search_options(opts: &str) -> pgr_search::SearchModifiers {
+    let mut mods = pgr_search::SearchModifiers::new();
+    for ch in opts.chars() {
+        match ch {
+            'D' | 'd' | 'F' | 'f' => mods.from_first = true,
+            'O' | 'o' => mods.keep_position = true,
+            'W' | 'w' => mods.wrap = true,
+            _ => {} // silently ignore unknown characters
+        }
+    }
+    mods
 }
 
 /// Strip an optional GNU less prompt prefix from a `-P` value.
@@ -1105,5 +1163,116 @@ mod tests {
     fn test_options_header_invalid_values_default_to_zero() {
         let opts = Options::parse_from(["pgr", "--header=abc", "file.txt"]);
         assert_eq!(opts.header_params(), (0, 0, 0));
+    }
+
+    // ── Task 222: Long flags batch 1 ────────────────────────────────
+
+    #[test]
+    fn test_options_wordwrap_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--wordwrap", "file.txt"]);
+        assert!(opts.wordwrap);
+    }
+
+    #[test]
+    fn test_options_wordwrap_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.wordwrap);
+    }
+
+    #[test]
+    fn test_options_incsearch_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--incsearch", "file.txt"]);
+        assert!(opts.incsearch);
+    }
+
+    #[test]
+    fn test_options_incsearch_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.incsearch);
+    }
+
+    #[test]
+    fn test_options_match_shift_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--match-shift", "10", "file.txt"]);
+        assert_eq!(opts.match_shift, Some(10));
+    }
+
+    #[test]
+    fn test_options_match_shift_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.match_shift.is_none());
+    }
+
+    #[test]
+    fn test_options_search_options_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--search-options", "DW", "file.txt"]);
+        assert_eq!(opts.search_opts.as_deref(), Some("DW"));
+    }
+
+    #[test]
+    fn test_options_search_options_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.search_opts.is_none());
+    }
+
+    #[test]
+    fn test_options_search_default_modifiers_from_dw() {
+        let opts = Options::parse_from(["pgr", "--search-options", "DW", "file.txt"]);
+        let mods = opts.search_default_modifiers();
+        assert!(mods.from_first);
+        assert!(mods.wrap);
+        assert!(!mods.invert);
+        assert!(!mods.keep_position);
+    }
+
+    #[test]
+    fn test_options_search_default_modifiers_from_o() {
+        let opts = Options::parse_from(["pgr", "--search-options", "O", "file.txt"]);
+        let mods = opts.search_default_modifiers();
+        assert!(mods.keep_position);
+        assert!(!mods.wrap);
+    }
+
+    #[test]
+    fn test_options_search_default_modifiers_all_flags() {
+        let opts = Options::parse_from(["pgr", "--search-options", "DOFW", "file.txt"]);
+        let mods = opts.search_default_modifiers();
+        assert!(mods.from_first);
+        assert!(mods.keep_position);
+        assert!(mods.wrap);
+    }
+
+    #[test]
+    fn test_options_search_default_modifiers_none_when_absent() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        let mods = opts.search_default_modifiers();
+        assert!(mods.is_empty());
+    }
+
+    #[test]
+    fn test_options_search_options_unknown_chars_ignored() {
+        let opts = Options::parse_from(["pgr", "--search-options", "XWZ", "file.txt"]);
+        let mods = opts.search_default_modifiers();
+        assert!(mods.wrap);
+        assert!(!mods.from_first);
+        assert!(!mods.keep_position);
+    }
+
+    #[test]
+    fn test_options_all_long_flags_batch1_combined() {
+        let opts = Options::parse_from([
+            "pgr",
+            "--wordwrap",
+            "--incsearch",
+            "--match-shift",
+            "5",
+            "--search-options",
+            "W",
+            "file.txt",
+        ]);
+        assert!(opts.wordwrap);
+        assert!(opts.incsearch);
+        assert_eq!(opts.match_shift, Some(5));
+        assert_eq!(opts.search_opts.as_deref(), Some("W"));
     }
 }
