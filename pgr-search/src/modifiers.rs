@@ -80,6 +80,33 @@ impl SearchModifiers {
         }
     }
 
+    /// Merge default modifiers into this instance.
+    ///
+    /// For each flag in `defaults` that is `true`, sets the corresponding
+    /// flag in `self` to `true`. Existing `true` flags in `self` are not
+    /// cleared. This allows `--search-options` defaults to be overridden
+    /// by per-search control-character modifiers.
+    pub fn apply_defaults(&mut self, defaults: &Self) {
+        if defaults.invert {
+            self.invert = true;
+        }
+        if defaults.multi_file {
+            self.multi_file = true;
+        }
+        if defaults.from_first {
+            self.from_first = true;
+        }
+        if defaults.keep_position {
+            self.keep_position = true;
+        }
+        if defaults.literal {
+            self.literal = true;
+        }
+        if defaults.wrap {
+            self.wrap = true;
+        }
+    }
+
     /// Return `true` if no modifiers are set.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -292,5 +319,64 @@ mod tests {
     #[test]
     fn test_default_matches_new() {
         assert_eq!(SearchModifiers::default(), SearchModifiers::new());
+    }
+
+    // ── Tests for apply_defaults ──
+
+    #[test]
+    fn test_apply_defaults_merges_true_flags() {
+        let mut mods = SearchModifiers::new();
+        let mut defaults = SearchModifiers::new();
+        defaults.wrap = true;
+        defaults.from_first = true;
+
+        mods.apply_defaults(&defaults);
+        assert!(mods.wrap);
+        assert!(mods.from_first);
+        assert!(!mods.invert);
+    }
+
+    #[test]
+    fn test_apply_defaults_does_not_clear_existing_flags() {
+        let mut mods = SearchModifiers::new();
+        mods.invert = true;
+
+        let mut defaults = SearchModifiers::new();
+        defaults.wrap = true;
+
+        mods.apply_defaults(&defaults);
+        assert!(mods.invert); // existing flag preserved
+        assert!(mods.wrap); // default applied
+    }
+
+    #[test]
+    fn test_apply_defaults_empty_defaults_no_change() {
+        let mut mods = SearchModifiers::new();
+        mods.literal = true;
+
+        let defaults = SearchModifiers::new();
+        mods.apply_defaults(&defaults);
+        assert!(mods.literal);
+        assert!(!mods.wrap);
+    }
+
+    #[test]
+    fn test_apply_defaults_all_flags() {
+        let mut mods = SearchModifiers::new();
+        let mut defaults = SearchModifiers::new();
+        defaults.invert = true;
+        defaults.multi_file = true;
+        defaults.from_first = true;
+        defaults.keep_position = true;
+        defaults.literal = true;
+        defaults.wrap = true;
+
+        mods.apply_defaults(&defaults);
+        assert!(mods.invert);
+        assert!(mods.multi_file);
+        assert!(mods.from_first);
+        assert!(mods.keep_position);
+        assert!(mods.literal);
+        assert!(mods.wrap);
     }
 }
