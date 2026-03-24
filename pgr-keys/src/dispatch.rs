@@ -34,7 +34,7 @@ use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
 use crate::lesskey::LesskeyConfig;
 use crate::line_editor::{History, LineEditResult, LineEditor};
-use crate::runtime_options::RuntimeOptions;
+use crate::runtime_options::{RuntimeOptions, WindowSize};
 use crate::shell;
 use crate::tags::TagState;
 use crate::Command;
@@ -132,8 +132,8 @@ pub struct Pager<R: Read, W: Write> {
     pending_command: Option<PendingCommand>,
     /// Sticky half-page scroll size. Set by `d`/`u` with a count.
     sticky_half_page: Option<usize>,
-    /// Custom window size. Set by `z`/`w` with a count.
-    custom_window_size: Option<usize>,
+    /// Custom window size. Set by `z`/`w` with a count or by `-z` flag.
+    custom_window_size: Option<WindowSize>,
     /// The list of open files for multi-file navigation.
     file_list: Option<FileList>,
     /// Runtime-mutable options (toggled with `-` prefix at the prompt).
@@ -623,18 +623,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::PageForward => {
                 self.save_last_position();
-                let window = self
-                    .custom_window_size
-                    .unwrap_or(self.screen.content_rows());
+                let window = self.resolve_window_size();
                 self.screen.scroll_forward(count.unwrap_or(window), total);
                 self.repaint()?;
                 self.check_eof_quit(total);
             }
             Command::PageBackward => {
                 self.save_last_position();
-                let window = self
-                    .custom_window_size
-                    .unwrap_or(self.screen.content_rows());
+                let window = self.resolve_window_size();
                 self.screen.scroll_backward(count.unwrap_or(window));
                 self.repaint()?;
             }
@@ -741,40 +737,32 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             }
             Command::ForwardForceEof => {
-                let window = self
-                    .custom_window_size
-                    .unwrap_or(self.screen.content_rows());
+                let window = self.resolve_window_size();
                 self.screen
                     .scroll_forward_unclamped(count.unwrap_or(window));
                 self.repaint()?;
                 self.check_eof_quit(total);
             }
             Command::BackwardForceBeginning => {
-                let window = self
-                    .custom_window_size
-                    .unwrap_or(self.screen.content_rows());
+                let window = self.resolve_window_size();
                 // scroll_backward already clamps at 0, which is the correct behavior
                 self.screen.scroll_backward(count.unwrap_or(window));
                 self.repaint()?;
             }
             Command::WindowForward => {
                 if let Some(c) = count {
-                    self.custom_window_size = Some(c);
+                    self.custom_window_size = Some(WindowSize::Absolute(c));
                 }
-                let window = self
-                    .custom_window_size
-                    .unwrap_or(self.screen.content_rows());
+                let window = self.resolve_window_size();
                 self.screen.scroll_forward(window, total);
                 self.repaint()?;
                 self.check_eof_quit(total);
             }
             Command::WindowBackward => {
                 if let Some(c) = count {
-                    self.custom_window_size = Some(c);
+                    self.custom_window_size = Some(WindowSize::Absolute(c));
                 }
-                let window = self
-                    .custom_window_size
-                    .unwrap_or(self.screen.content_rows());
+                let window = self.resolve_window_size();
                 self.screen.scroll_backward(window);
                 self.repaint()?;
             }
@@ -3137,10 +3125,25 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.sticky_half_page
     }
 
-    /// Return the custom window size, if set by a counted `z`/`w` command.
+    /// Return the custom window size, if set by a counted `z`/`w` command or `-z` flag.
     #[must_use]
-    pub fn custom_window_size(&self) -> Option<usize> {
+    pub fn custom_window_size(&self) -> Option<WindowSize> {
         self.custom_window_size
+    }
+
+    /// Resolve the effective window size for paging commands.
+    ///
+    /// Priority: interactive `z`/`w` count > `-z` flag > screen content rows.
+    /// Negative window sizes are resolved against the current screen height.
+    fn resolve_window_size(&self) -> usize {
+        let content_rows = self.screen.content_rows();
+        match self.custom_window_size {
+            Some(ws) => ws.resolve(content_rows),
+            None => match self.runtime_options.window_size {
+                Some(ws) => ws.resolve(content_rows),
+                None => content_rows,
+            },
+        }
     }
 
     /// Enable or disable security mode (LESSSECURE).
@@ -3979,7 +3982,7 @@ mod tests {
         // "15z" sets window to 15 and scrolls forward 15
         let pager = run_pager(b"15zq", &content);
         assert_eq!(pager.screen().top_line(), 15);
-        assert_eq!(pager.custom_window_size(), Some(15));
+        assert_eq!(pager.custom_window_size(), Some(WindowSize::Absolute(15)));
     }
 
     #[test]
@@ -3988,7 +3991,7 @@ mod tests {
         // Scroll forward 30, then "10w" sets window to 10 and scrolls back 10
         let pager = run_pager(b"30j10wq", &content);
         assert_eq!(pager.screen().top_line(), 20);
-        assert_eq!(pager.custom_window_size(), Some(10));
+        assert_eq!(pager.custom_window_size(), Some(WindowSize::Absolute(10)));
     }
 
     // ── Force-scroll commands ────────────────────────────────────────

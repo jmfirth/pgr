@@ -11,8 +11,8 @@ use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_display::TabStops;
 use pgr_input::{stdin_is_pipe, LoadedFile, LogWriter, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
-    find_tag, parse_lesskey_file, resolve_pattern, ExitReason, FileEntry, FileList, KeyReader,
-    LesskeyConfig, Pager, RawTerminal, RuntimeOptions, TagState,
+    find_tag, parse_lesskey_file, resolve_pattern, ExitReason, FileEntry, FileList, JumpTarget,
+    KeyReader, LesskeyConfig, Pager, RawTerminal, RuntimeOptions, TagState, WindowSize,
 };
 
 use crate::env::EnvConfig;
@@ -440,6 +440,26 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
 
     // Wire all CLI display flags into runtime options (single call).
     let (prompt_short, prompt_medium, prompt_long) = options.custom_prompt_overrides();
+
+    // Parse -z (window size): supports negative values like -z-4.
+    let window_size = options.window_size.as_deref().and_then(|s| {
+        WindowSize::parse(s)
+            .map_err(|e| eprintln!("pgr: warning: invalid -z value: {e}"))
+            .ok()
+    });
+
+    // Parse -j (jump target): supports decimals like -j.5 and negative values.
+    let jump_target = options
+        .jump_target
+        .as_deref()
+        .map(|s| {
+            JumpTarget::parse(s).unwrap_or_else(|e| {
+                eprintln!("pgr: warning: invalid -j value: {e}");
+                JumpTarget::default()
+            })
+        })
+        .unwrap_or_default();
+
     let rt = RuntimeOptions {
         line_numbers: options.line_numbers,
         chop_long_lines: options.chop_long_lines,
@@ -451,6 +471,8 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         wordwrap: options.wordwrap,
         incsearch: options.incsearch,
         match_shift: options.match_shift,
+        window_size,
+        jump_target,
         prompt_string_short: prompt_short,
         prompt_string_medium: prompt_medium,
         prompt_string_long: prompt_long,

@@ -39,8 +39,9 @@ pub struct Options {
 
     // ── Navigation flags ──────────────────────────────────────────────
     /// Set scroll window size (default: screen height).
-    #[arg(short = 'z', long = "window")]
-    pub window_size: Option<i32>,
+    /// Negative values mean "screen height minus N" (e.g., `-z-4`).
+    #[arg(short = 'z', long = "window", allow_hyphen_values = true)]
+    pub window_size: Option<String>,
 
     /// Maximum backward scroll limit.
     #[arg(short = 'h', long = "max-back-scroll")]
@@ -52,8 +53,9 @@ pub struct Options {
 
     /// Target line for search results and goto (default: 1).
     /// Negative values count from bottom of screen.
-    #[arg(short = 'j', long = "jump-target")]
-    pub jump_target: Option<i32>,
+    /// Decimal fractions (e.g., `.5`) position at that fraction of the screen.
+    #[arg(short = 'j', long = "jump-target", allow_hyphen_values = true)]
+    pub jump_target: Option<String>,
 
     /// Horizontal scroll amount (default: half screen width).
     /// Note: the `-#` short flag is not supported by clap; use `--shift`.
@@ -913,13 +915,31 @@ mod tests {
     #[test]
     fn test_options_dash_z_sets_window_size() {
         let opts = Options::parse_from(["pgr", "-z", "20", "file.txt"]);
-        assert_eq!(opts.window_size, Some(20));
+        assert_eq!(opts.window_size.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn test_options_dash_z_negative_sets_window_size() {
+        let opts = Options::parse_from(["pgr", "-z", "-4", "file.txt"]);
+        assert_eq!(opts.window_size.as_deref(), Some("-4"));
     }
 
     #[test]
     fn test_options_dash_j_sets_jump_target() {
         let opts = Options::parse_from(["pgr", "-j", "5", "file.txt"]);
-        assert_eq!(opts.jump_target, Some(5));
+        assert_eq!(opts.jump_target.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn test_options_dash_j_decimal_sets_jump_target() {
+        let opts = Options::parse_from(["pgr", "-j", ".5", "file.txt"]);
+        assert_eq!(opts.jump_target.as_deref(), Some(".5"));
+    }
+
+    #[test]
+    fn test_options_dash_j_negative_sets_jump_target() {
+        let opts = Options::parse_from(["pgr", "-j", "-3", "file.txt"]);
+        assert_eq!(opts.jump_target.as_deref(), Some("-3"));
     }
 
     #[test]

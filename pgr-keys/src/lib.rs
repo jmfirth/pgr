@@ -37,7 +37,7 @@ pub use lesskey::{
     action_name_count, parse_lesskey_file, parse_lesskey_source, LesskeyBinding, LesskeyConfig,
 };
 pub use line_editor::{History, LineEditResult, LineEditor};
-pub use runtime_options::{HiliteMode, OptionError, RuntimeOptions};
+pub use runtime_options::{HiliteMode, JumpTarget, OptionError, RuntimeOptions, WindowSize};
 pub use tags::{find_tag, resolve_pattern, TagEntry, TagState};
 pub use terminal::{
     RawTerminal, KEYPAD_DISABLE, KEYPAD_ENABLE, MOUSE_DISABLE, MOUSE_ENABLE, MOUSE_SGR_DISABLE,

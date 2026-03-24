@@ -3,7 +3,155 @@
 //! These options can be toggled interactively while the pager is running,
 //! mirroring the behavior of GNU less's `-` command prefix.
 
+use std::fmt;
+
 use pgr_display::{RawControlMode, TabStops};
+
+/// Window size specification for the `-z` flag.
+///
+/// GNU less supports `-z-N` meaning "screen height minus N". This enum
+/// captures both absolute and relative-to-screen-height values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowSize {
+    /// An absolute number of lines (e.g., `-z20`).
+    Absolute(usize),
+    /// A negative offset from screen height (e.g., `-z-4` means `screen_height` - 4).
+    /// The stored value is the positive offset to subtract.
+    NegativeOffset(usize),
+}
+
+impl WindowSize {
+    /// Resolve this window size to an actual line count given the screen height.
+    ///
+    /// For `Absolute(n)`, returns `n` directly.
+    /// For `NegativeOffset(n)`, returns `screen_height.saturating_sub(n)`, with
+    /// a minimum of 1 to ensure the window is always at least one line.
+    #[must_use]
+    pub fn resolve(self, screen_height: usize) -> usize {
+        match self {
+            Self::Absolute(n) => n,
+            Self::NegativeOffset(n) => screen_height.saturating_sub(n).max(1),
+        }
+    }
+
+    /// Parse a window size from a string.
+    ///
+    /// Accepts positive integers (e.g., `"20"`) and negative integers
+    /// (e.g., `"-4"`) where the negative means "screen height minus N".
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if parsing fails.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let trimmed = s.trim();
+        if let Some(rest) = trimmed.strip_prefix('-') {
+            let n: usize = rest
+                .parse()
+                .map_err(|_| format!("invalid negative window size: {s}"))?;
+            Ok(Self::NegativeOffset(n))
+        } else {
+            let n: usize = trimmed
+                .parse()
+                .map_err(|_| format!("invalid window size: {s}"))?;
+            Ok(Self::Absolute(n))
+        }
+    }
+}
+
+impl fmt::Display for WindowSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absolute(n) => write!(f, "{n}"),
+            Self::NegativeOffset(n) => write!(f, "-{n}"),
+        }
+    }
+}
+
+/// Jump target specification for the `-j` flag.
+///
+/// GNU less supports `-j.5` meaning "50% of screen height". This enum
+/// captures both absolute line numbers and fractional screen positions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JumpTarget {
+    /// An absolute line number on screen (1-based, like GNU less).
+    /// Negative values count from the bottom of the screen.
+    Line(i32),
+    /// A fraction of the screen height (e.g., 0.5 for the midpoint).
+    /// Must be between 0.0 and 1.0 inclusive.
+    Fraction(f64),
+}
+
+impl JumpTarget {
+    /// Resolve this jump target to a 0-based screen row given `content_rows`.
+    ///
+    /// For `Line(n)` with positive n, returns `n - 1` (converting to 0-based).
+    /// For `Line(n)` with negative n, counts from the bottom.
+    /// For `Fraction(f)`, returns `(content_rows as f64 * f) as usize`.
+    /// The result is always clamped to `[0, content_rows.saturating_sub(1)]`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // content_rows * fraction is always small
+    #[allow(clippy::cast_sign_loss)] // result is clamped non-negative
+    #[allow(clippy::cast_precision_loss)] // content_rows fits comfortably in f64
+    pub fn resolve(self, content_rows: usize) -> usize {
+        let max_row = content_rows.saturating_sub(1);
+        match self {
+            Self::Line(n) if n > 0 => {
+                let row = (n as usize).saturating_sub(1);
+                row.min(max_row)
+            }
+            Self::Line(n) if n < 0 => {
+                let from_bottom = n.unsigned_abs() as usize;
+                content_rows.saturating_sub(from_bottom).min(max_row)
+            }
+            Self::Line(_) => 0, // n == 0 treated as top
+            Self::Fraction(f) => {
+                let row = (content_rows as f64 * f) as usize;
+                row.min(max_row)
+            }
+        }
+    }
+
+    /// Parse a jump target from a string.
+    ///
+    /// Accepts integers (e.g., `"5"`, `"-3"`), and decimal fractions
+    /// (e.g., `".5"`, `"0.5"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if parsing fails.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let trimmed = s.trim();
+        if trimmed.contains('.') {
+            let f: f64 = trimmed
+                .parse()
+                .map_err(|_| format!("invalid jump target fraction: {s}"))?;
+            if !(0.0..=1.0).contains(&f) {
+                return Err(format!("jump target fraction must be between 0 and 1: {s}"));
+            }
+            Ok(Self::Fraction(f))
+        } else {
+            let n: i32 = trimmed
+                .parse()
+                .map_err(|_| format!("invalid jump target: {s}"))?;
+            Ok(Self::Line(n))
+        }
+    }
+}
+
+impl Default for JumpTarget {
+    fn default() -> Self {
+        Self::Line(1)
+    }
+}
+
+impl fmt::Display for JumpTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Line(n) => write!(f, "{n}"),
+            Self::Fraction(v) => write!(f, "{v}"),
+        }
+    }
+}
 
 /// Search highlighting mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,11 +229,13 @@ pub struct RuntimeOptions {
     /// Tab stop configuration (`-x`).
     pub tab_stops: TabStops,
     /// Target line for search results (`-j`).
-    pub jump_target: usize,
+    /// Supports absolute line numbers, negative (from bottom), and fractional screen positions.
+    pub jump_target: JumpTarget,
     /// Horizontal scroll amount (`-#`).
     pub shift_amount: usize,
     /// Scroll window size override (`-z`).
-    pub window_size: Option<usize>,
+    /// Supports absolute values and negative offsets from screen height.
+    pub window_size: Option<WindowSize>,
     /// Maximum backward scroll limit (`-h`).
     pub max_back_scroll: Option<usize>,
     /// Maximum forward scroll limit (`-y`).
@@ -124,7 +274,7 @@ impl Default for RuntimeOptions {
             wordwrap: false,
             incsearch: false,
             tab_stops: TabStops::regular(8),
-            jump_target: 1,
+            jump_target: JumpTarget::default(),
             shift_amount: 0,
             window_size: None,
             max_back_scroll: None,
@@ -463,9 +613,10 @@ impl RuntimeOptions {
                 Ok(desc)
             }
             'j' => {
-                let n = parse_usize(flag, value)?;
-                self.jump_target = n;
-                Ok(format!("Jump target at {n}"))
+                let target =
+                    JumpTarget::parse(value).map_err(|e| OptionError::InvalidValue('j', e))?;
+                self.jump_target = target;
+                Ok(format!("Jump target at {target}"))
             }
             '#' => {
                 let n = parse_usize(flag, value)?;
@@ -473,9 +624,9 @@ impl RuntimeOptions {
                 Ok(format!("Horizontal shift is {n}"))
             }
             'z' => {
-                let n = parse_usize(flag, value)?;
-                self.window_size = Some(n);
-                Ok(format!("Window size is {n}"))
+                let ws = WindowSize::parse(value).map_err(|e| OptionError::InvalidValue('z', e))?;
+                self.window_size = Some(ws);
+                Ok(format!("Window size is {ws}"))
             }
             'h' => {
                 let n = parse_usize(flag, value)?;
@@ -801,7 +952,7 @@ mod tests {
         let msg = opts.query('x').unwrap();
         assert!(msg.contains('4'), "expected 4 in: {msg}");
 
-        opts.jump_target = 10;
+        opts.jump_target = JumpTarget::Line(10);
         let msg = opts.query('j').unwrap();
         assert!(msg.contains("10"), "expected 10 in: {msg}");
     }
@@ -956,7 +1107,7 @@ mod tests {
     fn test_set_value_z_sets_window_size() {
         let mut opts = RuntimeOptions::default();
         let msg = opts.set_value('z', "20").unwrap();
-        assert_eq!(opts.window_size, Some(20));
+        assert_eq!(opts.window_size, Some(WindowSize::Absolute(20)));
         assert!(msg.contains("20"));
     }
 
@@ -964,7 +1115,7 @@ mod tests {
     fn test_set_value_j_sets_jump_target() {
         let mut opts = RuntimeOptions::default();
         let msg = opts.set_value('j', "5").unwrap();
-        assert_eq!(opts.jump_target, 5);
+        assert_eq!(opts.jump_target, JumpTarget::Line(5));
         assert!(msg.contains('5'));
     }
 
@@ -1146,5 +1297,236 @@ mod tests {
         let mut opts = RuntimeOptions::default();
         opts.match_shift = Some(10);
         assert_eq!(opts.match_shift, Some(10));
+    }
+
+    // ── WindowSize tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_window_size_parse_positive_integer() {
+        let ws = WindowSize::parse("20").unwrap();
+        assert_eq!(ws, WindowSize::Absolute(20));
+    }
+
+    #[test]
+    fn test_window_size_parse_negative_integer() {
+        let ws = WindowSize::parse("-4").unwrap();
+        assert_eq!(ws, WindowSize::NegativeOffset(4));
+    }
+
+    #[test]
+    fn test_window_size_parse_invalid_returns_error() {
+        assert!(WindowSize::parse("abc").is_err());
+    }
+
+    #[test]
+    fn test_window_size_parse_negative_invalid_returns_error() {
+        assert!(WindowSize::parse("-abc").is_err());
+    }
+
+    #[test]
+    fn test_window_size_resolve_absolute() {
+        let ws = WindowSize::Absolute(20);
+        assert_eq!(ws.resolve(40), 20);
+    }
+
+    #[test]
+    fn test_window_size_resolve_negative_offset() {
+        let ws = WindowSize::NegativeOffset(4);
+        assert_eq!(ws.resolve(40), 36);
+    }
+
+    #[test]
+    fn test_window_size_resolve_negative_offset_larger_than_screen() {
+        let ws = WindowSize::NegativeOffset(50);
+        // Should clamp to minimum of 1
+        assert_eq!(ws.resolve(40), 1);
+    }
+
+    #[test]
+    fn test_window_size_resolve_negative_offset_equal_to_screen() {
+        let ws = WindowSize::NegativeOffset(40);
+        // saturating_sub gives 0, max(1) gives 1
+        assert_eq!(ws.resolve(40), 1);
+    }
+
+    #[test]
+    fn test_window_size_display_absolute() {
+        assert_eq!(WindowSize::Absolute(20).to_string(), "20");
+    }
+
+    #[test]
+    fn test_window_size_display_negative_offset() {
+        assert_eq!(WindowSize::NegativeOffset(4).to_string(), "-4");
+    }
+
+    #[test]
+    fn test_set_value_z_negative_sets_window_size() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('z', "-4").unwrap();
+        assert_eq!(opts.window_size, Some(WindowSize::NegativeOffset(4)));
+        assert!(msg.contains("-4"));
+    }
+
+    // ── JumpTarget tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_jump_target_parse_positive_integer() {
+        let jt = JumpTarget::parse("5").unwrap();
+        assert_eq!(jt, JumpTarget::Line(5));
+    }
+
+    #[test]
+    fn test_jump_target_parse_negative_integer() {
+        let jt = JumpTarget::parse("-3").unwrap();
+        assert_eq!(jt, JumpTarget::Line(-3));
+    }
+
+    #[test]
+    fn test_jump_target_parse_decimal_dot_prefix() {
+        let jt = JumpTarget::parse(".5").unwrap();
+        assert_eq!(jt, JumpTarget::Fraction(0.5));
+    }
+
+    #[test]
+    fn test_jump_target_parse_decimal_zero_prefix() {
+        let jt = JumpTarget::parse("0.5").unwrap();
+        assert_eq!(jt, JumpTarget::Fraction(0.5));
+    }
+
+    #[test]
+    fn test_jump_target_parse_decimal_zero() {
+        let jt = JumpTarget::parse("0.0").unwrap();
+        assert_eq!(jt, JumpTarget::Fraction(0.0));
+    }
+
+    #[test]
+    fn test_jump_target_parse_decimal_one() {
+        let jt = JumpTarget::parse("1.0").unwrap();
+        assert_eq!(jt, JumpTarget::Fraction(1.0));
+    }
+
+    #[test]
+    fn test_jump_target_parse_decimal_out_of_range_returns_error() {
+        assert!(JumpTarget::parse("1.5").is_err());
+    }
+
+    #[test]
+    fn test_jump_target_parse_invalid_returns_error() {
+        assert!(JumpTarget::parse("abc").is_err());
+    }
+
+    #[test]
+    fn test_jump_target_resolve_positive_line() {
+        // Line 5 on a 24-line screen -> row 4 (0-based)
+        let jt = JumpTarget::Line(5);
+        assert_eq!(jt.resolve(24), 4);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_line_one() {
+        // Line 1 -> row 0
+        let jt = JumpTarget::Line(1);
+        assert_eq!(jt.resolve(24), 0);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_negative_line() {
+        // -3 on a 24-line screen -> 24 - 3 = 21
+        let jt = JumpTarget::Line(-3);
+        assert_eq!(jt.resolve(24), 21);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_negative_line_beyond_screen() {
+        // -30 on a 24-line screen -> 24 - 30 saturates to 0
+        let jt = JumpTarget::Line(-30);
+        assert_eq!(jt.resolve(24), 0);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_zero_line() {
+        // 0 treated as top
+        let jt = JumpTarget::Line(0);
+        assert_eq!(jt.resolve(24), 0);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_line_beyond_screen() {
+        // Line 100 on a 24-line screen -> clamped to 23 (max row)
+        let jt = JumpTarget::Line(100);
+        assert_eq!(jt.resolve(24), 23);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_fraction_half() {
+        // 0.5 on a 24-line screen -> row 12
+        let jt = JumpTarget::Fraction(0.5);
+        assert_eq!(jt.resolve(24), 12);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_fraction_zero() {
+        let jt = JumpTarget::Fraction(0.0);
+        assert_eq!(jt.resolve(24), 0);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_fraction_one() {
+        // 1.0 on a 24-line screen -> 24, clamped to 23
+        let jt = JumpTarget::Fraction(1.0);
+        assert_eq!(jt.resolve(24), 23);
+    }
+
+    #[test]
+    fn test_jump_target_resolve_fraction_quarter() {
+        // 0.25 on a 24-line screen -> row 6
+        let jt = JumpTarget::Fraction(0.25);
+        assert_eq!(jt.resolve(24), 6);
+    }
+
+    #[test]
+    fn test_jump_target_default_is_line_one() {
+        assert_eq!(JumpTarget::default(), JumpTarget::Line(1));
+    }
+
+    #[test]
+    fn test_jump_target_display_line() {
+        assert_eq!(JumpTarget::Line(5).to_string(), "5");
+        assert_eq!(JumpTarget::Line(-3).to_string(), "-3");
+    }
+
+    #[test]
+    fn test_jump_target_display_fraction() {
+        assert_eq!(JumpTarget::Fraction(0.5).to_string(), "0.5");
+    }
+
+    #[test]
+    fn test_set_value_j_decimal_sets_jump_target_fraction() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('j', ".5").unwrap();
+        assert_eq!(opts.jump_target, JumpTarget::Fraction(0.5));
+        assert!(msg.contains("0.5"));
+    }
+
+    #[test]
+    fn test_set_value_j_negative_sets_jump_target_negative() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('j', "-3").unwrap();
+        assert_eq!(opts.jump_target, JumpTarget::Line(-3));
+        assert!(msg.contains("-3"));
+    }
+
+    #[test]
+    fn test_set_value_j_invalid_returns_error() {
+        let mut opts = RuntimeOptions::default();
+        let err = opts.set_value('j', "abc").unwrap_err();
+        assert!(matches!(err, OptionError::InvalidValue('j', _)));
+    }
+
+    #[test]
+    fn test_set_value_z_invalid_returns_error() {
+        let mut opts = RuntimeOptions::default();
+        let err = opts.set_value('z', "abc").unwrap_err();
+        assert!(matches!(err, OptionError::InvalidValue('z', _)));
     }
 }
