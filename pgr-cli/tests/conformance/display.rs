@@ -112,13 +112,18 @@ fn test_conformance_display_prompt_multiple_files() {
 ///
 /// With `-r`, all escape sequences (including cursor movement) should pass
 /// through to the terminal. Both pagers should produce identical output.
+/// Uses `-f` to suppress the binary-file warning that less shows for raw ESC bytes.
+/// Copies the fixture to a temp file so the prompt path fits in 80 columns
+/// (avoids prompt wrapping that would steal a content row).
 #[test]
-#[ignore = "less 581 treats ANSI fixture as binary; pgr -r handling differs"]
+#[ignore = "conformance: requires GNU less, slow PTY test"]
 fn test_conformance_display_ansi_raw_mode() {
     skip_if_no_less!();
-    let path = fixture_path("ansi_colors.txt");
-    let path_str = path.to_str().unwrap();
-    assert_content_conformance(&["-r"], path_str, "");
+    let fixture = fixture_path("ansi_colors.txt");
+    let content = std::fs::read_to_string(&fixture).unwrap();
+    let tmp = generate_file(&content);
+    let path_str = tmp.path().to_str().unwrap();
+    assert_content_conformance(&["-f", "-r"], path_str, "");
 }
 
 /// Test 8: `-R` SGR-only mode passes through SGR sequences, strips others.
@@ -138,28 +143,34 @@ fn test_conformance_display_ansi_sgr_only_mode() {
 ///
 /// Without any raw/ANSI flags, escape characters should be displayed as
 /// visible caret notation (e.g., `^[` for ESC).
+/// Uses `-f` to suppress the binary-file warning that less shows for raw ESC bytes.
+/// Copies the fixture to a temp file so the prompt path fits in 80 columns
+/// (avoids prompt wrapping that would steal a content row).
 #[test]
-#[ignore = "less 581 treats ANSI fixture as binary; pgr caret notation differs"]
+#[ignore = "pgr does not yet display ESC as caret notation in default mode"]
 fn test_conformance_display_ansi_default_caret_notation() {
     skip_if_no_less!();
-    let path = fixture_path("ansi_colors.txt");
-    let path_str = path.to_str().unwrap();
-    assert_content_conformance(&[], path_str, "");
+    let fixture = fixture_path("ansi_colors.txt");
+    let content = std::fs::read_to_string(&fixture).unwrap();
+    let tmp = generate_file(&content);
+    let path_str = tmp.path().to_str().unwrap();
+    assert_content_conformance(&["-f"], path_str, "");
 }
 
 /// Test 10: Color preservation with `-R`.
 ///
 /// A file with colored text should display the colors correctly when using
 /// `-R`. Both pagers should produce identical colored output.
+/// Uses `-f` to suppress the binary-file warning that less shows for raw ESC bytes.
 #[test]
-#[ignore = "less 581 treats ANSI fixture as binary; pgr -R handling differs"]
+#[ignore = "pgr -R SGR passthrough not fully implemented"]
 fn test_conformance_display_color_preservation_with_r() {
     skip_if_no_less!();
     let path = fixture_path("ansi_colors.txt");
     let path_str = path.to_str().unwrap();
 
-    let mut pgr = PagerSession::spawn_pgr(&["-R"], path_str, TEST_ROWS, TEST_COLS);
-    let mut less = PagerSession::spawn_less(&["-R"], path_str, TEST_ROWS, TEST_COLS);
+    let mut pgr = PagerSession::spawn_pgr(&["-f", "-R"], path_str, TEST_ROWS, TEST_COLS);
+    let mut less = PagerSession::spawn_less(&["-f", "-R"], path_str, TEST_ROWS, TEST_COLS);
 
     pgr.settle(SETTLE_INITIAL);
     less.settle(SETTLE_INITIAL);
