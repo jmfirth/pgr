@@ -33,7 +33,7 @@ use crate::key::Key;
 use crate::key_reader::KeyReader;
 use crate::keymap::Keymap;
 use crate::lesskey::LesskeyConfig;
-use crate::line_editor::{LineEditResult, LineEditor};
+use crate::line_editor::{History, LineEditResult, LineEditor};
 use crate::runtime_options::RuntimeOptions;
 use crate::shell;
 use crate::tags::TagState;
@@ -161,6 +161,8 @@ pub struct Pager<R: Read, W: Write> {
     editing_search: bool,
     /// Line editor instance for search/command prompt input.
     line_editor: Option<LineEditor>,
+    /// History of previous search inputs (shared between `/` and `?`).
+    search_history: History,
     /// Direction for the current search prompt (set when `/` or `?` is pressed).
     search_prompt_direction: SearchDirection,
     /// The modifiers from the last search, used for repeat-search commands.
@@ -250,6 +252,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             highlight_state: HighlightState::new(),
             editing_search: false,
             line_editor: None,
+            search_history: History::new(),
             search_prompt_direction: SearchDirection::Forward,
             last_modifiers: SearchModifiers::new(),
             filter: FilterState::new(),
@@ -1019,7 +1022,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
 
         let result = if let Some(ref mut editor) = self.line_editor {
-            editor.process_key(key)
+            editor.process_key_with_history(key, &self.search_history)
         } else {
             // Should not happen, but recover gracefully.
             self.editing_search = false;
@@ -1034,6 +1037,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.editing_search = false;
                 let count = self.pending_count.take();
                 self.line_editor = None;
+                self.search_history.push(pattern_str.clone());
                 self.submit_search(&pattern_str, self.search_prompt_direction, count)?;
             }
             LineEditResult::Cancel => {
