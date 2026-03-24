@@ -137,9 +137,40 @@ impl Keymap {
             // Tag navigation
             (Key::Char('t'), Command::NextTag),
             (Key::Char('T'), Command::PrevTag),
+            // Mouse scroll (default 3 lines per wheel tick)
+            (Key::ScrollUp, Command::ScrollBackward(3)),
+            (Key::ScrollDown, Command::ScrollForward(3)),
         ];
 
         Self { bindings }
+    }
+
+    /// Update the scroll amount for mouse wheel bindings.
+    ///
+    /// Replaces the `ScrollBackward`/`ScrollForward` commands bound to
+    /// `ScrollUp`/`ScrollDown` with the given line count.
+    pub fn set_wheel_lines(&mut self, lines: usize) {
+        for (key, command) in &mut self.bindings {
+            match key {
+                Key::ScrollUp => *command = Command::ScrollBackward(lines),
+                Key::ScrollDown => *command = Command::ScrollForward(lines),
+                _ => {}
+            }
+        }
+    }
+
+    /// Update the scroll direction for mouse wheel bindings (reversed mode).
+    ///
+    /// Swaps the direction of `ScrollUp` and `ScrollDown` bindings, so
+    /// wheel up scrolls forward and wheel down scrolls backward.
+    pub fn set_wheel_reversed(&mut self, lines: usize) {
+        for (key, command) in &mut self.bindings {
+            match key {
+                Key::ScrollUp => *command = Command::ScrollForward(lines),
+                Key::ScrollDown => *command = Command::ScrollBackward(lines),
+                _ => {}
+            }
+        }
     }
 
     /// Apply lesskey configuration, overriding or extending the keymap.
@@ -623,5 +654,44 @@ mod tests {
             keymap.lookup(&Key::EscSeq('F')),
             Command::FollowModeStopOnMatch
         );
+    }
+
+    // ── Task 221: Mouse scroll key bindings ──
+
+    #[test]
+    fn test_keymap_scroll_up_maps_to_scroll_backward_3() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::ScrollUp), Command::ScrollBackward(3));
+    }
+
+    #[test]
+    fn test_keymap_scroll_down_maps_to_scroll_forward_3() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::ScrollDown), Command::ScrollForward(3));
+    }
+
+    #[test]
+    fn test_keymap_set_wheel_lines_updates_scroll_amount() {
+        let mut keymap = Keymap::default_less();
+        keymap.set_wheel_lines(5);
+        assert_eq!(keymap.lookup(&Key::ScrollUp), Command::ScrollBackward(5));
+        assert_eq!(keymap.lookup(&Key::ScrollDown), Command::ScrollForward(5));
+    }
+
+    #[test]
+    fn test_keymap_set_wheel_reversed_swaps_direction() {
+        let mut keymap = Keymap::default_less();
+        keymap.set_wheel_reversed(3);
+        assert_eq!(keymap.lookup(&Key::ScrollUp), Command::ScrollForward(3));
+        assert_eq!(keymap.lookup(&Key::ScrollDown), Command::ScrollBackward(3));
+    }
+
+    #[test]
+    fn test_keymap_set_wheel_lines_does_not_affect_other_bindings() {
+        let mut keymap = Keymap::default_less();
+        keymap.set_wheel_lines(10);
+        // Verify other scroll bindings are unchanged.
+        assert_eq!(keymap.lookup(&Key::Down), Command::ScrollForward(1));
+        assert_eq!(keymap.lookup(&Key::Up), Command::ScrollBackward(1));
     }
 }

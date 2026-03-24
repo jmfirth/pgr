@@ -77,6 +77,28 @@ impl Drop for RawTerminal {
     }
 }
 
+/// Escape sequence to enable X11 mouse tracking (normal mode).
+///
+/// Sent to the terminal to request mouse button press/release reports.
+/// Combine with [`MOUSE_SGR_ENABLE`] for extended coordinate support.
+pub const MOUSE_ENABLE: &[u8] = b"\x1b[?1000h";
+
+/// Escape sequence to disable X11 mouse tracking.
+///
+/// Sent on pager exit to stop mouse event reporting and restore normal
+/// terminal behavior. Should be paired with [`MOUSE_SGR_DISABLE`].
+pub const MOUSE_DISABLE: &[u8] = b"\x1b[?1000l";
+
+/// Escape sequence to enable SGR (extended) mouse mode.
+///
+/// SGR mode uses a more parseable format (`ESC[<...M`/`ESC[<...m`)
+/// and supports coordinates beyond column/row 223. Recommended when
+/// combined with [`MOUSE_ENABLE`].
+pub const MOUSE_SGR_ENABLE: &[u8] = b"\x1b[?1006h";
+
+/// Escape sequence to disable SGR (extended) mouse mode.
+pub const MOUSE_SGR_DISABLE: &[u8] = b"\x1b[?1006l";
+
 /// Read current terminal attributes via `tcgetattr`.
 fn get_termios(fd: RawFd) -> std::io::Result<libc::termios> {
     // SAFETY: `tcgetattr` reads terminal attributes into a `termios` struct.
@@ -99,4 +121,29 @@ fn set_termios(fd: RawFd, termios: &libc::termios) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mouse_enable_sequence_is_correct() {
+        assert_eq!(MOUSE_ENABLE, b"\x1b[?1000h");
+    }
+
+    #[test]
+    fn test_mouse_disable_sequence_is_correct() {
+        assert_eq!(MOUSE_DISABLE, b"\x1b[?1000l");
+    }
+
+    #[test]
+    fn test_mouse_sgr_enable_sequence_is_correct() {
+        assert_eq!(MOUSE_SGR_ENABLE, b"\x1b[?1006h");
+    }
+
+    #[test]
+    fn test_mouse_sgr_disable_sequence_is_correct() {
+        assert_eq!(MOUSE_SGR_DISABLE, b"\x1b[?1006l");
+    }
 }
