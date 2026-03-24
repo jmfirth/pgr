@@ -3079,6 +3079,17 @@ impl<R: Read, W: Write> Pager<R, W> {
         editor.clone_into(&mut self.editor);
     }
 
+    /// Replace the search history with a pre-loaded one.
+    pub fn set_search_history(&mut self, history: History) {
+        self.search_history = history;
+    }
+
+    /// Return a reference to the search history.
+    #[must_use]
+    pub fn search_history(&self) -> &History {
+        &self.search_history
+    }
+
     /// Set the raw file descriptor for the key input source.
     ///
     /// When set, follow mode uses kqueue to efficiently multiplex between

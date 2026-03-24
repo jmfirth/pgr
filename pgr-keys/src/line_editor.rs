@@ -119,6 +119,25 @@ impl History {
             .find(|(_, e)| e.starts_with(prefix))
             .map(|(i, e)| (from + i, e.as_str()))
     }
+
+    /// Return a slice of all history entries (oldest first).
+    #[must_use]
+    pub fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    /// Create a history from a list of entries and a maximum size.
+    ///
+    /// If `entries` contains more items than `max_size`, only the last
+    /// `max_size` entries are retained.
+    #[must_use]
+    pub fn from_entries(entries: &[String], max_size: usize) -> Self {
+        let start = entries.len().saturating_sub(max_size);
+        Self {
+            entries: entries[start..].to_vec(),
+            max_size,
+        }
+    }
 }
 
 impl Default for History {
@@ -1435,5 +1454,56 @@ mod tests {
         let result = editor.process_key(&Key::Tab);
         assert_eq!(result, LineEditResult::Continue);
         assert!(editor.contents().contains("unique_test_file.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // History::entries / History::from_entries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_history_entries_returns_all_entries() {
+        let mut h = History::new();
+        h.push("a".to_string());
+        h.push("b".to_string());
+        let entries = h.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "a");
+        assert_eq!(entries[1], "b");
+    }
+
+    #[test]
+    fn test_history_entries_empty_returns_empty_slice() {
+        let h = History::new();
+        assert!(h.entries().is_empty());
+    }
+
+    #[test]
+    fn test_history_from_entries_basic() {
+        let entries = vec!["x".to_string(), "y".to_string()];
+        let h = History::from_entries(&entries, 100);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get(0), Some("x"));
+        assert_eq!(h.get(1), Some("y"));
+    }
+
+    #[test]
+    fn test_history_from_entries_truncates_to_max_size() {
+        let entries = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let h = History::from_entries(&entries, 2);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get(0), Some("c"));
+        assert_eq!(h.get(1), Some("d"));
+    }
+
+    #[test]
+    fn test_history_from_entries_empty_vec() {
+        let entries: Vec<String> = Vec::new();
+        let h = History::from_entries(&entries, 50);
+        assert!(h.is_empty());
     }
 }

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
-    find_tag, parse_lesskey_file, resolve_pattern, FileEntry, FileList, KeyReader, LesskeyConfig,
-    Pager, RawTerminal, RuntimeOptions, TagState,
+    find_tag, load_history, parse_lesskey_file, resolve_pattern, save_history, FileEntry, FileList,
+    KeyReader, LesskeyConfig, Pager, RawTerminal, RuntimeOptions, TagState,
 };
 
 use crate::env::EnvConfig;
@@ -193,6 +193,36 @@ fn check_quit_if_one_screen_pipe(
     Ok(false)
 }
 
+/// Load search history from disk and inject it into the pager.
+///
+/// Silently ignores errors (history is best-effort).
+fn load_and_set_history<R: std::io::Read, W: std::io::Write>(
+    pager: &mut Pager<R, W>,
+    env_config: &EnvConfig,
+) {
+    if let Some(path) = env_config.history_file_path() {
+        if let Ok((search, _shell)) = load_history(&path, env_config.histsize) {
+            pager.set_search_history(search);
+        }
+    }
+}
+
+/// Save search history from the pager back to disk.
+///
+/// Silently ignores errors (history is best-effort).
+fn save_pager_history<R: std::io::Read, W: std::io::Write>(
+    pager: &Pager<R, W>,
+    env_config: &EnvConfig,
+) {
+    use pgr_keys::History;
+
+    if let Some(path) = env_config.history_file_path() {
+        let search = pager.search_history();
+        let shell = History::new();
+        let _ = save_history(&path, search, &shell);
+    }
+}
+
 fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     if !stdin_is_pipe() && options.files.is_empty() {
         eprintln!("pgr: missing filename (\"pgr --help\" for help)");
@@ -237,11 +267,14 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
         pager.set_secure_mode(true);
     }
 
+    load_and_set_history(&mut pager, &env_config);
+
     if options.file_size {
         pager.index_all_immediate()?;
     }
 
     pager.run()?;
+    save_pager_history(&pager, &env_config);
     drop(pager);
     drop(raw_terminal);
     drop(tty_raw);
@@ -338,6 +371,8 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
         pager.set_secure_mode(true);
     }
 
+    load_and_set_history(&mut pager, &env_config);
+
     if file_list.file_count() > 1 {
         pager.set_file_list(file_list);
     }
@@ -347,6 +382,7 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     }
 
     pager.run()?;
+    save_pager_history(&pager, &env_config);
     drop(pager);
     drop(raw_terminal);
     drop(tty_raw);
@@ -569,6 +605,8 @@ fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<()> {
         pager.set_secure_mode(true);
     }
 
+    load_and_set_history(&mut pager, &env_config);
+
     // Position at the tag's location via an initial command.
     if let Some(line) = target_line {
         // +Ng jumps to 1-based line N.
@@ -576,6 +614,7 @@ fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<()> {
     }
 
     pager.run()?;
+    save_pager_history(&pager, &env_config);
     drop(pager);
     drop(raw_terminal);
     drop(tty_raw);
