@@ -3,12 +3,14 @@
 mod env;
 mod options;
 
+use std::io::Cursor;
 use std::os::unix::io::AsRawFd;
 
 use pgr_core::{Buffer, LineIndex, MarkStore};
-use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer};
+use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{FileEntry, FileList, KeyReader, Pager, RawTerminal, RuntimeOptions};
 
+use crate::env::EnvConfig;
 use crate::options::Options;
 
 /// Query terminal dimensions without entering raw mode.
@@ -46,6 +48,56 @@ fn file_entry_from_path(path: &std::path::Path) -> anyhow::Result<FileEntry> {
         saved_top_line: 0,
         saved_horizontal_offset: 0,
     })
+}
+
+/// Create a [`FileEntry`] from in-memory byte data (preprocessor pipe output).
+///
+/// Immediately drains the data into the `PipeBuffer` so it's available for
+/// random-access reads without needing further `refresh()` calls.
+fn file_entry_from_bytes(data: Vec<u8>, display_name: String) -> anyhow::Result<FileEntry> {
+    let mut pipe = PipeBuffer::new(Cursor::new(data));
+    // Drain the cursor into the PipeBuffer so all data is immediately available.
+    while !pipe.is_eof() {
+        pipe.refresh()?;
+    }
+    let buf_len = pipe.len() as u64;
+    let buffer: Box<dyn Buffer> = Box::new(pipe);
+    let index = LineIndex::new(buf_len);
+    Ok(FileEntry {
+        path: None,
+        display_name,
+        buffer,
+        index,
+        marks: MarkStore::new(),
+        saved_top_line: 0,
+        saved_horizontal_offset: 0,
+    })
+}
+
+/// Try to preprocess a file through LESSOPEN. Falls back to direct open.
+///
+/// If a preprocessor is active, runs it and returns the appropriate `FileEntry`.
+/// Otherwise opens the file directly.
+fn file_entry_with_preproc(
+    path: &std::path::Path,
+    preprocessor: Option<&Preprocessor>,
+) -> anyhow::Result<FileEntry> {
+    if let Some(preproc) = preprocessor {
+        let filename = path.to_string_lossy();
+        match preproc.preprocess(&filename)? {
+            PreprocessResult::PipeData(data) => {
+                let display_name = path.display().to_string();
+                return file_entry_from_bytes(data, display_name);
+            }
+            PreprocessResult::ReplacementFile(repl_path) => {
+                return file_entry_from_path(&repl_path);
+            }
+            PreprocessResult::Unchanged => {
+                // Fall through to normal open.
+            }
+        }
+    }
+    file_entry_from_path(path)
 }
 
 /// Create a [`FileEntry`] backed by stdin via a [`PipeBuffer`].
@@ -169,13 +221,24 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
 }
 
 fn run_file_mode(options: &Options) -> anyhow::Result<()> {
+    // Set up LESSOPEN preprocessor if configured and not disabled.
+    let env_config = EnvConfig::from_env();
+    let preprocessor = if options.no_lessopen || env_config.secure_mode {
+        None
+    } else {
+        env_config.lessopen.as_deref().and_then(|lo| {
+            let shell = env_config.shell_command();
+            Preprocessor::new(lo, env_config.lessclose.as_deref(), shell)
+        })
+    };
+
     // Build a FileList from all named files (and `-` for stdin).
     let mut entries: Vec<FileEntry> = Vec::with_capacity(options.files.len());
     for path in &options.files {
         if path.to_str() == Some("-") {
             entries.push(file_entry_from_stdin());
         } else {
-            entries.push(file_entry_from_path(path)?);
+            entries.push(file_entry_with_preproc(path, preprocessor.as_ref())?);
         }
     }
     let mut file_list = FileList::new(entries.remove(0));
@@ -189,18 +252,43 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
 
     // Build the pager's own buffer for the first file.
     // For named files, re-open (FileList holds its own copy).
-    // For stdin entries in the list, create a fresh PipeBuffer.
+    // For preprocessed or stdin entries, create an appropriate buffer.
     let filename = file_list.current().display_name.clone();
-    let (buffer, index): (Box<dyn Buffer>, LineIndex) =
-        if let Some(path) = file_list.current().path.as_ref() {
-            let loaded = LoadedFile::open(path)?;
-            loaded.into_parts()
-        } else {
+    let first_path = options.files.first();
+    let (buffer, index): (Box<dyn Buffer>, LineIndex) = if let Some(path) = first_path {
+        if path.to_str() == Some("-") {
             let pipe = PipeBuffer::new(std::io::stdin());
             let buf: Box<dyn Buffer> = Box::new(pipe);
             let len = buf.len() as u64;
             (buf, LineIndex::new(len))
-        };
+        } else if let Some(ref preproc) = preprocessor {
+            let fname = path.to_string_lossy();
+            match preproc.preprocess(&fname)? {
+                PreprocessResult::PipeData(data) => {
+                    let pipe = PipeBuffer::new(Cursor::new(data));
+                    let buf: Box<dyn Buffer> = Box::new(pipe);
+                    let len = buf.len() as u64;
+                    (buf, LineIndex::new(len))
+                }
+                PreprocessResult::ReplacementFile(repl) => {
+                    let loaded = LoadedFile::open(&repl)?;
+                    loaded.into_parts()
+                }
+                PreprocessResult::Unchanged => {
+                    let loaded = LoadedFile::open(path)?;
+                    loaded.into_parts()
+                }
+            }
+        } else {
+            let loaded = LoadedFile::open(path)?;
+            loaded.into_parts()
+        }
+    } else {
+        let pipe = PipeBuffer::new(std::io::stdin());
+        let buf: Box<dyn Buffer> = Box::new(pipe);
+        let len = buf.len() as u64;
+        (buf, LineIndex::new(len))
+    };
 
     // Open /dev/tty twice: one handle for raw-mode RAII, one for key reading.
     let tty_raw = std::fs::File::open("/dev/tty")?;
