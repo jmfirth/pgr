@@ -31,7 +31,7 @@ pub use keymap::Keymap;
 pub use lesskey::{
     action_name_count, parse_lesskey_file, parse_lesskey_source, LesskeyBinding, LesskeyConfig,
 };
-pub use line_editor::{LineEditResult, LineEditor};
+pub use line_editor::{History, LineEditResult, LineEditor};
 pub use runtime_options::{HiliteMode, OptionError, RuntimeOptions};
 pub use tags::{find_tag, resolve_pattern, TagEntry, TagState};
 pub use terminal::{

@@ -4,6 +4,9 @@ use std::io::Write;
 
 use crate::key::Key;
 
+/// Default maximum number of entries stored in a history list.
+const DEFAULT_HISTORY_MAX: usize = 100;
+
 /// Result of processing a key event in the line editor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineEditResult {
@@ -13,6 +16,111 @@ pub enum LineEditResult {
     Confirm(String),
     /// The user pressed Escape or Ctrl+C. Editing was cancelled.
     Cancel,
+}
+
+/// In-memory history of previous command/search inputs.
+///
+/// Stores entries in chronological order (oldest first). Supports
+/// prefix-filtered backward/forward search for up/down arrow recall.
+pub struct History {
+    /// The stored entries, oldest first.
+    entries: Vec<String>,
+    /// Maximum number of entries to retain.
+    max_size: usize,
+}
+
+impl History {
+    /// Create a new empty history with the default maximum size.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            max_size: DEFAULT_HISTORY_MAX,
+        }
+    }
+
+    /// Create a new empty history with the given maximum size.
+    #[must_use]
+    pub fn with_max_size(max_size: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_size,
+        }
+    }
+
+    /// Add an entry to the history.
+    ///
+    /// Empty strings are not added. Duplicate consecutive entries are
+    /// deduplicated. If the history exceeds the maximum size, the oldest
+    /// entry is removed.
+    pub fn push(&mut self, entry: String) {
+        if entry.is_empty() {
+            return;
+        }
+        // Deduplicate consecutive entries.
+        if self.entries.last().is_some_and(|last| *last == entry) {
+            return;
+        }
+        self.entries.push(entry);
+        if self.entries.len() > self.max_size {
+            self.entries.remove(0);
+        }
+    }
+
+    /// Return the number of history entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Return whether the history is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Get an entry by index (0 = oldest).
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&str> {
+        self.entries.get(index).map(String::as_str)
+    }
+
+    /// Search backward from `from` for an entry starting with `prefix`.
+    ///
+    /// `from` is an exclusive upper bound: searching starts at `from - 1`.
+    /// Returns the index and text of the matching entry, or `None`.
+    #[must_use]
+    pub fn search_backward(&self, prefix: &str, from: usize) -> Option<(usize, &str)> {
+        let start = from.min(self.entries.len());
+        self.entries[..start]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, e)| e.starts_with(prefix))
+            .map(|(i, e)| (i, e.as_str()))
+    }
+
+    /// Search forward from `from` for an entry starting with `prefix`.
+    ///
+    /// `from` is an inclusive lower bound: searching starts at `from`.
+    /// Returns the index and text of the matching entry, or `None`.
+    #[must_use]
+    pub fn search_forward(&self, prefix: &str, from: usize) -> Option<(usize, &str)> {
+        if from >= self.entries.len() {
+            return None;
+        }
+        self.entries[from..]
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.starts_with(prefix))
+            .map(|(i, e)| (from + i, e.as_str()))
+    }
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A single-line text editor for command prompts and search input.
@@ -27,6 +135,10 @@ pub struct LineEditor {
     cursor: usize,
     /// The prompt prefix displayed before the input (e.g., "/" or ":").
     prompt: String,
+    /// The user's original input before history navigation began.
+    saved_input: Option<String>,
+    /// Current position in history during navigation (`None` = not navigating).
+    history_pos: Option<usize>,
 }
 
 impl LineEditor {
@@ -40,6 +152,8 @@ impl LineEditor {
             buf: String::new(),
             cursor: 0,
             prompt: prompt.to_owned(),
+            saved_input: None,
+            history_pos: None,
         }
     }
 
@@ -52,6 +166,8 @@ impl LineEditor {
             buf: initial.to_owned(),
             cursor: initial.len(),
             prompt: prompt.to_owned(),
+            saved_input: None,
+            history_pos: None,
         }
     }
 
@@ -60,19 +176,103 @@ impl LineEditor {
     pub fn process_key(&mut self, key: &Key) -> LineEditResult {
         match key {
             Key::Enter => return LineEditResult::Confirm(self.buf.clone()),
-            Key::Escape | Key::Ctrl('c') => return LineEditResult::Cancel,
-            Key::Char(c) => self.insert(*c),
-            Key::Backspace => self.backspace(),
-            Key::Delete => self.delete(),
-            Key::Ctrl('u') => self.clear(),
+            Key::Escape | Key::Ctrl('c' | 'g') => return LineEditResult::Cancel,
+            Key::Char(c) => {
+                self.reset_history_nav();
+                self.insert(*c);
+            }
+            Key::Backspace => {
+                self.reset_history_nav();
+                self.backspace();
+            }
+            Key::Delete => {
+                self.reset_history_nav();
+                self.delete();
+            }
+            Key::Ctrl('u') => {
+                self.reset_history_nav();
+                self.clear();
+            }
             Key::Ctrl('a') | Key::Home => self.home(),
             Key::Ctrl('e') | Key::End => self.end(),
             Key::Left => self.cursor_left(),
             Key::Right => self.cursor_right(),
-            Key::Ctrl('w') => self.delete_word_backward(),
+            Key::Ctrl('w') => {
+                self.reset_history_nav();
+                self.delete_word_backward();
+            }
             _ => {}
         }
         LineEditResult::Continue
+    }
+
+    /// Process a key event with history support.
+    ///
+    /// Up/Down arrow keys navigate the history with prefix filtering
+    /// based on the text typed before the first Up press. All other keys
+    /// are delegated to [`process_key`](Self::process_key).
+    #[allow(clippy::missing_panics_doc)] // No panics possible
+    pub fn process_key_with_history(&mut self, key: &Key, history: &History) -> LineEditResult {
+        match key {
+            Key::Up => {
+                self.history_up(history);
+                LineEditResult::Continue
+            }
+            Key::Down => {
+                self.history_down(history);
+                LineEditResult::Continue
+            }
+            _ => self.process_key(key),
+        }
+    }
+
+    /// Navigate backward (older) in history with prefix filtering.
+    fn history_up(&mut self, history: &History) {
+        if history.is_empty() {
+            return;
+        }
+
+        // On the first Up press, save the current input as the prefix.
+        if self.saved_input.is_none() {
+            self.saved_input = Some(self.buf.clone());
+        }
+
+        let prefix = self.saved_input.as_deref().unwrap_or("");
+        let from = self.history_pos.unwrap_or(history.len());
+
+        if let Some((idx, entry)) = history.search_backward(prefix, from) {
+            self.history_pos = Some(idx);
+            self.buf = entry.to_owned();
+            self.cursor = self.buf.len();
+        }
+    }
+
+    /// Navigate forward (newer) in history with prefix filtering.
+    fn history_down(&mut self, history: &History) {
+        // Only meaningful if we are navigating history.
+        let Some(pos) = self.history_pos else {
+            return;
+        };
+
+        let prefix = self.saved_input.as_deref().unwrap_or("");
+
+        if let Some((idx, entry)) = history.search_forward(prefix, pos + 1) {
+            self.history_pos = Some(idx);
+            self.buf = entry.to_owned();
+            self.cursor = self.buf.len();
+        } else {
+            // Past the newest entry — restore the original input.
+            self.buf = self.saved_input.clone().unwrap_or_default();
+            self.cursor = self.buf.len();
+            self.history_pos = None;
+            self.saved_input = None;
+        }
+    }
+
+    /// Reset history navigation state (called when the user types/edits).
+    fn reset_history_nav(&mut self) {
+        self.saved_input = None;
+        self.history_pos = None;
     }
 
     /// Insert a character at the cursor position.
@@ -248,6 +448,147 @@ impl LineEditor {
 mod tests {
     use super::*;
 
+    // ── History tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_history_new_is_empty() {
+        let history = History::new();
+        assert!(history.is_empty());
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_history_push_adds_entry() {
+        let mut history = History::new();
+        history.push("foo".to_owned());
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0), Some("foo"));
+    }
+
+    #[test]
+    fn test_history_push_ignores_empty_string() {
+        let mut history = History::new();
+        history.push(String::new());
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_history_push_deduplicates_consecutive() {
+        let mut history = History::new();
+        history.push("foo".to_owned());
+        history.push("foo".to_owned());
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn test_history_push_allows_non_consecutive_duplicates() {
+        let mut history = History::new();
+        history.push("foo".to_owned());
+        history.push("bar".to_owned());
+        history.push("foo".to_owned());
+        assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn test_history_push_evicts_oldest_when_full() {
+        let mut history = History::with_max_size(2);
+        history.push("a".to_owned());
+        history.push("b".to_owned());
+        history.push("c".to_owned());
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.get(0), Some("b"));
+        assert_eq!(history.get(1), Some("c"));
+    }
+
+    #[test]
+    fn test_history_search_backward_finds_match() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        history.push("beta".to_owned());
+        history.push("alpha2".to_owned());
+        let result = history.search_backward("alpha", 3);
+        assert_eq!(result, Some((2, "alpha2")));
+    }
+
+    #[test]
+    fn test_history_search_backward_skips_non_matching() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        history.push("beta".to_owned());
+        history.push("gamma".to_owned());
+        let result = history.search_backward("alpha", 3);
+        assert_eq!(result, Some((0, "alpha")));
+    }
+
+    #[test]
+    fn test_history_search_backward_from_position() {
+        let mut history = History::new();
+        history.push("alpha1".to_owned());
+        history.push("alpha2".to_owned());
+        history.push("alpha3".to_owned());
+        // From position 2 (exclusive), should find index 1.
+        let result = history.search_backward("alpha", 2);
+        assert_eq!(result, Some((1, "alpha2")));
+    }
+
+    #[test]
+    fn test_history_search_backward_no_match_returns_none() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        let result = history.search_backward("beta", 1);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_history_search_backward_empty_prefix_matches_all() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        history.push("beta".to_owned());
+        let result = history.search_backward("", 2);
+        assert_eq!(result, Some((1, "beta")));
+    }
+
+    #[test]
+    fn test_history_search_forward_finds_match() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        history.push("beta".to_owned());
+        history.push("alpha2".to_owned());
+        let result = history.search_forward("alpha", 1);
+        assert_eq!(result, Some((2, "alpha2")));
+    }
+
+    #[test]
+    fn test_history_search_forward_no_match_returns_none() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        history.push("beta".to_owned());
+        let result = history.search_forward("gamma", 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_history_search_forward_from_beyond_end_returns_none() {
+        let mut history = History::new();
+        history.push("alpha".to_owned());
+        let result = history.search_forward("alpha", 5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_history_get_out_of_bounds_returns_none() {
+        let history = History::new();
+        assert_eq!(history.get(0), None);
+    }
+
+    #[test]
+    fn test_history_default_is_empty() {
+        let history = History::default();
+        assert!(history.is_empty());
+    }
+
+    // ── LineEditor basic tests ──────────────────────────────────────
+
     #[test]
     fn test_line_editor_new_is_empty() {
         let editor = LineEditor::new("/");
@@ -381,6 +722,16 @@ mod tests {
     fn test_line_editor_process_key_ctrl_c_returns_cancel() {
         let mut editor = LineEditor::new("/");
         let result = editor.process_key(&Key::Ctrl('c'));
+        assert_eq!(result, LineEditResult::Cancel);
+    }
+
+    #[test]
+    fn test_line_editor_process_key_ctrl_g_returns_cancel() {
+        let mut editor = LineEditor::new("/");
+        for c in "test".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Ctrl('g'));
         assert_eq!(result, LineEditResult::Cancel);
     }
 
@@ -538,5 +889,147 @@ mod tests {
         editor.process_key(&Key::Ctrl('e'));
         editor.insert('x');
         assert_eq!(editor.contents(), "abcx");
+    }
+
+    // ── History navigation tests ────────────────────────────────────
+
+    #[test]
+    fn test_line_editor_up_arrow_recalls_previous_search() {
+        let mut history = History::new();
+        history.push("pattern1".to_owned());
+        history.push("pattern2".to_owned());
+
+        let mut editor = LineEditor::new("/");
+        let result = editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "pattern2");
+    }
+
+    #[test]
+    fn test_line_editor_down_arrow_returns_to_newer_entry() {
+        let mut history = History::new();
+        history.push("pattern1".to_owned());
+        history.push("pattern2".to_owned());
+
+        let mut editor = LineEditor::new("/");
+        // Go back twice.
+        editor.process_key_with_history(&Key::Up, &history);
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "pattern1");
+        // Go forward once.
+        editor.process_key_with_history(&Key::Down, &history);
+        assert_eq!(editor.contents(), "pattern2");
+    }
+
+    #[test]
+    fn test_line_editor_down_past_newest_restores_original_input() {
+        let mut history = History::new();
+        history.push("typed_old".to_owned());
+
+        let mut editor = LineEditor::new("/");
+        // Type a prefix that matches the history entry.
+        for c in "typed".chars() {
+            editor.process_key_with_history(&Key::Char(c), &history);
+        }
+        // Navigate up — "typed_old" matches prefix "typed".
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "typed_old");
+        // Navigate down past history — should restore original "typed".
+        editor.process_key_with_history(&Key::Down, &history);
+        assert_eq!(editor.contents(), "typed");
+    }
+
+    #[test]
+    fn test_line_editor_prefix_filtering_works() {
+        let mut history = History::new();
+        history.push("alpha1".to_owned());
+        history.push("beta1".to_owned());
+        history.push("alpha2".to_owned());
+        history.push("beta2".to_owned());
+
+        let mut editor = LineEditor::new("/");
+        // Type a prefix.
+        for c in "alpha".chars() {
+            editor.process_key_with_history(&Key::Char(c), &history);
+        }
+        // Up should find "alpha2" (most recent matching entry).
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "alpha2");
+        // Up again should find "alpha1".
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "alpha1");
+        // Up again — no older match, should stay at "alpha1".
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "alpha1");
+    }
+
+    #[test]
+    fn test_line_editor_up_on_empty_history_is_noop() {
+        let history = History::new();
+        let mut editor = LineEditor::new("/");
+        for c in "typed".chars() {
+            editor.insert(c);
+        }
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "typed");
+    }
+
+    #[test]
+    fn test_line_editor_down_without_navigating_is_noop() {
+        let mut history = History::new();
+        history.push("pattern".to_owned());
+        let mut editor = LineEditor::new("/");
+        editor.process_key_with_history(&Key::Down, &history);
+        assert_eq!(editor.contents(), "");
+    }
+
+    #[test]
+    fn test_line_editor_typing_resets_history_navigation() {
+        let mut history = History::new();
+        history.push("pattern1".to_owned());
+        history.push("pattern2".to_owned());
+
+        let mut editor = LineEditor::new("/");
+        // Navigate into history.
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "pattern2");
+        // Type a character — should reset history state.
+        editor.process_key_with_history(&Key::Char('x'), &history);
+        assert_eq!(editor.contents(), "pattern2x");
+        // Up should now use "pattern2x" as prefix (no match).
+        editor.process_key_with_history(&Key::Up, &history);
+        // No history entry starts with "pattern2x", so buffer unchanged.
+        assert_eq!(editor.contents(), "pattern2x");
+    }
+
+    #[test]
+    fn test_line_editor_history_with_empty_prefix_navigates_all() {
+        let mut history = History::new();
+        history.push("aaa".to_owned());
+        history.push("bbb".to_owned());
+        history.push("ccc".to_owned());
+
+        let mut editor = LineEditor::new("/");
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "ccc");
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "bbb");
+        editor.process_key_with_history(&Key::Up, &history);
+        assert_eq!(editor.contents(), "aaa");
+        editor.process_key_with_history(&Key::Down, &history);
+        assert_eq!(editor.contents(), "bbb");
+        editor.process_key_with_history(&Key::Down, &history);
+        assert_eq!(editor.contents(), "ccc");
+        editor.process_key_with_history(&Key::Down, &history);
+        // Restored to original empty input.
+        assert_eq!(editor.contents(), "");
+    }
+
+    #[test]
+    fn test_line_editor_non_history_keys_delegate_to_process_key() {
+        let history = History::new();
+        let mut editor = LineEditor::new("/");
+        let result = editor.process_key_with_history(&Key::Enter, &history);
+        assert_eq!(result, LineEditResult::Confirm(String::new()));
     }
 }
