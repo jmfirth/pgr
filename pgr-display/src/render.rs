@@ -408,35 +408,39 @@ fn compute_display_width(text: &str, tab_stops: &TabStops) -> usize {
 
 /// Apply chop mode truncation markers to a rendered line.
 ///
-/// In `less -S` (chop) mode:
-/// - If the line extends beyond the visible area (right-truncated), the last
-///   visible character is replaced with `>`.
-/// - If `h_offset > 0` (scrolled right) and the line has content to the left,
-///   the first visible character is replaced with `<`.
+/// In `less -S` (chop) mode, if the line extends beyond the visible area
+/// (right-truncated), the last visible character is replaced with `>`.
+/// This matches GNU less behavior controlled by the `--rscroll` option
+/// (default: `>` in standout mode).
+///
+/// GNU less does not display a left-side marker when content extends to the
+/// left of the viewport, so this function does not add one either.
 ///
 /// The `rendered` string may contain ANSI escape sequences; this function
-/// correctly skips them when locating the first/last visible characters.
+/// correctly skips them when locating the last visible character.
+///
+/// The `h_offset` parameter is accepted for API compatibility but does not
+/// affect the output (GNU less has no left-shift marker).
 ///
 /// Returns the modified rendered string and its display width.
 #[must_use]
 pub fn apply_chop_markers(
     rendered: &str,
     display_width: usize,
-    h_offset: usize,
+    _h_offset: usize,
     truncated_right: bool,
 ) -> (String, usize) {
     if display_width == 0 {
         return (rendered.to_string(), 0);
     }
 
-    let needs_left = h_offset > 0 && display_width > 0;
     let needs_right = truncated_right && display_width > 0;
 
-    if !needs_left && !needs_right {
+    if !needs_right {
         return (rendered.to_string(), display_width);
     }
 
-    // Build a new string with markers applied.
+    // Build a new string with the right marker applied.
     // We track visible character positions to know when to substitute.
     let mut result = String::with_capacity(rendered.len());
     let mut visible_col: usize = 0;
@@ -444,13 +448,8 @@ pub fn apply_chop_markers(
     let len = bytes.len();
     let mut i: usize = 0;
 
-    // Determine the column position where we place the `>` marker.
-    // It replaces the last visible column (display_width - 1).
-    let right_marker_col = if needs_right {
-        display_width.saturating_sub(1)
-    } else {
-        usize::MAX
-    };
+    // The `>` marker replaces the last visible column (display_width - 1).
+    let right_marker_col = display_width.saturating_sub(1);
 
     while i < len {
         // Check for ANSI escape sequence
@@ -465,7 +464,7 @@ pub fn apply_chop_markers(
                 i += 1; // skip the terminator
             }
             // Pass through the escape sequence
-            if !needs_right || visible_col < display_width {
+            if visible_col < display_width {
                 result.push_str(&rendered[start..i]);
             }
             continue;
@@ -476,12 +475,7 @@ pub fn apply_chop_markers(
         let char_len = c.len_utf8();
         let char_w = UnicodeWidthChar::width(c).unwrap_or(1).max(1);
 
-        if visible_col == 0 && needs_left {
-            // Replace first visible character with `<`
-            result.push('<');
-            visible_col += char_w;
-            i += char_len;
-        } else if visible_col == right_marker_col && needs_right {
+        if visible_col == right_marker_col {
             // Replace last visible character with `>`
             result.push('>');
             i += char_len;
@@ -502,11 +496,11 @@ pub fn apply_chop_markers(
                 }
             }
             break;
-        } else {
-            result.push(c);
-            visible_col += char_w;
-            i += char_len;
         }
+
+        result.push(c);
+        visible_col += char_w;
+        i += char_len;
     }
 
     (result, display_width)
@@ -1375,18 +1369,19 @@ mod tests {
     }
 
     #[test]
-    fn test_chop_markers_left_marker_when_scrolled_right() {
-        // Scrolled right (h_offset=5), showing "world" (5 cols, not truncated right)
+    fn test_chop_markers_no_left_marker_when_scrolled_right() {
+        // Scrolled right (h_offset=5), showing "world" (5 cols, not truncated right).
+        // GNU less does not add a left-side marker, so no `<` should appear.
         let (result, width) = apply_chop_markers("world", 5, 5, false);
-        assert_eq!(result, "<orld");
+        assert_eq!(result, "world");
         assert_eq!(width, 5);
     }
 
     #[test]
-    fn test_chop_markers_both_markers() {
-        // Scrolled right and truncated: both < and >
+    fn test_chop_markers_right_only_when_scrolled_right() {
+        // Scrolled right and truncated: only > on right (no < on left per GNU less)
         let (result, width) = apply_chop_markers("ello worl", 9, 5, true);
-        assert_eq!(result, "<llo wor>");
+        assert_eq!(result, "ello wor>");
         assert_eq!(width, 9);
     }
 
@@ -1405,9 +1400,10 @@ mod tests {
     }
 
     #[test]
-    fn test_chop_markers_single_char_left_marker() {
+    fn test_chop_markers_single_char_no_left_marker() {
+        // GNU less has no left-side marker, so scrolled right still shows the char
         let (result, width) = apply_chop_markers("a", 1, 1, false);
-        assert_eq!(result, "<");
+        assert_eq!(result, "a");
         assert_eq!(width, 1);
     }
 
@@ -1424,11 +1420,11 @@ mod tests {
     }
 
     #[test]
-    fn test_chop_markers_with_ansi_escapes_left_marker() {
+    fn test_chop_markers_with_ansi_escapes_no_left_marker() {
         let input = "\x1b[31mworld\x1b[0m";
         let (result, width) = apply_chop_markers(input, 5, 5, false);
-        // First visible char 'w' should be replaced with '<'
-        assert!(result.starts_with("\x1b[31m<"));
+        // GNU less has no left-side marker, so the text is unchanged
+        assert_eq!(result, input);
         assert_eq!(width, 5);
     }
 }

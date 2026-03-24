@@ -241,8 +241,8 @@ fn test_conformance_navigation_w_sets_backward_window() {
 fn test_conformance_navigation_horizontal_scroll_right() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
-    // Right arrow in xterm-256color terminfo = ESC O C (SS3)
-    assert_content_conformance_bytes(&["-S"], file.path().to_str().unwrap(), b"\x1bOC");
+    // ESC-) is the explicit less keybinding for horizontal scroll right.
+    assert_content_conformance_bytes(&["-S"], file.path().to_str().unwrap(), b"\x1b)");
 }
 
 /// Test 24: Left arrow (horizontal scroll left) — after scrolling right,
@@ -252,11 +252,11 @@ fn test_conformance_navigation_horizontal_scroll_right() {
 fn test_conformance_navigation_horizontal_scroll_left() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
-    // Right/Left arrows in xterm-256color terminfo = ESC O C / ESC O D (SS3)
+    // ESC-) / ESC-( are explicit less keybindings for horizontal scroll.
     assert_content_conformance_byte_steps(
         &["-S"],
         file.path().to_str().unwrap(),
-        &[b"\x1bOC", b"\x1bOD"],
+        &[b"\x1b)", b"\x1b("],
     );
 }
 
