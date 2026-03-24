@@ -409,7 +409,16 @@ impl Options {
     /// (`+cmd`) or every-file commands (`++cmd`) before passing the
     /// remaining flags to clap.
     pub fn parse() -> Self {
-        let (env_flags, env_initial, env_every_file) = read_less_env_split();
+        // When LESSNOCONFIG is set, skip the LESS environment variable entirely.
+        let (env_flags, env_initial, env_every_file) = if std::env::var("LESSNOCONFIG")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some()
+        {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            read_less_env_split()
+        };
         let real_args: Vec<String> = std::env::args().collect();
 
         // Separate `+cmd`/`++cmd` from regular args in the CLI arguments.
