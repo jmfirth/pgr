@@ -87,9 +87,13 @@ pub struct RuntimeOptions {
     /// Maximum forward scroll limit (`-y`).
     pub max_forw_scroll: Option<usize>,
 
-    // String flags
-    /// Custom prompt string (`-P`).
-    pub prompt_string: Option<String>,
+    // String flags — per-slot custom prompt overrides (`-Ps`, `-Pm`, `-PM`)
+    /// Custom short prompt template (`-Ps` or unprefixed `-P`).
+    pub prompt_string_short: Option<String>,
+    /// Custom medium prompt template (`-Pm`).
+    pub prompt_string_medium: Option<String>,
+    /// Custom long prompt template (`-PM`).
+    pub prompt_string_long: Option<String>,
 }
 
 impl Default for RuntimeOptions {
@@ -117,7 +121,9 @@ impl Default for RuntimeOptions {
             window_size: None,
             max_back_scroll: None,
             max_forw_scroll: None,
-            prompt_string: None,
+            prompt_string_short: None,
+            prompt_string_medium: None,
+            prompt_string_long: None,
         }
     }
 }
@@ -471,8 +477,22 @@ impl RuntimeOptions {
                 Ok(format!("Max forward scroll is {n}"))
             }
             'P' => {
-                self.prompt_string = Some(value.to_owned());
-                Ok(format!("Prompt string is \"{value}\""))
+                let (prefix, template) = strip_prompt_prefix(value);
+                match prefix {
+                    Some('m') => {
+                        self.prompt_string_medium = Some(template.to_owned());
+                        Ok(format!("Medium prompt string is \"{template}\""))
+                    }
+                    Some('M') => {
+                        self.prompt_string_long = Some(template.to_owned());
+                        Ok(format!("Long prompt string is \"{template}\""))
+                    }
+                    _ => {
+                        // 's' prefix or no prefix → short slot
+                        self.prompt_string_short = Some(template.to_owned());
+                        Ok(format!("Short prompt string is \"{template}\""))
+                    }
+                }
             }
             _ => Err(OptionError::UnknownOption(flag)),
         }
@@ -541,11 +561,35 @@ impl RuntimeOptions {
                 Some(n) => Ok(format!("Max forward scroll is {n}")),
                 None => Ok("Max forward scroll is unlimited".to_owned()),
             },
-            'P' => match &self.prompt_string {
-                Some(s) => Ok(format!("Prompt string is \"{s}\"")),
-                None => Ok("Prompt string is default".to_owned()),
-            },
+            'P' => {
+                let mut parts = Vec::new();
+                if let Some(ref s) = self.prompt_string_short {
+                    parts.push(format!("short=\"{s}\""));
+                }
+                if let Some(ref s) = self.prompt_string_medium {
+                    parts.push(format!("medium=\"{s}\""));
+                }
+                if let Some(ref s) = self.prompt_string_long {
+                    parts.push(format!("long=\"{s}\""));
+                }
+                if parts.is_empty() {
+                    Ok("Prompt strings are default".to_owned())
+                } else {
+                    Ok(format!("Prompt strings: {}", parts.join(", ")))
+                }
+            }
             _ => Err(OptionError::UnknownOption(flag)),
+        }
+    }
+
+    /// Returns the custom prompt template override for the given style, if any.
+    #[must_use]
+    pub fn prompt_override_for(&self, style: &pgr_display::PromptStyle) -> Option<&str> {
+        match style {
+            pgr_display::PromptStyle::Short => self.prompt_string_short.as_deref(),
+            pgr_display::PromptStyle::Medium => self.prompt_string_medium.as_deref(),
+            pgr_display::PromptStyle::Long => self.prompt_string_long.as_deref(),
+            pgr_display::PromptStyle::Custom(_) => None,
         }
     }
 
@@ -577,6 +621,17 @@ fn hilite_description(mode: HiliteMode) -> &'static str {
         HiliteMode::All => "all matches",
         HiliteMode::LastOnly => "last match only",
         HiliteMode::Never => "OFF",
+    }
+}
+
+/// Strip an optional GNU less prompt prefix from a `-P` value.
+///
+/// Returns the prefix character (if any) and the template string.
+fn strip_prompt_prefix(raw: &str) -> (Option<char>, &str) {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(c @ ('s' | 'm' | 'M' | 'h' | '=' | 'w')) => (Some(c), chars.as_str()),
+        _ => (None, raw),
     }
 }
 
@@ -901,11 +956,35 @@ mod tests {
     }
 
     #[test]
-    fn test_set_value_p_upper_sets_prompt_string() {
+    fn test_set_value_p_unprefixed_sets_short_prompt() {
         let mut opts = RuntimeOptions::default();
         let msg = opts.set_value('P', "%f:%l").unwrap();
-        assert_eq!(opts.prompt_string.as_deref(), Some("%f:%l"));
+        assert_eq!(opts.prompt_string_short.as_deref(), Some("%f:%l"));
         assert!(msg.contains("%f:%l"));
+    }
+
+    #[test]
+    fn test_set_value_p_with_s_prefix_sets_short_prompt() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('P', "s%f").unwrap();
+        assert_eq!(opts.prompt_string_short.as_deref(), Some("%f"));
+        assert!(msg.contains("%f"));
+    }
+
+    #[test]
+    fn test_set_value_p_with_m_prefix_sets_medium_prompt() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('P', "m%f %pB%%").unwrap();
+        assert_eq!(opts.prompt_string_medium.as_deref(), Some("%f %pB%%"));
+        assert!(msg.contains("Medium"));
+    }
+
+    #[test]
+    fn test_set_value_p_with_upper_m_prefix_sets_long_prompt() {
+        let mut opts = RuntimeOptions::default();
+        let msg = opts.set_value('P', "M%f lines %lt-%lb").unwrap();
+        assert_eq!(opts.prompt_string_long.as_deref(), Some("%f lines %lt-%lb"));
+        assert!(msg.contains("Long"));
     }
 
     // ── Additional coverage: query optional values ──
@@ -921,7 +1000,70 @@ mod tests {
     fn test_query_p_upper_default_returns_default() {
         let opts = RuntimeOptions::default();
         let msg = opts.query('P').unwrap();
-        assert!(msg.contains("default"));
+        assert!(msg.contains("default"), "expected 'default' in: {msg}");
+    }
+
+    #[test]
+    fn test_query_p_upper_with_overrides_lists_slots() {
+        let mut opts = RuntimeOptions::default();
+        opts.prompt_string_short = Some(String::from("%f"));
+        opts.prompt_string_long = Some(String::from("%f lines"));
+        let msg = opts.query('P').unwrap();
+        assert!(msg.contains("short"), "expected 'short' in: {msg}");
+        assert!(msg.contains("long"), "expected 'long' in: {msg}");
+        assert!(
+            !msg.contains("medium"),
+            "should not contain 'medium' in: {msg}"
+        );
+    }
+
+    // ── prompt_override_for ──
+
+    #[test]
+    fn test_prompt_override_for_short_returns_short_override() {
+        let mut opts = RuntimeOptions::default();
+        opts.prompt_string_short = Some(String::from("custom short"));
+        assert_eq!(
+            opts.prompt_override_for(&pgr_display::PromptStyle::Short),
+            Some("custom short")
+        );
+        assert_eq!(
+            opts.prompt_override_for(&pgr_display::PromptStyle::Medium),
+            None
+        );
+    }
+
+    #[test]
+    fn test_prompt_override_for_medium_returns_medium_override() {
+        let mut opts = RuntimeOptions::default();
+        opts.prompt_string_medium = Some(String::from("custom medium"));
+        assert_eq!(
+            opts.prompt_override_for(&pgr_display::PromptStyle::Medium),
+            Some("custom medium")
+        );
+        assert_eq!(
+            opts.prompt_override_for(&pgr_display::PromptStyle::Short),
+            None
+        );
+    }
+
+    #[test]
+    fn test_prompt_override_for_long_returns_long_override() {
+        let mut opts = RuntimeOptions::default();
+        opts.prompt_string_long = Some(String::from("custom long"));
+        assert_eq!(
+            opts.prompt_override_for(&pgr_display::PromptStyle::Long),
+            Some("custom long")
+        );
+    }
+
+    #[test]
+    fn test_prompt_override_for_custom_returns_none() {
+        let opts = RuntimeOptions::default();
+        assert_eq!(
+            opts.prompt_override_for(&pgr_display::PromptStyle::Custom("whatever".into())),
+            None
+        );
     }
 
     // ── Error display ──

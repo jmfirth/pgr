@@ -172,9 +172,10 @@ pub struct Options {
     #[arg(short = 'M', long = "LONG-PROMPT")]
     pub long_prompt: bool,
 
-    /// Custom prompt string.
+    /// Custom prompt string(s). Can be specified multiple times with per-slot
+    /// prefixes: `-Ps` (short), `-Pm` (medium), `-PM` (long).
     #[arg(short = 'P', long = "prompt")]
-    pub custom_prompt: Option<String>,
+    pub custom_prompts: Vec<String>,
 
     // ── Quiet flags ───────────────────────────────────────────────────
     /// Suppress bell on first EOF.
@@ -367,25 +368,48 @@ impl Options {
         opts
     }
 
-    /// Derive the prompt style from the `-m` / `-M` / `-P` flags.
+    /// Derive the prompt style from the `-m` / `-M` flags.
     ///
-    /// When `-P` is specified, the custom prompt template takes priority.
-    /// GNU less supports an optional prefix on `-P` values (`s` for short,
-    /// `m` for medium, `M` for long) which selects which prompt to customize.
-    /// We strip the prefix and use the rest as a custom prompt template.
-    /// Otherwise falls back to `-M` (long), `-m` (medium), or short.
+    /// The `-P` flag provides per-slot template overrides (via
+    /// [`custom_prompt_overrides`]) but does not change the base prompt style.
+    /// Falls back to `-M` (long), `-m` (medium), or short.
     #[must_use]
     pub fn prompt_style(&self) -> PromptStyle {
-        if let Some(ref raw) = self.custom_prompt {
-            let template = strip_prompt_prefix(raw);
-            PromptStyle::Custom(template.to_string())
-        } else if self.long_prompt {
+        if self.long_prompt {
             PromptStyle::Long
         } else if self.medium_prompt {
             PromptStyle::Medium
         } else {
             PromptStyle::Short
         }
+    }
+
+    /// Extract per-slot custom prompt template overrides from `-P` flags.
+    ///
+    /// GNU less supports an optional prefix on `-P` values (`s` for short,
+    /// `m` for medium, `M` for long) to select which prompt to customize.
+    /// Unprefixed values default to the short prompt slot. Multiple `-P`
+    /// flags can each override a different slot.
+    ///
+    /// Returns `(short, medium, long)` overrides.
+    #[must_use]
+    pub fn custom_prompt_overrides(&self) -> (Option<String>, Option<String>, Option<String>) {
+        let mut short = None;
+        let mut medium = None;
+        let mut long = None;
+
+        for raw in &self.custom_prompts {
+            let (prefix, template) = strip_prompt_prefix(raw);
+            match prefix {
+                Some('m') => medium = Some(template.to_owned()),
+                Some('M') => long = Some(template.to_owned()),
+                Some('s') | None => short = Some(template.to_owned()),
+                // h, =, w prefixes are lower priority — ignore for now
+                _ => {}
+            }
+        }
+
+        (short, medium, long)
     }
 
     /// Derive the raw control mode from the `-r` / `-R` flags.
@@ -418,15 +442,16 @@ impl Options {
 ///
 /// GNU less allows the `-P` value to start with `s` (short), `m` (medium),
 /// `M` (long), `h` (help), `=` (status), or `w` (waiting/EOF message) to
-/// select which prompt to customize. The prefix is stripped and the remainder
-/// is the template string.
+/// select which prompt to customize. Returns the prefix character (if any)
+/// and the template string.
 ///
-/// If no recognized prefix is present, the entire string is the template.
-fn strip_prompt_prefix(raw: &str) -> &str {
+/// If no recognized prefix is present, `None` is returned for the prefix
+/// and the entire string is the template.
+fn strip_prompt_prefix(raw: &str) -> (Option<char>, &str) {
     let mut chars = raw.chars();
     match chars.next() {
-        Some('s' | 'm' | 'M' | 'h' | '=' | 'w') => chars.as_str(),
-        _ => raw,
+        Some(c @ ('s' | 'm' | 'M' | 'h' | '=' | 'w')) => (Some(c), chars.as_str()),
+        _ => (None, raw),
     }
 }
 
@@ -475,7 +500,7 @@ mod tests {
         assert!(!opts.quiet_always);
         assert!(!opts.tilde);
         assert!(!opts.use_color);
-        assert!(opts.custom_prompt.is_none());
+        assert!(opts.custom_prompts.is_empty());
         assert!(opts.initial_pattern.is_none());
         assert!(opts.window_size.is_none());
         assert!(opts.jump_target.is_none());
@@ -660,7 +685,7 @@ mod tests {
     #[test]
     fn test_options_dash_upper_p_sets_custom_prompt() {
         let opts = Options::parse_from(["pgr", "-P", "%f", "file.txt"]);
-        assert_eq!(opts.custom_prompt.as_deref(), Some("%f"));
+        assert_eq!(opts.custom_prompts, vec!["%f"]);
     }
 
     #[test]
@@ -700,41 +725,77 @@ mod tests {
     }
 
     #[test]
-    fn test_options_prompt_style_custom_with_dash_p() {
+    fn test_options_dash_p_unprefixed_overrides_short_slot() {
         let opts = Options::parse_from(["pgr", "-P", "%f:%l", "file.txt"]);
-        assert!(opts.custom_prompt.is_some());
-        assert_eq!(opts.custom_prompt.as_deref(), Some("%f:%l"));
-        assert_eq!(
-            opts.prompt_style(),
-            PromptStyle::Custom(String::from("%f:%l"))
-        );
+        assert_eq!(opts.custom_prompts, vec!["%f:%l"]);
+        // Unprefixed -P does not change prompt style
+        assert_eq!(opts.prompt_style(), PromptStyle::Short);
+        let (short, medium, long) = opts.custom_prompt_overrides();
+        assert_eq!(short.as_deref(), Some("%f:%l"));
+        assert!(medium.is_none());
+        assert!(long.is_none());
     }
 
     #[test]
-    fn test_options_prompt_style_custom_with_prefix_strip() {
-        // `-Ps"page %d"` — the `s` prefix selects the short prompt and is stripped.
-        let opts = Options::parse_from(["pgr", "-P", "s\"page %d\"", "file.txt"]);
-        assert_eq!(
-            opts.prompt_style(),
-            PromptStyle::Custom(String::from("\"page %d\""))
-        );
+    fn test_options_dash_ps_overrides_short_slot() {
+        let opts = Options::parse_from(["pgr", "-P", "spage %d", "file.txt"]);
+        let (short, medium, long) = opts.custom_prompt_overrides();
+        assert_eq!(short.as_deref(), Some("page %d"));
+        assert!(medium.is_none());
+        assert!(long.is_none());
+    }
+
+    #[test]
+    fn test_options_dash_pm_overrides_medium_slot() {
+        let opts = Options::parse_from(["pgr", "-P", "m%f %pB%%", "file.txt"]);
+        let (short, medium, long) = opts.custom_prompt_overrides();
+        assert!(short.is_none());
+        assert_eq!(medium.as_deref(), Some("%f %pB%%"));
+        assert!(long.is_none());
+    }
+
+    #[test]
+    fn test_options_dash_p_upper_m_overrides_long_slot() {
+        let opts = Options::parse_from(["pgr", "-P", "M%f lines %lt-%lb", "file.txt"]);
+        let (short, medium, long) = opts.custom_prompt_overrides();
+        assert!(short.is_none());
+        assert!(medium.is_none());
+        assert_eq!(long.as_deref(), Some("%f lines %lt-%lb"));
+    }
+
+    #[test]
+    fn test_options_multiple_dash_p_flags_each_override_slot() {
+        let opts = Options::parse_from([
+            "pgr",
+            "-P",
+            "sshort custom",
+            "-P",
+            "mmedium custom",
+            "-P",
+            "Mlong custom",
+            "file.txt",
+        ]);
+        let (short, medium, long) = opts.custom_prompt_overrides();
+        assert_eq!(short.as_deref(), Some("short custom"));
+        assert_eq!(medium.as_deref(), Some("medium custom"));
+        assert_eq!(long.as_deref(), Some("long custom"));
     }
 
     #[test]
     fn test_strip_prompt_prefix_known_prefixes() {
-        assert_eq!(strip_prompt_prefix("s%f"), "%f");
-        assert_eq!(strip_prompt_prefix("m%f:%l"), "%f:%l");
-        assert_eq!(strip_prompt_prefix("M%f lines"), "%f lines");
-        assert_eq!(strip_prompt_prefix("h(help)"), "(help)");
-        assert_eq!(strip_prompt_prefix("=status"), "status");
-        assert_eq!(strip_prompt_prefix("wwaiting"), "waiting");
+        assert_eq!(strip_prompt_prefix("s%f"), (Some('s'), "%f"));
+        assert_eq!(strip_prompt_prefix("m%f:%l"), (Some('m'), "%f:%l"));
+        assert_eq!(strip_prompt_prefix("M%f lines"), (Some('M'), "%f lines"));
+        assert_eq!(strip_prompt_prefix("h(help)"), (Some('h'), "(help)"));
+        assert_eq!(strip_prompt_prefix("=status"), (Some('='), "status"));
+        assert_eq!(strip_prompt_prefix("wwaiting"), (Some('w'), "waiting"));
     }
 
     #[test]
     fn test_strip_prompt_prefix_no_prefix() {
-        assert_eq!(strip_prompt_prefix("%f:%l"), "%f:%l");
-        assert_eq!(strip_prompt_prefix(""), "");
-        assert_eq!(strip_prompt_prefix("page %d"), "page %d");
+        assert_eq!(strip_prompt_prefix("%f:%l"), (None, "%f:%l"));
+        assert_eq!(strip_prompt_prefix(""), (None, ""));
+        assert_eq!(strip_prompt_prefix("page %d"), (None, "page %d"));
     }
 
     #[test]

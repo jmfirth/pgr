@@ -358,6 +358,7 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     pager.set_dimensions(rows, cols);
 
     // Wire all CLI display flags into runtime options (single call).
+    let (prompt_short, prompt_medium, prompt_long) = options.custom_prompt_overrides();
     let rt = RuntimeOptions {
         line_numbers: options.line_numbers,
         chop_long_lines: options.chop_long_lines,
@@ -366,6 +367,9 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         tab_width: options.tab_width,
         tilde: options.tilde,
         status_column: options.status_column,
+        prompt_string_short: prompt_short,
+        prompt_string_medium: prompt_medium,
+        prompt_string_long: prompt_long,
         ..RuntimeOptions::default()
     };
     pager.set_runtime_options(rt);

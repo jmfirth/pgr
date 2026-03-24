@@ -2744,14 +2744,17 @@ impl<R: Read, W: Write> Pager<R, W> {
 
             let ctx = self.build_prompt_context(total_lines, at_eof, start, bottom_display);
 
-            let template = match self.runtime_options.prompt_string {
-                Some(ref custom) => custom.as_str(),
-                None => match self.prompt_style {
+            let template = if let Some(custom) =
+                self.runtime_options.prompt_override_for(&self.prompt_style)
+            {
+                custom
+            } else {
+                match self.prompt_style {
                     PromptStyle::Short => DEFAULT_SHORT_PROMPT,
                     PromptStyle::Medium => DEFAULT_MEDIUM_PROMPT,
                     PromptStyle::Long => DEFAULT_LONG_PROMPT,
                     PromptStyle::Custom(ref t) => t.as_str(),
-                },
+                }
             };
             eval_prompt(template, &ctx)
         };
@@ -4894,7 +4897,7 @@ mod tests {
 
         let mut pager = Pager::new(reader, writer, buffer, index, Some("myfile.txt".into()));
         let mut opts = RuntimeOptions::default();
-        opts.prompt_string = Some(String::from("Viewing: %f"));
+        opts.prompt_string_short = Some(String::from("Viewing: %f"));
         pager.set_runtime_options(opts);
         let _ = pager.run();
 
