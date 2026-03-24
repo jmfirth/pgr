@@ -735,12 +735,13 @@ mod tests {
     }
 
     #[test]
-    fn test_paint_screen_chop_mode_left_marker_when_scrolled() {
+    fn test_paint_screen_chop_mode_no_left_marker_when_scrolled() {
         let mut screen = Screen::new(2, 10); // 1 content row, 10 cols
         screen.set_chop_mode(true);
         screen.set_horizontal_offset(5);
         // Line: "abcdefghijklmno" (15 chars). At h_offset=5, shows "fghijklmno"
-        // full_width=15, h_offset+cols=15, so not truncated right. Just left marker.
+        // full_width=15, h_offset+cols=15, so not truncated right.
+        // GNU less does not display a left-side marker, so no `<` should appear.
         let lines: Vec<Option<String>> = vec![Some("abcdefghijklmno".to_string())];
 
         let config = RenderConfig::default();
@@ -748,18 +749,24 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
 
         assert!(
-            output_str.contains('<'),
-            "missing left marker: {output_str}"
+            !output_str.contains('<'),
+            "unexpected left marker (GNU less has none): {output_str}"
+        );
+        // Content should show "fghijklmno" (positions 5-14)
+        assert!(
+            output_str.contains("fghijklmno"),
+            "missing expected content: {output_str}"
         );
     }
 
     #[test]
-    fn test_paint_screen_chop_mode_both_markers() {
+    fn test_paint_screen_chop_mode_right_marker_only_when_scrolled() {
         let mut screen = Screen::new(2, 10); // 1 content row, 10 cols
         screen.set_chop_mode(true);
         screen.set_horizontal_offset(5);
         // "abcdefghijklmnopqrst" (20 chars). h_offset=5, shows cols 5-14.
         // full_width=20 > 5+10=15, so truncated right too.
+        // GNU less only shows > on the right, no < on the left.
         let lines: Vec<Option<String>> = vec![Some("abcdefghijklmnopqrst".to_string())];
 
         let config = RenderConfig::default();
@@ -767,8 +774,8 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
 
         assert!(
-            output_str.contains('<'),
-            "missing left marker: {output_str}"
+            !output_str.contains('<'),
+            "unexpected left marker (GNU less has none): {output_str}"
         );
         assert!(
             output_str.contains('>'),

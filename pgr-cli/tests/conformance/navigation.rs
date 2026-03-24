@@ -240,8 +240,10 @@ fn test_conformance_navigation_w_sets_backward_window() {
 fn test_conformance_navigation_horizontal_scroll_right() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
-    // Right arrow = ESC [ C (in less, right arrow scrolls horizontally with -S)
-    assert_content_conformance_bytes(&["-S"], file.path().to_str().unwrap(), b"\x1b[C");
+    // ESC-) is the explicit less keybinding for horizontal scroll right.
+    // Arrow key escape sequences (\x1b[C vs \x1bOC) vary by terminal type and
+    // may not be recognized by less depending on the terminfo configuration.
+    assert_content_conformance_bytes(&["-S"], file.path().to_str().unwrap(), b"\x1b)");
 }
 
 /// Test 24: Left arrow (horizontal scroll left) — after scrolling right,
@@ -251,12 +253,13 @@ fn test_conformance_navigation_horizontal_scroll_right() {
 fn test_conformance_navigation_horizontal_scroll_left() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
-    // Right arrow then left arrow with -S flag.
-    // Right = ESC [ C, Left = ESC [ D
+    // ESC-) then ESC-( with -S flag.
+    // ESC-) = horizontal scroll right, ESC-( = horizontal scroll left.
+    // Using explicit less keybindings rather than arrow keys for portability.
     assert_content_conformance_byte_steps(
         &["-S"],
         file.path().to_str().unwrap(),
-        &[b"\x1b[C", b"\x1b[D"],
+        &[b"\x1b)", b"\x1b("],
     );
 }
 
