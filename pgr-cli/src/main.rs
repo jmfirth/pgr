@@ -187,6 +187,8 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    let env_config = EnvConfig::from_env();
+
     let pipe = PipeBuffer::new(std::io::stdin());
     let mut buffer: Box<dyn Buffer> = Box::new(pipe);
     let mut index = LineIndex::new(buffer.len() as u64);
@@ -214,6 +216,10 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     );
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
+
+    if env_config.secure_mode {
+        pager.set_secure_mode(true);
+    }
 
     pager.run()?;
     drop(pager);
@@ -305,6 +311,10 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     let mut pager = Pager::new(reader, writer, buffer, index, Some(filename));
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
+
+    if env_config.secure_mode {
+        pager.set_secure_mode(true);
+    }
 
     if file_list.file_count() > 1 {
         pager.set_file_list(file_list);

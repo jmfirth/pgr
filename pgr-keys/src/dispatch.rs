@@ -1596,6 +1596,11 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// file list, and switch to it. On Enter with empty input: refresh the
     /// current file. On Escape: cancel.
     fn examine_prompt(&mut self) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
         let mut editor = LineEditor::new("Examine: ");
         let (rows, cols) = self.screen.dimensions();
         if rows > 0 {
@@ -3411,6 +3416,33 @@ mod tests {
         let pager = run_pager_with_settings(&keys, &content, None, true, false);
         let output = String::from_utf8_lossy(&pager.writer);
         assert!(output.contains("Command not available"));
+    }
+
+    // Examine (`:e`) shows "Command not available" in secure mode.
+    #[test]
+    fn test_dispatch_examine_blocked_in_secure_mode() {
+        let content = make_test_content(50);
+        // ':' enters colon-command mode, then 'e' triggers Examine.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b':');
+        keys.push(b'e');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, Some("test.txt"), true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    // Navigation (scroll, page) still works normally when secure mode is active.
+    #[test]
+    fn test_dispatch_navigation_works_in_secure_mode() {
+        let content = make_test_content(50);
+        // Space (PageForward) then 'q' — should not produce any error messages.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b' '); // PageForward
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, None, true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(!output.contains("Command not available"));
     }
 
     // Test 11: SavePipeInput fails gracefully when not reading from pipe.
