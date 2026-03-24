@@ -25,6 +25,7 @@ use pgr_input::{FileWatcher, FollowEvent};
 use crate::help;
 use crate::info;
 
+use crate::completion::CompletionMode;
 use crate::error::Result;
 use crate::file_list::{FileEntry, FileList};
 use crate::filename::expand_filename;
@@ -1026,7 +1027,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         match result {
-            LineEditResult::Continue => {
+            LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
                 self.render_search_prompt()?;
             }
             LineEditResult::Confirm(pattern_str) => {
@@ -1291,7 +1292,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         loop {
             match self.reader.read_key() {
                 Ok(key) => match editor.process_key(&key) {
-                    LineEditResult::Continue => {
+                    LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
                         editor.render(&mut self.writer, prompt_row, 0, cols)?;
                         self.writer.flush()?;
                     }
@@ -1319,7 +1320,7 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         // Process the initial key first.
         match editor.process_key(initial_key) {
-            LineEditResult::Continue => {
+            LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
                 editor.render(&mut self.writer, prompt_row, 0, cols)?;
                 self.writer.flush()?;
             }
@@ -1331,7 +1332,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         loop {
             match self.reader.read_key() {
                 Ok(key) => match editor.process_key(&key) {
-                    LineEditResult::Continue => {
+                    LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
                         editor.render(&mut self.writer, prompt_row, 0, cols)?;
                         self.writer.flush()?;
                     }
@@ -1723,7 +1724,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         match result {
-            LineEditResult::Continue => {
+            LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
                 self.render_filter_prompt()?;
             }
             LineEditResult::Confirm(pattern_str) => {
@@ -2228,7 +2229,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             return Ok(());
         }
 
-        let mut editor = LineEditor::new("Examine: ");
+        let mut editor = LineEditor::with_completion("Examine: ", CompletionMode::Filename);
         let (rows, cols) = self.screen.dimensions();
         if rows > 0 {
             let prompt_row = rows.saturating_sub(1);
@@ -2245,6 +2246,14 @@ impl<R: Read, W: Write> Pager<R, W> {
                             let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
                             let _ = self.writer.flush();
                         }
+                    }
+                    LineEditResult::ContinueWithStatus(msg) => {
+                        if rows > 0 {
+                            let prompt_row = rows.saturating_sub(1);
+                            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
+                            let _ = self.writer.flush();
+                        }
+                        self.status_message = Some(msg);
                     }
                     LineEditResult::Confirm(input) => {
                         if input.is_empty() {
