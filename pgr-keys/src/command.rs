@@ -125,6 +125,14 @@ pub enum Command {
     PrevTag,
     /// Clear search highlighting and the saved pattern. ESC-U.
     ClearSearchPattern,
+    /// Navigate to the next hyperlink on screen. `^O^N`.
+    HyperlinkNext,
+    /// Navigate to the previous hyperlink on screen. `^O^P`.
+    HyperlinkPrev,
+    /// Jump to a hyperlink by number. `^O^L`.
+    HyperlinkJump,
+    /// Open the current hyperlink's URI in a browser. `^O^O`.
+    HyperlinkOpen,
 }
 
 #[cfg(test)]
@@ -226,5 +234,40 @@ mod tests {
     #[test]
     fn test_command_clear_search_pattern_differs_from_toggle_highlight() {
         assert_ne!(Command::ClearSearchPattern, Command::ToggleHighlight);
+    }
+
+    #[test]
+    fn test_command_hyperlink_next_equality() {
+        assert_eq!(Command::HyperlinkNext, Command::HyperlinkNext);
+    }
+
+    #[test]
+    fn test_command_hyperlink_prev_equality() {
+        assert_eq!(Command::HyperlinkPrev, Command::HyperlinkPrev);
+    }
+
+    #[test]
+    fn test_command_hyperlink_jump_equality() {
+        assert_eq!(Command::HyperlinkJump, Command::HyperlinkJump);
+    }
+
+    #[test]
+    fn test_command_hyperlink_open_equality() {
+        assert_eq!(Command::HyperlinkOpen, Command::HyperlinkOpen);
+    }
+
+    #[test]
+    fn test_command_hyperlink_next_differs_from_prev() {
+        assert_ne!(Command::HyperlinkNext, Command::HyperlinkPrev);
+    }
+
+    #[test]
+    fn test_command_hyperlink_jump_differs_from_open() {
+        assert_ne!(Command::HyperlinkJump, Command::HyperlinkOpen);
+    }
+
+    #[test]
+    fn test_command_hyperlink_next_differs_from_noop() {
+        assert_ne!(Command::HyperlinkNext, Command::Noop);
     }
 }

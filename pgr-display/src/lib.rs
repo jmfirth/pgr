@@ -4,6 +4,7 @@
 pub mod ansi;
 pub mod charset;
 pub mod color;
+pub mod hyperlink;
 pub mod error;
 pub mod line_numbers;
 pub mod prompt;
@@ -15,6 +16,7 @@ pub mod unicode;
 
 pub use ansi::{AnsiState, OverstrikeMode};
 pub use charset::{CharType, Charset};
+pub use hyperlink::{parse_osc8, strip_osc8, HyperlinkSpan};
 pub use color::{Color, ColorAutoDetect, ColorConfig, ColorSelector, ColorSpec};
 pub use error::{DisplayError, Result};
 pub use line_numbers::{

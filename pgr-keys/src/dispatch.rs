@@ -106,6 +106,8 @@ pub enum PendingCommand {
     QueryOption,
     /// `Z` pressed; waiting for a second `Z` to quit (vi-style `ZZ`).
     ZPrefix,
+    /// `^O` pressed; waiting for the hyperlink sub-command (^N, ^P, ^L, ^O).
+    CtrlOPrefix,
 }
 
 /// The main pager state, tying together all subsystems.
@@ -444,6 +446,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             Key::Char('\'') => Some(PendingCommand::GotoMark),
             Key::EscSeq('m') => Some(PendingCommand::ClearMark),
             Key::Ctrl('x') => Some(PendingCommand::CtrlXPrefix),
+            Key::Ctrl('o') => Some(PendingCommand::CtrlOPrefix),
             Key::Char(':') => Some(PendingCommand::ColonPrefix),
             Key::Char('Z') => Some(PendingCommand::ZPrefix),
             _ => None,
@@ -526,6 +529,17 @@ impl<R: Read, W: Write> Pager<R, W> {
                     self.execute(&Command::Quit, None)?;
                 }
                 // Non-Z key after Z: ignore the prefix (not a valid command).
+                return Ok(!self.should_quit);
+            }
+            PendingCommand::CtrlOPrefix => {
+                let count = self.pending_count.take();
+                match *key {
+                    Key::Ctrl('n') => self.execute(&Command::HyperlinkNext, count)?,
+                    Key::Ctrl('p') => self.execute(&Command::HyperlinkPrev, count)?,
+                    Key::Ctrl('l') => self.execute(&Command::HyperlinkJump, count)?,
+                    Key::Ctrl('o') => self.execute(&Command::HyperlinkOpen, count)?,
+                    _ => {} // Unknown ^O sub-command: ignore.
+                }
                 return Ok(!self.should_quit);
             }
         }
@@ -891,6 +905,18 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::PrevTag => {
                 self.navigate_tag_prev()?;
+            }
+            Command::HyperlinkNext | Command::HyperlinkPrev | Command::HyperlinkJump => {
+                // Stub: hyperlink navigation will be implemented when the
+                // display layer tracks per-cell hyperlink state on screen.
+                self.status_message = Some("hyperlink navigation not yet implemented".to_string());
+                self.repaint()?;
+            }
+            Command::HyperlinkOpen => {
+                // Stub: hyperlink open will shell out to $BROWSER or
+                // platform opener once hyperlink selection is tracked.
+                self.status_message = Some("hyperlink open not yet implemented".to_string());
+                self.repaint()?;
             }
         }
 
