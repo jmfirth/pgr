@@ -200,6 +200,8 @@ pub struct Pager<R: Read, W: Write> {
     no_keypad: bool,
     /// Whether visual bell is disabled (`--no-vbell`).
     no_vbell: bool,
+    /// Whether the next character typed in the search prompt should be inserted literally (^L).
+    search_literal_next: bool,
     /// Whether to repaint the screen before exiting (`--redraw-on-quit`).
     redraw_on_quit: bool,
 }
@@ -271,6 +273,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             mouse_enabled: false,
             no_keypad: false,
             no_vbell: false,
+            search_literal_next: false,
             redraw_on_quit: false,
         }
     }
@@ -848,6 +851,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.highlight_state.toggle();
                 self.repaint()?;
             }
+            Command::ClearSearchPattern => {
+                self.last_pattern = None;
+                self.highlight_state.set_enabled(true);
+                self.highlight_state.clear();
+                self.repaint()?;
+            }
             Command::FindCloseBracket(open, close) => {
                 self.find_matching_bracket(open, close, true, total)?;
             }
@@ -1005,6 +1014,47 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Process a key while in search-prompt editing mode.
     fn process_search_key(&mut self, key: &Key) -> Result<bool> {
+        // ^L (literal next): if previously pressed, insert the next character
+        // raw into the pattern buffer without interpreting it as a modifier.
+        if self.search_literal_next {
+            self.search_literal_next = false;
+            if let Some(ref mut editor) = self.line_editor {
+                let ch = match key {
+                    Key::Char(c) => *c,
+                    Key::Ctrl(c) => {
+                        // Convert Ctrl+letter to its control-character value.
+                        char::from((*c as u8).wrapping_sub(b'a').wrapping_add(1))
+                    }
+                    _ => {
+                        // Non-character keys: fall through to normal processing.
+                        let result = editor.process_key_with_history(key, &self.search_history);
+                        return self.finish_search_key(result);
+                    }
+                };
+                editor.insert(ch);
+                self.render_search_prompt()?;
+                return Ok(true);
+            }
+        }
+
+        // ^L: set literal-next flag so the following character is inserted raw.
+        if matches!(key, Key::Ctrl('l')) && self.line_editor.is_some() {
+            self.search_literal_next = true;
+            self.render_search_prompt()?;
+            return Ok(true);
+        }
+
+        // ^S: sub-pattern search (not supported — show status message).
+        if matches!(key, Key::Ctrl('s')) && self.line_editor.is_some() {
+            self.editing_search = false;
+            self.pending_count = None;
+            self.line_editor = None;
+            self.search_literal_next = false;
+            self.status_message = Some("Sub-pattern search not supported".to_string());
+            self.repaint()?;
+            return Ok(true);
+        }
+
         // Intercept search modifier keys (^N, ^R) and inject their raw
         // control-character bytes into the line editor buffer so that
         // `SearchModifiers::parse` can extract them later.
@@ -1029,6 +1079,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             return Ok(true);
         };
 
+        self.finish_search_key(result)
+    }
+
+    /// Handle a [`LineEditResult`] from search prompt editing.
+    fn finish_search_key(&mut self, result: LineEditResult) -> Result<bool> {
         match result {
             LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
                 self.render_search_prompt()?;
@@ -1037,6 +1092,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.editing_search = false;
                 let count = self.pending_count.take();
                 self.line_editor = None;
+                self.search_literal_next = false;
                 self.search_history.push(pattern_str.clone());
                 self.submit_search(&pattern_str, self.search_prompt_direction, count)?;
             }
@@ -1044,6 +1100,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.editing_search = false;
                 self.pending_count = None;
                 self.line_editor = None;
+                self.search_literal_next = false;
                 self.repaint()?;
             }
         }
@@ -6137,5 +6194,114 @@ mod tests {
         assert_eq!(pager.index.lines_indexed(), 1);
         pager.index_all_immediate().unwrap();
         assert_eq!(pager.index.lines_indexed(), 5);
+    }
+
+    // ── Task 247: ESC-U clears search pattern and re-enables highlighting ──
+
+    #[test]
+    fn test_dispatch_esc_upper_u_clears_search_pattern() {
+        let content = make_search_content(&["alpha", "target", "beta", "target", "gamma"]);
+        let mut keys: Vec<u8> = Vec::new();
+        // First search for "target".
+        keys.push(b'/');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        // Now ESC-U to clear search pattern.
+        keys.push(0x1B);
+        keys.push(b'U');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // Pattern should be cleared.
+        assert!(pager.last_pattern().is_none());
+        // Highlighting should be re-enabled (ready for next search).
+        assert!(pager.highlight_state().is_enabled());
+    }
+
+    #[test]
+    fn test_dispatch_esc_upper_u_without_pattern_is_noop() {
+        let content = make_test_content(10);
+        let mut keys: Vec<u8> = Vec::new();
+        // ESC-U with no prior search should not crash.
+        keys.push(0x1B);
+        keys.push(b'U');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert!(pager.last_pattern().is_none());
+        assert!(pager.highlight_state().is_enabled());
+    }
+
+    #[test]
+    fn test_dispatch_esc_upper_u_re_enables_highlight_after_toggle_off() {
+        let content = make_search_content(&["alpha", "target", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        // Search for "target".
+        keys.push(b'/');
+        keys.extend_from_slice(b"target");
+        keys.push(b'\n');
+        // Toggle highlight off with ESC-u.
+        keys.push(0x1B);
+        keys.push(b'u');
+        // Now clear with ESC-U — should re-enable highlighting.
+        keys.push(0x1B);
+        keys.push(b'U');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert!(pager.last_pattern().is_none());
+        assert!(pager.highlight_state().is_enabled());
+    }
+
+    // ── Task 247: ^S in search prompt shows "Sub-pattern search not supported" ──
+
+    #[test]
+    fn test_dispatch_ctrl_s_in_search_shows_not_supported() {
+        let content = make_search_content(&["alpha", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.push(0x13); // ^S
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("Sub-pattern search not supported"),
+            "Expected 'Sub-pattern search not supported' in output: {output}"
+        );
+        // Search should be cancelled — no pattern stored.
+        assert!(pager.last_pattern().is_none());
+    }
+
+    // ── Task 247: ^L in search prompt inserts next character literally ──
+
+    #[test]
+    fn test_dispatch_ctrl_l_literal_next_inserts_modifier_as_literal() {
+        // Test that ^L followed by ^N inserts the ^N control character literally
+        // instead of treating it as the invert modifier.
+        let content = make_search_content(&["alpha", "\x0edata", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.push(0x0C); // ^L (literal next)
+        keys.push(0x0E); // ^N — should be inserted literally, not as modifier
+        keys.extend_from_slice(b"data");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        // The pattern should contain the literal ^N character followed by "data".
+        // Since \x0e is not treated as a modifier, it becomes part of the raw pattern.
+        assert!(pager.last_pattern().is_some());
+    }
+
+    #[test]
+    fn test_dispatch_ctrl_l_literal_next_inserts_normal_char() {
+        // ^L followed by a normal character should just insert it.
+        let content = make_search_content(&["alpha", "beta"]);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'/');
+        keys.push(0x0C); // ^L (literal next)
+        keys.push(b'a'); // regular char
+        keys.extend_from_slice(b"lpha");
+        keys.push(b'\n');
+        keys.push(b'q');
+        let pager = run_pager(&keys, &content);
+        assert!(pager.last_pattern().is_some());
+        assert_eq!(pager.last_pattern().unwrap().pattern(), "alpha");
     }
 }

@@ -123,6 +123,8 @@ pub enum Command {
     NextTag,
     /// Go to the previous tag match in the tag list. `T`.
     PrevTag,
+    /// Clear search highlighting and the saved pattern. ESC-U.
+    ClearSearchPattern,
 }
 
 #[cfg(test)]
@@ -214,5 +216,15 @@ mod tests {
             Command::FollowModeStopOnMatch,
             Command::FollowModeStopOnMatch
         );
+    }
+
+    #[test]
+    fn test_command_clear_search_pattern_equality() {
+        assert_eq!(Command::ClearSearchPattern, Command::ClearSearchPattern);
+    }
+
+    #[test]
+    fn test_command_clear_search_pattern_differs_from_toggle_highlight() {
+        assert_ne!(Command::ClearSearchPattern, Command::ToggleHighlight);
     }
 }

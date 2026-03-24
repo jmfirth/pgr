@@ -121,6 +121,7 @@ impl Keymap {
             (Key::Char('n'), Command::RepeatSearch),
             (Key::Char('N'), Command::RepeatSearchReverse),
             (Key::EscSeq('u'), Command::ToggleHighlight),
+            (Key::EscSeq('U'), Command::ClearSearchPattern),
             // Bracket matching
             (Key::Char('{'), Command::FindCloseBracket('{', '}')),
             (Key::Char('}'), Command::FindOpenBracket('{', '}')),
@@ -572,6 +573,17 @@ mod tests {
         assert_eq!(
             keymap.lookup(&Key::EscSeq('?')),
             Command::SearchBackwardCrossFile
+        );
+    }
+
+    // ── Task 247: ESC-U maps to ClearSearchPattern ──
+
+    #[test]
+    fn test_keymap_esc_upper_u_maps_to_clear_search_pattern() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::EscSeq('U')),
+            Command::ClearSearchPattern
         );
     }
 
