@@ -2,6 +2,7 @@
 
 use std::io::Write;
 
+use crate::completion::{tab_complete, CompletionMode, CompletionState};
 use crate::key::Key;
 
 /// Default maximum number of entries stored in a history list.
@@ -16,6 +17,9 @@ pub enum LineEditResult {
     Confirm(String),
     /// The user pressed Escape or Ctrl+C. Editing was cancelled.
     Cancel,
+    /// The user pressed Tab and there are multiple completions.
+    /// Contains a status message listing the candidates.
+    ContinueWithStatus(String),
 }
 
 /// In-memory history of previous command/search inputs.
@@ -135,6 +139,10 @@ pub struct LineEditor {
     cursor: usize,
     /// The prompt prefix displayed before the input (e.g., "/" or ":").
     prompt: String,
+    /// The completion mode for Tab key handling.
+    completion_mode: CompletionMode,
+    /// Active completion state for cycling through multiple matches.
+    completion_state: Option<CompletionState>,
     /// The user's original input before history navigation began.
     saved_input: Option<String>,
     /// Current position in history during navigation (`None` = not navigating).
@@ -152,6 +160,25 @@ impl LineEditor {
             buf: String::new(),
             cursor: 0,
             prompt: prompt.to_owned(),
+            completion_mode: CompletionMode::None,
+            completion_state: None,
+            saved_input: None,
+            history_pos: None,
+        }
+    }
+
+    /// Create a new line editor with the given prompt prefix and completion mode.
+    ///
+    /// The completion mode determines what kind of tab completion is
+    /// available (filenames, option names, or none).
+    #[must_use]
+    pub fn with_completion(prompt: &str, mode: CompletionMode) -> Self {
+        Self {
+            buf: String::new(),
+            cursor: 0,
+            prompt: prompt.to_owned(),
+            completion_mode: mode,
+            completion_state: None,
             saved_input: None,
             history_pos: None,
         }
@@ -166,6 +193,8 @@ impl LineEditor {
             buf: initial.to_owned(),
             cursor: initial.len(),
             prompt: prompt.to_owned(),
+            completion_mode: CompletionMode::None,
+            completion_state: None,
             saved_input: None,
             history_pos: None,
         }
@@ -177,30 +206,39 @@ impl LineEditor {
         match key {
             Key::Enter => return LineEditResult::Confirm(self.buf.clone()),
             Key::Escape | Key::Ctrl('c' | 'g') => return LineEditResult::Cancel,
+            Key::Tab => return self.handle_tab(),
             Key::Char(c) => {
                 self.reset_history_nav();
+                self.completion_state = None;
                 self.insert(*c);
             }
             Key::Backspace => {
                 self.reset_history_nav();
+                self.completion_state = None;
                 self.backspace();
             }
             Key::Delete => {
                 self.reset_history_nav();
+                self.completion_state = None;
                 self.delete();
             }
             Key::Ctrl('u') => {
                 self.reset_history_nav();
+                self.completion_state = None;
                 self.clear();
             }
             Key::Ctrl('a') | Key::Home => self.home(),
             Key::Ctrl('e') | Key::End => self.end(),
             Key::Left => self.cursor_left(),
             Key::Right => self.cursor_right(),
+            Key::CtrlLeft | Key::EscSeq('b') => self.move_word_backward(),
+            Key::CtrlRight | Key::EscSeq('f') => self.move_word_forward(),
             Key::Ctrl('w') => {
                 self.reset_history_nav();
+                self.completion_state = None;
                 self.delete_word_backward();
             }
+            Key::EscSeq('d') => self.delete_word_forward(),
             _ => {}
         }
         LineEditResult::Continue
@@ -223,6 +261,28 @@ impl LineEditor {
                 LineEditResult::Continue
             }
             _ => self.process_key(key),
+        }
+    }
+
+    /// Handle tab key press for completion.
+    fn handle_tab(&mut self) -> LineEditResult {
+        let (replacement, status, new_state) = tab_complete(
+            &self.buf,
+            &self.completion_mode,
+            self.completion_state.take(),
+        );
+
+        if let Some(text) = replacement {
+            self.buf = text;
+            self.cursor = self.buf.len();
+        }
+
+        self.completion_state = new_state;
+
+        if let Some(msg) = status {
+            LineEditResult::ContinueWithStatus(msg)
+        } else {
+            LineEditResult::Continue
         }
     }
 
@@ -331,6 +391,38 @@ impl LineEditor {
         self.cursor = self.buf.len();
     }
 
+    /// Move the cursor backward by one word.
+    ///
+    /// Skips any whitespace immediately before the cursor, then moves to the
+    /// start of the preceding word (the next whitespace boundary going left,
+    /// or the beginning of the buffer).
+    pub fn move_word_backward(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = self.word_start_before_cursor();
+    }
+
+    /// Move the cursor forward by one word.
+    ///
+    /// Skips any whitespace immediately after the cursor, then moves past the
+    /// next word to the following whitespace boundary (or end of buffer).
+    pub fn move_word_forward(&mut self) {
+        if self.cursor >= self.buf.len() {
+            return;
+        }
+        self.cursor = self.word_end_after_cursor();
+    }
+
+    /// Delete from the cursor forward to the next word boundary.
+    pub fn delete_word_forward(&mut self) {
+        if self.cursor >= self.buf.len() {
+            return;
+        }
+        let end = self.word_end_after_cursor();
+        self.buf.drain(self.cursor..end);
+    }
+
     /// Return the current buffer contents.
     #[must_use]
     pub fn contents(&self) -> &str {
@@ -395,36 +487,63 @@ impl LineEditor {
     }
 
     /// Delete from the cursor backward to the previous whitespace boundary.
-    fn delete_word_backward(&mut self) {
+    pub fn delete_word_backward(&mut self) {
         if self.cursor == 0 {
             return;
         }
+        let word_start = self.word_start_before_cursor();
+        self.buf.drain(word_start..self.cursor);
+        self.cursor = word_start;
+    }
 
+    /// Find the byte offset of the start of the word before the cursor.
+    ///
+    /// Skips trailing whitespace, then finds the preceding whitespace boundary
+    /// (or the beginning of the buffer).
+    fn word_start_before_cursor(&self) -> usize {
         let before_cursor = &self.buf[..self.cursor];
 
         // Skip any trailing whitespace.
-        let end_pos = before_cursor
+        let non_ws = before_cursor
             .char_indices()
             .rev()
-            .find(|(_, c)| !c.is_whitespace())
-            .map_or(0, |(i, _)| i);
+            .find(|(_, c)| !c.is_whitespace());
 
-        if end_pos == 0 && before_cursor.starts_with(|c: char| c.is_whitespace()) {
-            // Everything before cursor is whitespace — delete it all.
-            self.buf.drain(..self.cursor);
-            self.cursor = 0;
-            return;
-        }
+        let Some((end_pos, _)) = non_ws else {
+            // Everything before cursor is whitespace.
+            return 0;
+        };
 
         // Find the start of the word (next whitespace going backward, or start of string).
-        let word_start = before_cursor[..end_pos]
+        before_cursor[..end_pos]
             .char_indices()
             .rev()
             .find(|(_, c)| c.is_whitespace())
-            .map_or(0, |(i, c)| i + c.len_utf8());
+            .map_or(0, |(i, c)| i + c.len_utf8())
+    }
 
-        self.buf.drain(word_start..self.cursor);
-        self.cursor = word_start;
+    /// Find the byte offset of the end of the word after the cursor.
+    ///
+    /// Skips leading whitespace, then finds the next whitespace boundary
+    /// (or the end of the buffer).
+    fn word_end_after_cursor(&self) -> usize {
+        let after_cursor = &self.buf[self.cursor..];
+
+        // Skip any leading whitespace.
+        let non_ws = after_cursor
+            .char_indices()
+            .find(|(_, c)| !c.is_whitespace());
+
+        let Some((ws_end, _)) = non_ws else {
+            // Everything after cursor is whitespace.
+            return self.buf.len();
+        };
+
+        // Find the end of the word (next whitespace, or end of string).
+        after_cursor[ws_end..]
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(self.buf.len(), |(i, _)| self.cursor + ws_end + i)
     }
 
     /// Find the byte offset of the previous character boundary before `self.cursor`.
@@ -750,23 +869,23 @@ mod tests {
     fn test_line_editor_utf8_insert_and_cursor() {
         let mut editor = LineEditor::new(":");
         // Insert multi-byte characters.
-        editor.insert('ä');
-        editor.insert('ö');
-        editor.insert('ü');
-        assert_eq!(editor.contents(), "äöü");
+        editor.insert('\u{e4}');
+        editor.insert('\u{f6}');
+        editor.insert('\u{fc}');
+        assert_eq!(editor.contents(), "\u{e4}\u{f6}\u{fc}");
 
-        // Move left past 'ü', insert 'x'.
+        // Move left past 'u with umlaut', insert 'x'.
         editor.cursor_left();
         editor.insert('x');
-        assert_eq!(editor.contents(), "äöxü");
+        assert_eq!(editor.contents(), "\u{e4}\u{f6}x\u{fc}");
 
         // Backspace should remove 'x'.
         editor.backspace();
-        assert_eq!(editor.contents(), "äöü");
+        assert_eq!(editor.contents(), "\u{e4}\u{f6}\u{fc}");
 
-        // Delete at current position should remove 'ü'.
+        // Delete at current position should remove 'u with umlaut'.
         editor.delete();
-        assert_eq!(editor.contents(), "äö");
+        assert_eq!(editor.contents(), "\u{e4}\u{f6}");
     }
 
     #[test]
@@ -1031,5 +1150,290 @@ mod tests {
         let mut editor = LineEditor::new("/");
         let result = editor.process_key_with_history(&Key::Enter, &history);
         assert_eq!(result, LineEditResult::Confirm(String::new()));
+    }
+
+    // ── Word movement tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_line_editor_move_word_backward_from_end() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "hello Xworld");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_backward_skips_trailing_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "hello   ");
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "Xhello   ");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_backward_at_start_is_noop() {
+        let mut editor = LineEditor::with_initial("/", "hello");
+        editor.home();
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "Xhello");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_backward_multiple_words() {
+        let mut editor = LineEditor::with_initial("/", "one two three");
+        editor.move_word_backward();
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "one Xtwo three");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_from_start() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX world");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_skips_leading_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "   hello");
+        editor.home();
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "   helloX");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_at_end_is_noop() {
+        let mut editor = LineEditor::with_initial("/", "hello");
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_multiple_words() {
+        let mut editor = LineEditor::with_initial("/", "one two three");
+        editor.home();
+        editor.move_word_forward();
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "one twoX three");
+    }
+
+    #[test]
+    fn test_line_editor_ctrl_left_moves_word_backward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.process_key(&Key::CtrlLeft);
+        editor.insert('X');
+        assert_eq!(editor.contents(), "hello Xworld");
+    }
+
+    #[test]
+    fn test_line_editor_ctrl_right_moves_word_forward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.process_key(&Key::CtrlRight);
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX world");
+    }
+
+    #[test]
+    fn test_line_editor_esc_b_moves_word_backward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.process_key(&Key::EscSeq('b'));
+        editor.insert('X');
+        assert_eq!(editor.contents(), "hello Xworld");
+    }
+
+    #[test]
+    fn test_line_editor_esc_f_moves_word_forward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.process_key(&Key::EscSeq('f'));
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX world");
+    }
+
+    // ── Word delete tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_line_editor_delete_word_forward_from_start() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), " world");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_forward_skips_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "   hello");
+        editor.home();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_forward_at_end_is_noop() {
+        let mut editor = LineEditor::with_initial("/", "hello");
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "hello");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_forward_mid_word() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.cursor_right();
+        editor.cursor_right();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "he world");
+    }
+
+    #[test]
+    fn test_line_editor_esc_d_deletes_word_forward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.process_key(&Key::EscSeq('d'));
+        assert_eq!(editor.contents(), " world");
+    }
+
+    #[test]
+    fn test_line_editor_word_movement_empty_buffer() {
+        let mut editor = LineEditor::new("/");
+        editor.move_word_backward();
+        editor.move_word_forward();
+        editor.delete_word_forward();
+    }
+
+    #[test]
+    fn test_line_editor_word_boundaries_at_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "a b c");
+        // Move backward from end: should land before 'c'
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "a b Xc");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_backward_with_multiple_spaces() {
+        let mut editor = LineEditor::with_initial("/", "hello    world");
+        editor.delete_word_backward();
+        assert_eq!(editor.contents(), "hello    ");
+    }
+
+    // ── Tab completion integration tests ──
+
+    #[test]
+    fn test_line_editor_tab_no_completion_mode_is_noop() {
+        let mut editor = LineEditor::new("/");
+        for c in "test".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "test");
+    }
+
+    #[test]
+    fn test_line_editor_tab_option_completion_single_match() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "wordw".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "wordwrap");
+    }
+
+    #[test]
+    fn test_line_editor_tab_option_completion_multiple_matches() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "quit".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        // Should return ContinueWithStatus since there are multiple matches.
+        match result {
+            LineEditResult::ContinueWithStatus(msg) => {
+                assert!(msg.contains("completions"));
+            }
+            _ => panic!("Expected ContinueWithStatus, got {result:?}"),
+        }
+        // Buffer should contain the common prefix.
+        assert!(editor.contents().starts_with("quit"));
+    }
+
+    #[test]
+    fn test_line_editor_tab_no_matches_is_noop() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "zzzzz".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "zzzzz");
+    }
+
+    #[test]
+    fn test_line_editor_tab_completion_state_reset_on_char() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "quit".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        // Trigger completion (creates state).
+        editor.process_key(&Key::Tab);
+        // Type a character — should reset the completion state.
+        editor.process_key(&Key::Char('x'));
+        // Contents should have appended 'x' to whatever Tab set.
+        assert!(editor.contents().ends_with('x'));
+    }
+
+    #[test]
+    fn test_line_editor_tab_completion_cycles_on_repeated_tab() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "quit".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        // First Tab sets common prefix and creates cycling state.
+        editor.process_key(&Key::Tab);
+        let after_first = editor.contents().to_owned();
+
+        // Second Tab should cycle to first candidate.
+        editor.process_key(&Key::Tab);
+        let after_second = editor.contents().to_owned();
+
+        // The two should differ (prefix vs. a specific candidate).
+        // Both should start with "quit".
+        assert!(after_first.starts_with("quit"));
+        assert!(after_second.starts_with("quit"));
+    }
+
+    #[test]
+    fn test_line_editor_with_completion_creates_correct_mode() {
+        let editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        assert!(editor.is_empty());
+        assert_eq!(editor.contents(), "");
+    }
+
+    #[test]
+    fn test_line_editor_tab_filename_completion_in_temp_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Create a uniquely-named file.
+        std::fs::write(base.join("unique_test_file.txt"), "").unwrap();
+
+        let mut editor = LineEditor::with_completion("Examine: ", CompletionMode::Filename);
+        let partial = format!("{}/unique_test_f", base.display());
+        for c in partial.chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert!(editor.contents().contains("unique_test_file.txt"));
     }
 }

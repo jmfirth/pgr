@@ -2,6 +2,7 @@
 //! Raw terminal mode, key binding, lesskey parsing, and command dispatch.
 
 pub mod command;
+pub mod completion;
 pub mod dispatch;
 pub mod error;
 pub mod file_list;
@@ -19,6 +20,10 @@ pub mod tags;
 pub mod terminal;
 
 pub use command::Command;
+pub use completion::{
+    complete, complete_filename, complete_option, longest_common_prefix, tab_complete,
+    CompletionMode, CompletionResult,
+};
 pub use dispatch::{Pager, PendingCommand};
 pub use error::{KeyError, Result};
 pub use file_list::{FileEntry, FileList, FileListError};
