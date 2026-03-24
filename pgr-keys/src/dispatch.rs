@@ -3263,6 +3263,20 @@ impl<R: Read, W: Write> Pager<R, W> {
     pub fn set_wheel_reversed(&mut self, lines: usize) {
         self.keymap.set_wheel_reversed(lines);
     }
+
+    /// Immediately index all lines in the buffer (`--file-size`).
+    ///
+    /// Forces a complete scan of the buffer so that line counts and
+    /// percentage calculations are accurate from the start, rather
+    /// than being computed lazily as lines are visited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading from the buffer fails during scanning.
+    pub fn index_all_immediate(&mut self) -> Result<()> {
+        self.index.index_all(&*self.buffer)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -5862,5 +5876,22 @@ mod tests {
         assert!(output.contains("HEADER1"), "expected HEADER1 in output");
         assert!(output.contains("HEADER2"), "expected HEADER2 in output");
         assert!(output.contains("HEADER3"), "expected HEADER3 in output");
+    }
+
+    // ── Task 224: index_all_immediate ─────────────────────────────────
+
+    #[test]
+    fn test_index_all_immediate_indexes_all_lines() {
+        let data = b"line 0\nline 1\nline 2\nline 3\nline 4\n";
+        let buf = TestBuffer::new(data);
+        let index = LineIndex::new(data.len() as u64);
+        let reader = KeyReader::new(Cursor::new(b"q" as &[u8]));
+        let writer: Vec<u8> = Vec::new();
+        let buffer: Box<dyn Buffer> = Box::new(buf);
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        // LineIndex::new records offset 0 for non-empty buffers, so 1 line start is known.
+        assert_eq!(pager.index.lines_indexed(), 1);
+        pager.index_all_immediate().unwrap();
+        assert_eq!(pager.index.lines_indexed(), 5);
     }
 }

@@ -237,6 +237,10 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
         pager.set_secure_mode(true);
     }
 
+    if options.file_size {
+        pager.index_all_immediate()?;
+    }
+
     pager.run()?;
     drop(pager);
     drop(raw_terminal);
@@ -338,6 +342,10 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
         pager.set_file_list(file_list);
     }
 
+    if options.file_size {
+        pager.index_all_immediate()?;
+    }
+
     pager.run()?;
     drop(pager);
     drop(raw_terminal);
@@ -395,9 +403,13 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         pager.set_header_lines(header_lines);
     }
 
-    // Wire initial commands (+cmd / ++cmd).
-    if !options.initial_commands.is_empty() {
-        pager.set_initial_commands(options.initial_commands.clone());
+    // Wire initial commands (+cmd / ++cmd / --cmd).
+    let mut initial_cmds = options.initial_commands.clone();
+    if let Some(ref cmd) = options.cmd {
+        initial_cmds.push(cmd.clone());
+    }
+    if !initial_cmds.is_empty() {
+        pager.set_initial_commands(initial_cmds);
     }
     if !options.every_file_commands.is_empty() {
         pager.set_every_file_commands(options.every_file_commands.clone());
