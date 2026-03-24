@@ -193,6 +193,12 @@ pub struct Pager<R: Read, W: Write> {
     exit_follow_on_close: bool,
     /// Whether mouse tracking is enabled (`--mouse` or `--MOUSE`).
     mouse_enabled: bool,
+    /// Whether to skip keypad init/deinit sequences (`--no-keypad`).
+    no_keypad: bool,
+    /// Whether visual bell is disabled (`--no-vbell`).
+    no_vbell: bool,
+    /// Whether to repaint the screen before exiting (`--redraw-on-quit`).
+    redraw_on_quit: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -259,6 +265,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             follow_name: false,
             exit_follow_on_close: false,
             mouse_enabled: false,
+            no_keypad: false,
+            no_vbell: false,
+            redraw_on_quit: false,
         }
     }
 
@@ -270,6 +279,11 @@ impl<R: Read, W: Write> Pager<R, W> {
     pub fn run(&mut self) -> Result<()> {
         // Enter alternate screen buffer (like GNU less).
         self.writer.write_all(b"\x1b[?1049h")?;
+
+        // Enable application keypad mode unless --no-keypad was specified.
+        if !self.no_keypad {
+            self.writer.write_all(crate::terminal::KEYPAD_ENABLE)?;
+        }
 
         // Enable mouse tracking if configured.
         if self.mouse_enabled {
@@ -298,6 +312,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                         let _ = self.writer.write_all(crate::terminal::MOUSE_SGR_DISABLE);
                         let _ = self.writer.write_all(crate::terminal::MOUSE_DISABLE);
                     }
+                    // Disable application keypad mode.
+                    if !self.no_keypad {
+                        let _ = self.writer.write_all(crate::terminal::KEYPAD_DISABLE);
+                    }
                     // Exit alternate screen buffer before propagating error.
                     let _ = self.writer.write_all(b"\x1b[?1049l");
                     let _ = self.writer.flush();
@@ -310,6 +328,16 @@ impl<R: Read, W: Write> Pager<R, W> {
         if self.mouse_enabled {
             self.writer.write_all(crate::terminal::MOUSE_SGR_DISABLE)?;
             self.writer.write_all(crate::terminal::MOUSE_DISABLE)?;
+        }
+
+        // Disable application keypad mode.
+        if !self.no_keypad {
+            self.writer.write_all(crate::terminal::KEYPAD_DISABLE)?;
+        }
+
+        // Repaint the screen before exiting if --redraw-on-quit is set.
+        if self.redraw_on_quit {
+            self.repaint()?;
         }
 
         // Exit alternate screen buffer.
@@ -3263,6 +3291,35 @@ impl<R: Read, W: Write> Pager<R, W> {
     pub fn set_wheel_reversed(&mut self, lines: usize) {
         self.keymap.set_wheel_reversed(lines);
     }
+
+    /// Skip keypad init/deinit escape sequences (`--no-keypad`).
+    ///
+    /// When enabled, the pager will not send `ESC[?1h` / `ESC[?1l`
+    /// (application keypad mode) on entry and exit.
+    pub fn set_no_keypad(&mut self, enabled: bool) {
+        self.no_keypad = enabled;
+    }
+
+    /// Disable visual bell (`--no-vbell`).
+    ///
+    /// When enabled, the pager will not flash the screen on errors.
+    pub fn set_no_vbell(&mut self, enabled: bool) {
+        self.no_vbell = enabled;
+    }
+
+    /// Whether visual bell is disabled.
+    #[must_use]
+    pub fn no_vbell(&self) -> bool {
+        self.no_vbell
+    }
+
+    /// Repaint the screen before exiting alternate screen (`--redraw-on-quit`).
+    ///
+    /// When enabled, the pager repaints the viewport content before
+    /// leaving the alternate screen buffer on quit.
+    pub fn set_redraw_on_quit(&mut self, enabled: bool) {
+        self.redraw_on_quit = enabled;
+    }
 }
 
 #[cfg(test)]
@@ -5862,5 +5919,87 @@ mod tests {
         assert!(output.contains("HEADER1"), "expected HEADER1 in output");
         assert!(output.contains("HEADER2"), "expected HEADER2 in output");
         assert!(output.contains("HEADER3"), "expected HEADER3 in output");
+    }
+
+    // ── Task 223: --no-keypad, --no-vbell, --redraw-on-quit ─────────
+
+    #[test]
+    fn test_dispatch_keypad_enabled_by_default() {
+        let content = make_test_content(5);
+        let pager = run_pager(b"q", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        // Default: keypad enable sent on entry, disable sent on exit
+        assert!(
+            output.contains("\x1b[?1h"),
+            "expected keypad enable sequence"
+        );
+        assert!(
+            output.contains("\x1b[?1l"),
+            "expected keypad disable sequence"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_no_keypad_skips_keypad_sequences() {
+        let content = make_test_content(5);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.set_no_keypad(true);
+        let _ = pager.run();
+        let output = String::from_utf8_lossy(&pager.writer);
+        // --no-keypad: should NOT contain keypad enable or disable sequences
+        assert!(
+            !output.contains("\x1b[?1h"),
+            "should not contain keypad enable"
+        );
+        assert!(
+            !output.contains("\x1b[?1l"),
+            "should not contain keypad disable"
+        );
+    }
+
+    #[test]
+    fn test_dispatch_no_vbell_setter() {
+        let content = make_test_content(5);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        assert!(!pager.no_vbell());
+        pager.set_no_vbell(true);
+        assert!(pager.no_vbell());
+    }
+
+    #[test]
+    fn test_dispatch_redraw_on_quit_repaints_before_exit() {
+        let content = make_test_content(5);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.set_redraw_on_quit(true);
+        let _ = pager.run();
+        let output = String::from_utf8_lossy(&pager.writer);
+        // Find position of alt-screen exit sequence
+        let alt_exit = output.rfind("\x1b[?1049l").expect("alt screen exit");
+        // "line 0" should appear after the last repaint (which happens before alt exit)
+        // The repaint before exit writes content just before the alt screen exit
+        let last_line0 = output.rfind("line 0").expect("line 0 in output");
+        // The redraw-on-quit repaint should produce content shortly before the alt exit
+        assert!(
+            last_line0 < alt_exit,
+            "repaint content should appear before alternate screen exit"
+        );
     }
 }

@@ -279,6 +279,42 @@ pub struct Options {
     #[arg(long = "wheel-lines")]
     pub wheel_lines: Option<usize>,
 
+    /// Process backspace characters for overstrike rendering (default).
+    #[arg(long = "proc-backspace")]
+    pub proc_backspace: bool,
+
+    /// Don't process backspace characters.
+    #[arg(long = "PROC-BACKSPACE")]
+    pub no_proc_backspace: bool,
+
+    /// Process carriage return characters (default).
+    #[arg(long = "proc-return")]
+    pub proc_return: bool,
+
+    /// Don't process carriage return characters.
+    #[arg(long = "PROC-RETURN")]
+    pub no_proc_return: bool,
+
+    /// Process tab characters (default).
+    #[arg(long = "proc-tab")]
+    pub proc_tab: bool,
+
+    /// Don't process tab characters.
+    #[arg(long = "PROC-TAB")]
+    pub no_proc_tab: bool,
+
+    /// Don't send keypad init/deinit sequences (smkx/rmkx).
+    #[arg(long = "no-keypad")]
+    pub no_keypad: bool,
+
+    /// Disable visual bell.
+    #[arg(long = "no-vbell")]
+    pub no_vbell: bool,
+
+    /// Repaint the screen before exiting alternate screen.
+    #[arg(long = "redraw-on-quit")]
+    pub redraw_on_quit: bool,
+
     /// Follow by name in follow mode: reopen file by path on rename/delete.
     #[arg(long = "follow-name")]
     pub follow_name: bool,
@@ -1105,5 +1141,95 @@ mod tests {
     fn test_options_header_invalid_values_default_to_zero() {
         let opts = Options::parse_from(["pgr", "--header=abc", "file.txt"]);
         assert_eq!(opts.header_params(), (0, 0, 0));
+    }
+
+    // ── Task 223: Long flags batch 2 ─────────────────────────────────
+
+    #[test]
+    fn test_options_proc_backspace_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--proc-backspace", "file.txt"]);
+        assert!(opts.proc_backspace);
+        assert!(!opts.no_proc_backspace);
+    }
+
+    #[test]
+    fn test_options_no_proc_backspace_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--PROC-BACKSPACE", "file.txt"]);
+        assert!(opts.no_proc_backspace);
+        assert!(!opts.proc_backspace);
+    }
+
+    #[test]
+    fn test_options_proc_return_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--proc-return", "file.txt"]);
+        assert!(opts.proc_return);
+        assert!(!opts.no_proc_return);
+    }
+
+    #[test]
+    fn test_options_no_proc_return_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--PROC-RETURN", "file.txt"]);
+        assert!(opts.no_proc_return);
+        assert!(!opts.proc_return);
+    }
+
+    #[test]
+    fn test_options_proc_tab_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--proc-tab", "file.txt"]);
+        assert!(opts.proc_tab);
+        assert!(!opts.no_proc_tab);
+    }
+
+    #[test]
+    fn test_options_no_proc_tab_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--PROC-TAB", "file.txt"]);
+        assert!(opts.no_proc_tab);
+        assert!(!opts.proc_tab);
+    }
+
+    #[test]
+    fn test_options_no_keypad_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--no-keypad", "file.txt"]);
+        assert!(opts.no_keypad);
+    }
+
+    #[test]
+    fn test_options_no_vbell_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--no-vbell", "file.txt"]);
+        assert!(opts.no_vbell);
+    }
+
+    #[test]
+    fn test_options_redraw_on_quit_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--redraw-on-quit", "file.txt"]);
+        assert!(opts.redraw_on_quit);
+    }
+
+    #[test]
+    fn test_options_task223_defaults_all_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.proc_backspace);
+        assert!(!opts.no_proc_backspace);
+        assert!(!opts.proc_return);
+        assert!(!opts.no_proc_return);
+        assert!(!opts.proc_tab);
+        assert!(!opts.no_proc_tab);
+        assert!(!opts.no_keypad);
+        assert!(!opts.no_vbell);
+        assert!(!opts.redraw_on_quit);
+    }
+
+    #[test]
+    fn test_options_task223_combined_flags() {
+        let opts = Options::parse_from([
+            "pgr",
+            "--no-keypad",
+            "--no-vbell",
+            "--redraw-on-quit",
+            "file.txt",
+        ]);
+        assert!(opts.no_keypad);
+        assert!(opts.no_vbell);
+        assert!(opts.redraw_on_quit);
     }
 }
