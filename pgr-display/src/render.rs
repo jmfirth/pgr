@@ -125,6 +125,158 @@ impl TabStops {
     }
 }
 
+/// Parsed binary character format specification.
+///
+/// Represents the parsed form of `LESSBINFMT` or `LESSUTFBINFMT`.
+/// The format string supports:
+/// - `*` prefix: enable standout (reverse video) mode
+/// - `s` after `*`: insert a literal `*` character
+/// - literal characters: inserted directly
+/// - `%x`, `%X`, `%02X`, `%04X`, etc.: hex format of the byte value
+/// - `%o`: octal format
+/// - `%d`: decimal format
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinFmt {
+    /// Whether to wrap the output in standout (reverse video) mode.
+    pub standout: bool,
+    /// The format segments that produce the display string.
+    pub segments: Vec<BinFmtSegment>,
+}
+
+/// A segment of a binary format specification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinFmtSegment {
+    /// A literal string to insert.
+    Literal(String),
+    /// A printf-style format specifier for the byte value.
+    /// Stores the full specifier (e.g., `%02X`, `%04X`, `%o`, `%d`).
+    Format(String),
+}
+
+impl BinFmt {
+    /// Parse a `LESSBINFMT`-style format string.
+    ///
+    /// The `*` prefix enables standout mode. `s` immediately after `*`
+    /// inserts a literal `*`. Otherwise characters are literal unless a `%`
+    /// introduces a printf-style format specifier.
+    #[must_use]
+    pub fn parse(spec: &str) -> Self {
+        let mut chars = spec.chars().peekable();
+        let mut standout = false;
+        let mut segments = Vec::new();
+
+        // Check for `*` prefix (standout mode)
+        if chars.peek() == Some(&'*') {
+            standout = true;
+            chars.next();
+
+            // After `*`, if the next char is `s`, it means literal `*`
+            if chars.peek() == Some(&'s') {
+                chars.next();
+                segments.push(BinFmtSegment::Literal("*".to_string()));
+            }
+        }
+
+        let mut literal_buf = String::new();
+
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                // Flush accumulated literal
+                if !literal_buf.is_empty() {
+                    segments.push(BinFmtSegment::Literal(literal_buf.clone()));
+                    literal_buf.clear();
+                }
+
+                // Collect the format specifier
+                let mut fmt = String::from('%');
+                // Collect flags and width digits
+                while let Some(&fc) = chars.peek() {
+                    if fc.is_ascii_digit() || fc == '-' || fc == '+' || fc == '0' || fc == ' ' {
+                        fmt.push(fc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                // Collect the conversion character
+                if let Some(&conv) = chars.peek() {
+                    fmt.push(conv);
+                    chars.next();
+                }
+                segments.push(BinFmtSegment::Format(fmt));
+            } else {
+                literal_buf.push(c);
+            }
+        }
+
+        if !literal_buf.is_empty() {
+            segments.push(BinFmtSegment::Literal(literal_buf));
+        }
+
+        Self { standout, segments }
+    }
+
+    /// Format a byte value using this binary format specification.
+    #[must_use]
+    pub fn format_byte(&self, byte_val: u32) -> String {
+        let mut result = String::new();
+        for seg in &self.segments {
+            match seg {
+                BinFmtSegment::Literal(s) => result.push_str(s),
+                BinFmtSegment::Format(fmt) => {
+                    result.push_str(&apply_printf_format(fmt, byte_val));
+                }
+            }
+        }
+        result
+    }
+
+    /// Compute the display width of a formatted byte value.
+    ///
+    /// This must match the length of the string returned by `format_byte`.
+    #[must_use]
+    pub fn display_width(&self, byte_val: u32) -> usize {
+        self.format_byte(byte_val).len()
+    }
+}
+
+/// Apply a printf-style format specifier to a value.
+///
+/// Supports `%x`, `%X`, `%o`, `%d`, and width/zero-padding modifiers.
+fn apply_printf_format(fmt: &str, value: u32) -> String {
+    let bytes = fmt.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'%' {
+        return fmt.to_string();
+    }
+
+    let conv = bytes[bytes.len() - 1];
+    let middle = &fmt[1..fmt.len() - 1];
+
+    let zero_pad = middle.starts_with('0');
+    let width: usize = middle
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+
+    let raw = match conv {
+        b'x' => format!("{value:x}"),
+        b'X' => format!("{value:X}"),
+        b'o' => format!("{value:o}"),
+        b'd' => format!("{value}"),
+        _ => return fmt.to_string(),
+    };
+
+    if width > raw.len() {
+        let pad_char = if zero_pad { '0' } else { ' ' };
+        let padding = pad_char.to_string().repeat(width - raw.len());
+        format!("{padding}{raw}")
+    } else {
+        raw
+    }
+}
+
 /// Configuration for line rendering.
 ///
 /// Combines raw control mode, overstrike processing, and tab stop settings
@@ -138,6 +290,12 @@ pub struct RenderConfig {
     pub overstrike_mode: OverstrikeMode,
     /// Tab stop positions for tab expansion.
     pub tab_stops: TabStops,
+    /// Optional binary character format (from LESSBINFMT).
+    /// When `Some`, control/binary characters use this format instead of `^X`.
+    pub bin_fmt: Option<BinFmt>,
+    /// Optional UTF-8 binary format (from LESSUTFBINFMT).
+    /// When `Some`, invalid UTF-8 sequences use this format.
+    pub utf_bin_fmt: Option<BinFmt>,
 }
 
 impl Default for RenderConfig {
@@ -146,6 +304,8 @@ impl Default for RenderConfig {
             raw_mode: RawControlMode::Off,
             overstrike_mode: OverstrikeMode::Interpret,
             tab_stops: TabStops::regular(8),
+            bin_fmt: None,
+            utf_bin_fmt: None,
         }
     }
 }
@@ -184,18 +344,21 @@ pub fn render_line(
         line
     };
 
+    let bin_fmt = config.bin_fmt.as_ref();
     match config.raw_mode {
         RawControlMode::Off => render_off(
             effective_line,
             horizontal_offset,
             max_width,
             &config.tab_stops,
+            bin_fmt,
         ),
         RawControlMode::AnsiOnly => render_ansi_only(
             effective_line,
             horizontal_offset,
             max_width,
             &config.tab_stops,
+            bin_fmt,
         ),
         RawControlMode::All => render_all(effective_line, horizontal_offset, max_width),
     }
@@ -212,9 +375,17 @@ fn render_off(
     horizontal_offset: usize,
     max_width: usize,
     tab_stops: &TabStops,
+    bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let chars: Vec<char> = line.chars().collect();
-    render_chars(&chars, horizontal_offset, max_width, tab_stops, false)
+    render_chars(
+        &chars,
+        horizontal_offset,
+        max_width,
+        tab_stops,
+        false,
+        bin_fmt,
+    )
 }
 
 /// Render with ANSI escapes preserved, control chars as `^X`.
@@ -223,6 +394,7 @@ fn render_ansi_only(
     horizontal_offset: usize,
     max_width: usize,
     tab_stops: &TabStops,
+    bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let segments = ansi::parse_ansi(line);
     let mut output = String::with_capacity(line.len());
@@ -246,7 +418,7 @@ fn render_ansi_only(
                         break;
                     }
 
-                    let char_w = expanded_width(c, col, tab_stops);
+                    let char_w = expanded_width(c, col, tab_stops, bin_fmt);
 
                     // Handle horizontal offset: skip leading columns
                     if skipped < horizontal_offset {
@@ -267,7 +439,7 @@ fn render_ansi_only(
                         break;
                     }
 
-                    let expansion = expand_char(c, col, tab_stops);
+                    let expansion = expand_char(c, col, tab_stops, bin_fmt);
                     output.push_str(&expansion);
                     visible_width += char_w;
                     col += char_w;
@@ -312,13 +484,39 @@ fn render_all(line: &str, horizontal_offset: usize, max_width: usize) -> (String
 ///
 /// Returns the number of terminal cells the expanded form occupies.
 /// This must stay in sync with [`expand_char`].
-fn expanded_width(c: char, current_col: usize, tab_stops: &TabStops) -> usize {
+///
+/// When `bin_fmt` is `Some`, binary/control characters use the LESSBINFMT
+/// format instead of the default `^X` notation.
+fn expanded_width(
+    c: char,
+    current_col: usize,
+    tab_stops: &TabStops,
+    bin_fmt: Option<&BinFmt>,
+) -> usize {
     match c {
         '\t' => tab_stops.spaces_to_next(current_col),
         '\n' | '\r' => 0,
-        '\x1b' => 3, // ESC displays as "ESC" (matching GNU less)
-        '\x7f' => 2,
-        c if c.is_ascii_control() => 2,
+        '\x1b' => {
+            if let Some(fmt) = bin_fmt {
+                fmt.display_width(u32::from(c as u8))
+            } else {
+                3 // ESC displays as "ESC" (matching GNU less)
+            }
+        }
+        '\x7f' => {
+            if let Some(fmt) = bin_fmt {
+                fmt.display_width(0x7F)
+            } else {
+                2
+            }
+        }
+        c if c.is_ascii_control() => {
+            if let Some(fmt) = bin_fmt {
+                fmt.display_width(u32::from(c as u8))
+            } else {
+                2
+            }
+        }
         c => UnicodeWidthChar::width(c).unwrap_or(0),
     }
 }
@@ -326,29 +524,53 @@ fn expanded_width(c: char, current_col: usize, tab_stops: &TabStops) -> usize {
 /// Expand a character into its display representation.
 ///
 /// - Tabs expand to spaces based on current column and tab stops.
-/// - Control characters become `^X` notation.
+/// - Control characters become `^X` notation (or LESSBINFMT format if set).
 /// - Newlines and carriage returns are ignored (stripped).
 /// - Normal characters pass through.
-fn expand_char(c: char, current_col: usize, tab_stops: &TabStops) -> String {
+///
+/// When `bin_fmt` is `Some`, binary/control characters use the LESSBINFMT
+/// format instead of the default `^X` notation.
+fn expand_char(
+    c: char,
+    current_col: usize,
+    tab_stops: &TabStops,
+    bin_fmt: Option<&BinFmt>,
+) -> String {
     match c {
         '\t' => {
             let spaces = tab_stops.spaces_to_next(current_col);
             " ".repeat(spaces)
         }
         '\n' | '\r' => String::new(),
-        // ESC displays as "ESC" (matching GNU less, which special-cases 0x1b
-        // to avoid the confusing ^[ caret notation that resembles a real
-        // escape sequence).
-        '\x1b' => "ESC".to_string(),
-        '\x7f' => "^?".to_string(),
+        '\x1b' => {
+            if let Some(fmt) = bin_fmt {
+                fmt.format_byte(u32::from(c as u8))
+            } else {
+                // ESC displays as "ESC" (matching GNU less, which special-cases 0x1b
+                // to avoid the confusing ^[ caret notation that resembles a real
+                // escape sequence).
+                "ESC".to_string()
+            }
+        }
+        '\x7f' => {
+            if let Some(fmt) = bin_fmt {
+                fmt.format_byte(0x7F)
+            } else {
+                "^?".to_string()
+            }
+        }
         c if c.is_ascii_control() => {
-            let mut s = String::with_capacity(2);
-            s.push('^');
-            // Control chars 0x00-0x1F map to ^@, ^A, ..., ^_
-            #[allow(clippy::cast_possible_truncation)] // c is in 0x00..=0x1F, always fits u8
-            let display = (c as u8 + b'@') as char;
-            s.push(display);
-            s
+            if let Some(fmt) = bin_fmt {
+                fmt.format_byte(u32::from(c as u8))
+            } else {
+                let mut s = String::with_capacity(2);
+                s.push('^');
+                // Control chars 0x00-0x1F map to ^@, ^A, ..., ^_
+                #[allow(clippy::cast_possible_truncation)] // c is in 0x00..=0x1F, always fits u8
+                let display = (c as u8 + b'@') as char;
+                s.push(display);
+                s
+            }
         }
         _ => {
             let mut s = String::with_capacity(c.len_utf8());
@@ -390,17 +612,18 @@ pub fn line_display_width(line: &str, config: &RenderConfig) -> usize {
         line
     };
 
+    let bin_fmt = config.bin_fmt.as_ref();
     match config.raw_mode {
         RawControlMode::Off => {
             // In Off mode, ESC is displayed as "ESC" and the rest of ANSI
             // sequences are visible text — don't strip.
-            compute_display_width(effective_line, &config.tab_stops)
+            compute_display_width(effective_line, &config.tab_stops, bin_fmt)
         }
         RawControlMode::AnsiOnly => {
             // In AnsiOnly mode, SGR sequences pass through with zero display
             // width — strip them for width calculation.
             let stripped = ansi::strip_ansi(effective_line);
-            compute_display_width(&stripped, &config.tab_stops)
+            compute_display_width(&stripped, &config.tab_stops, bin_fmt)
         }
         RawControlMode::All => {
             // In raw mode, best-effort: count printable char widths
@@ -414,10 +637,10 @@ pub fn line_display_width(line: &str, config: &RenderConfig) -> usize {
 }
 
 /// Compute display width of text (no ANSI) with tab expansion and control char notation.
-fn compute_display_width(text: &str, tab_stops: &TabStops) -> usize {
+fn compute_display_width(text: &str, tab_stops: &TabStops, bin_fmt: Option<&BinFmt>) -> usize {
     let mut col: usize = 0;
     for c in text.chars() {
-        col += expanded_width(c, col, tab_stops);
+        col += expanded_width(c, col, tab_stops, bin_fmt);
     }
     col
 }
@@ -572,6 +795,7 @@ pub fn render_line_highlighted(
     let hl_on = highlight_sgr.unwrap_or(STANDOUT_ON);
     let hl_off = STANDOUT_OFF;
 
+    let bin_fmt = config.bin_fmt.as_ref();
     match config.raw_mode {
         RawControlMode::Off => render_off_highlighted(
             effective_line,
@@ -581,6 +805,7 @@ pub fn render_line_highlighted(
             highlights,
             hl_on,
             hl_off,
+            bin_fmt,
         ),
         RawControlMode::AnsiOnly => render_ansi_only_highlighted(
             effective_line,
@@ -590,6 +815,7 @@ pub fn render_line_highlighted(
             highlights,
             hl_on,
             hl_off,
+            bin_fmt,
         ),
         // In raw passthrough mode, we don't apply highlights since we can't
         // reliably track character positions. Fall back to un-highlighted.
@@ -633,6 +859,7 @@ fn is_highlighted(byte_offset: usize, highlights: &[(usize, usize)]) -> bool {
 }
 
 /// Render with ANSI stripping and search highlighting.
+#[allow(clippy::too_many_arguments)] // Internal fn; 8th arg is bin_fmt for LESSBINFMT support
 fn render_off_highlighted(
     line: &str,
     horizontal_offset: usize,
@@ -641,6 +868,7 @@ fn render_off_highlighted(
     highlights: &[(usize, usize)],
     hl_on: &str,
     hl_off: &str,
+    bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     // In Off mode, ESC is displayed as "ESC" and the remaining sequence
     // characters are visible — don't strip ANSI.
@@ -652,10 +880,12 @@ fn render_off_highlighted(
         highlights,
         hl_on,
         hl_off,
+        bin_fmt,
     )
 }
 
 /// Render with ANSI passthrough and search highlighting.
+#[allow(clippy::too_many_arguments)] // Internal fn; 8th arg is bin_fmt for LESSBINFMT support
 fn render_ansi_only_highlighted(
     line: &str,
     horizontal_offset: usize,
@@ -664,6 +894,7 @@ fn render_ansi_only_highlighted(
     highlights: &[(usize, usize)],
     hl_on: &str,
     hl_off: &str,
+    bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let segments = ansi::parse_ansi(line);
     let mut output = String::with_capacity(line.len());
@@ -688,7 +919,7 @@ fn render_ansi_only_highlighted(
                         break;
                     }
 
-                    let char_w = expanded_width(c, col, tab_stops);
+                    let char_w = expanded_width(c, col, tab_stops, bin_fmt);
 
                     if skipped < horizontal_offset {
                         let remaining_to_skip = horizontal_offset - skipped;
@@ -717,7 +948,7 @@ fn render_ansi_only_highlighted(
                         in_standout = false;
                     }
 
-                    let expansion = expand_char(c, col, tab_stops);
+                    let expansion = expand_char(c, col, tab_stops, bin_fmt);
                     output.push_str(&expansion);
                     visible_width += char_w;
                     col += char_w;
@@ -735,6 +966,7 @@ fn render_ansi_only_highlighted(
 }
 
 /// Render characters with highlight tracking.
+#[allow(clippy::too_many_arguments)] // Internal fn; 8th arg is bin_fmt for LESSBINFMT support
 fn render_chars_highlighted(
     text: &str,
     horizontal_offset: usize,
@@ -743,6 +975,7 @@ fn render_chars_highlighted(
     highlights: &[(usize, usize)],
     hl_on: &str,
     hl_off: &str,
+    bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let mut output = String::with_capacity(text.len());
     let mut col: usize = 0;
@@ -755,7 +988,7 @@ fn render_chars_highlighted(
             break;
         }
 
-        let char_w = expanded_width(c, col, tab_stops);
+        let char_w = expanded_width(c, col, tab_stops, bin_fmt);
 
         if skipped < horizontal_offset {
             let remaining = horizontal_offset - skipped;
@@ -782,7 +1015,7 @@ fn render_chars_highlighted(
             in_standout = false;
         }
 
-        let expansion = expand_char(c, col, tab_stops);
+        let expansion = expand_char(c, col, tab_stops, bin_fmt);
         output.push_str(&expansion);
         visible_width += char_w;
         col += char_w;
@@ -802,6 +1035,7 @@ fn render_chars(
     max_width: usize,
     tab_stops: &TabStops,
     _pass_ansi: bool,
+    bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let mut output = String::with_capacity(chars.len());
     let mut col: usize = 0;
@@ -813,7 +1047,7 @@ fn render_chars(
             break;
         }
 
-        let char_w = expanded_width(c, col, tab_stops);
+        let char_w = expanded_width(c, col, tab_stops, bin_fmt);
 
         // Handle horizontal offset
         if skipped < horizontal_offset {
@@ -833,7 +1067,7 @@ fn render_chars(
             break;
         }
 
-        let expansion = expand_char(c, col, tab_stops);
+        let expansion = expand_char(c, col, tab_stops, bin_fmt);
         output.push_str(&expansion);
         visible_width += char_w;
         col += char_w;
@@ -1022,28 +1256,28 @@ mod tests {
     #[test]
     fn test_expand_char_tab_at_col_zero_gives_full_width() {
         let tabs = TabStops::regular(8);
-        let result = expand_char('\t', 0, &tabs);
+        let result = expand_char('\t', 0, &tabs, None);
         assert_eq!(result, "        ");
     }
 
     #[test]
     fn test_expand_char_control_a_gives_caret_a() {
         let tabs = TabStops::regular(8);
-        let result = expand_char('\x01', 0, &tabs);
+        let result = expand_char('\x01', 0, &tabs, None);
         assert_eq!(result, "^A");
     }
 
     #[test]
     fn test_expand_char_null_gives_caret_at() {
         let tabs = TabStops::regular(8);
-        let result = expand_char('\x00', 0, &tabs);
+        let result = expand_char('\x00', 0, &tabs, None);
         assert_eq!(result, "^@");
     }
 
     #[test]
     fn test_expand_char_normal_char_passes_through() {
         let tabs = TabStops::regular(8);
-        let result = expand_char('a', 0, &tabs);
+        let result = expand_char('a', 0, &tabs, None);
         assert_eq!(result, "a");
     }
 
@@ -1089,9 +1323,8 @@ mod tests {
     #[test]
     fn test_render_line_with_tab_stops_custom() {
         let config = RenderConfig {
-            raw_mode: RawControlMode::Off,
-            overstrike_mode: OverstrikeMode::Interpret,
             tab_stops: TabStops::regular(4),
+            ..RenderConfig::default()
         };
         // Tab at col 0 with tab_width 4 -> 4 spaces
         let (rendered, width) = render_line("\thello", 0, 80, &config);
@@ -1165,8 +1398,8 @@ mod tests {
     fn test_render_config_combines_all_settings() {
         let config = RenderConfig {
             raw_mode: RawControlMode::AnsiOnly,
-            overstrike_mode: OverstrikeMode::Interpret,
             tab_stops: TabStops::regular(4),
+            ..RenderConfig::default()
         };
         // Line with overstrike bold, a tab, and an ANSI color
         let input = "a\x08a\t\x1b[31mred\x1b[0m";
@@ -1454,5 +1687,111 @@ mod tests {
         // GNU less has no left-side marker, so the text is unchanged
         assert_eq!(result, input);
         assert_eq!(width, 5);
+    }
+
+    // --- BinFmt parsing and rendering tests ---
+
+    #[test]
+    fn test_binfmt_parse_default_lessbinfmt() {
+        let fmt = BinFmt::parse("*s<%02X>");
+        assert!(fmt.standout);
+        assert_eq!(fmt.segments.len(), 4);
+        assert_eq!(fmt.segments[0], BinFmtSegment::Literal("*".to_string()));
+        assert_eq!(fmt.segments[1], BinFmtSegment::Literal("<".to_string()));
+        assert_eq!(fmt.segments[2], BinFmtSegment::Format("%02X".to_string()));
+        assert_eq!(fmt.segments[3], BinFmtSegment::Literal(">".to_string()));
+    }
+
+    #[test]
+    fn test_binfmt_format_byte_hex() {
+        let fmt = BinFmt::parse("*s<%02X>");
+        assert_eq!(fmt.format_byte(0x01), "*<01>");
+        assert_eq!(fmt.format_byte(0xFF), "*<FF>");
+    }
+
+    #[test]
+    fn test_binfmt_parse_utf_default() {
+        let fmt = BinFmt::parse("<U+%04X>");
+        assert!(!fmt.standout);
+        assert_eq!(fmt.format_byte(0xFFFD), "<U+FFFD>");
+    }
+
+    #[test]
+    fn test_binfmt_display_width() {
+        let fmt = BinFmt::parse("*s<%02X>");
+        // "*<01>" is 5 chars
+        assert_eq!(fmt.display_width(0x01), 5);
+    }
+
+    #[test]
+    fn test_render_line_with_binfmt_control_char() {
+        let config = RenderConfig {
+            bin_fmt: Some(BinFmt::parse("[%02X]")),
+            ..RenderConfig::default()
+        };
+        // \x01 normally renders as "^A" (2 chars), with binfmt should be "[01]"
+        let (rendered, width) = render_line("a\x01b", 0, 80, &config);
+        assert_eq!(rendered, "a[01]b");
+        assert_eq!(width, 6);
+    }
+
+    #[test]
+    fn test_render_line_without_binfmt_control_char_is_caret() {
+        let config = RenderConfig::default();
+        let (rendered, width) = render_line("a\x01b", 0, 80, &config);
+        assert_eq!(rendered, "a^Ab");
+        assert_eq!(width, 4);
+    }
+
+    #[test]
+    fn test_render_line_with_binfmt_esc_char() {
+        let config = RenderConfig {
+            bin_fmt: Some(BinFmt::parse("[%02X]")),
+            ..RenderConfig::default()
+        };
+        // \x1b normally renders as "ESC" (3 chars), with binfmt "[1B]"
+        let (rendered, width) = render_line("a\x1bb", 0, 80, &config);
+        assert_eq!(rendered, "a[1B]b");
+        assert_eq!(width, 6);
+    }
+
+    #[test]
+    fn test_render_line_with_binfmt_del_char() {
+        let config = RenderConfig {
+            bin_fmt: Some(BinFmt::parse("[%02X]")),
+            ..RenderConfig::default()
+        };
+        // \x7f normally renders as "^?" (2 chars), with binfmt "[7F]"
+        let (rendered, width) = render_line("a\x7fb", 0, 80, &config);
+        assert_eq!(rendered, "a[7F]b");
+        assert_eq!(width, 6);
+    }
+
+    #[test]
+    fn test_expand_char_with_binfmt() {
+        let tabs = TabStops::regular(8);
+        let fmt = BinFmt::parse("[%02X]");
+        let result = expand_char('\x01', 0, &tabs, Some(&fmt));
+        assert_eq!(result, "[01]");
+    }
+
+    #[test]
+    fn test_expand_char_tab_ignores_binfmt() {
+        let tabs = TabStops::regular(8);
+        let fmt = BinFmt::parse("[%02X]");
+        // Tab should still expand to spaces, not use binfmt
+        let result = expand_char('\t', 0, &tabs, Some(&fmt));
+        assert_eq!(result, "        ");
+    }
+
+    #[test]
+    fn test_line_display_width_with_binfmt() {
+        let config = RenderConfig {
+            bin_fmt: Some(BinFmt::parse("[%02X]")),
+            ..RenderConfig::default()
+        };
+        // "a\x01b": a=1, [01]=4, b=1 = 6
+        let width = line_display_width("a\x01b", &config);
+        assert_eq!(width, 6);
     }
 }

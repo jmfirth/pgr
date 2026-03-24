@@ -127,8 +127,13 @@ fn is_stdin_mode(options: &Options) -> bool {
 /// Check `-F` (quit-if-one-screen) for a file-backed buffer.
 ///
 /// If content fits on one screen, prints it to stdout and returns `true`.
-fn check_quit_if_one_screen_file(file_list: &mut FileList) -> anyhow::Result<bool> {
-    let (rows, _) = terminal_dimensions();
+/// Uses `LESS_SHELL_LINES` (via `env_config`) when set, otherwise terminal height.
+fn check_quit_if_one_screen_file(
+    file_list: &mut FileList,
+    env_config: &EnvConfig,
+) -> anyhow::Result<bool> {
+    let (detected_rows, _) = terminal_dimensions();
+    let rows = env_config.shell_screen_height(detected_rows);
     let content_rows = rows.saturating_sub(1);
     let entry = file_list.current_mut();
     let total = entry.index.total_lines(&*entry.buffer)?;
@@ -147,11 +152,14 @@ fn check_quit_if_one_screen_file(file_list: &mut FileList) -> anyhow::Result<boo
 ///
 /// Reads enough data from the pipe to determine fit. If content fits,
 /// prints it and returns `Ok(true)`.
+/// Uses `LESS_SHELL_LINES` (via `env_config`) when set, otherwise terminal height.
 fn check_quit_if_one_screen_pipe(
     buffer: &mut Box<dyn Buffer>,
     index: &mut LineIndex,
+    env_config: &EnvConfig,
 ) -> anyhow::Result<bool> {
-    let (rows, _) = terminal_dimensions();
+    let (detected_rows, _) = terminal_dimensions();
+    let rows = env_config.shell_screen_height(detected_rows);
     let content_rows = rows.saturating_sub(1);
 
     loop {
@@ -193,14 +201,17 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     let mut buffer: Box<dyn Buffer> = Box::new(pipe);
     let mut index = LineIndex::new(buffer.len() as u64);
 
-    if options.quit_if_one_screen && check_quit_if_one_screen_pipe(&mut buffer, &mut index)? {
+    if options.quit_if_one_screen
+        && check_quit_if_one_screen_pipe(&mut buffer, &mut index, &env_config)?
+    {
         return Ok(());
     }
 
     // Open /dev/tty twice: one handle for raw-mode RAII, one for key reading.
     let tty_raw = std::fs::File::open("/dev/tty")?;
     let raw_terminal = RawTerminal::enter(tty_raw.as_raw_fd())?;
-    let (rows, cols) = raw_terminal.dimensions()?;
+    let (detected_rows, detected_cols) = raw_terminal.dimensions()?;
+    let (rows, cols) = env_config.effective_dimensions(detected_rows, detected_cols);
 
     let tty_keys = std::fs::File::open("/dev/tty")?;
     let tty_keys_fd = tty_keys.as_raw_fd();
@@ -254,7 +265,7 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
         file_list.push(entry);
     }
 
-    if options.quit_if_one_screen && check_quit_if_one_screen_file(&mut file_list)? {
+    if options.quit_if_one_screen && check_quit_if_one_screen_file(&mut file_list, &env_config)? {
         return Ok(());
     }
 
@@ -301,7 +312,8 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     // Open /dev/tty twice: one handle for raw-mode RAII, one for key reading.
     let tty_raw = std::fs::File::open("/dev/tty")?;
     let raw_terminal = RawTerminal::enter(tty_raw.as_raw_fd())?;
-    let (rows, cols) = raw_terminal.dimensions()?;
+    let (detected_rows, detected_cols) = raw_terminal.dimensions()?;
+    let (rows, cols) = env_config.effective_dimensions(detected_rows, detected_cols);
 
     let tty_keys = std::fs::File::open("/dev/tty")?;
     let tty_keys_fd = tty_keys.as_raw_fd();
@@ -461,7 +473,8 @@ mod tests {
         let tmp = make_temp_file(b"short\n");
         let entry = file_entry_from_path(tmp.path()).unwrap();
         let mut file_list = FileList::new(entry);
-        let result = check_quit_if_one_screen_file(&mut file_list).unwrap();
+        let env_cfg = EnvConfig::default();
+        let result = check_quit_if_one_screen_file(&mut file_list, &env_cfg).unwrap();
         assert!(result);
     }
 
@@ -476,7 +489,8 @@ mod tests {
         let tmp = make_temp_file(content.as_bytes());
         let entry = file_entry_from_path(tmp.path()).unwrap();
         let mut file_list = FileList::new(entry);
-        let result = check_quit_if_one_screen_file(&mut file_list).unwrap();
+        let env_cfg = EnvConfig::default();
+        let result = check_quit_if_one_screen_file(&mut file_list, &env_cfg).unwrap();
         assert!(!result);
     }
 
@@ -503,7 +517,8 @@ mod tests {
         let tmp = make_temp_file(b"");
         let entry = file_entry_from_path(tmp.path()).unwrap();
         let mut file_list = FileList::new(entry);
-        let result = check_quit_if_one_screen_file(&mut file_list).unwrap();
+        let env_cfg = EnvConfig::default();
+        let result = check_quit_if_one_screen_file(&mut file_list, &env_cfg).unwrap();
         assert!(result);
     }
 
@@ -541,5 +556,36 @@ mod tests {
         let entry = file_entry_from_stdin();
         assert!(entry.path.is_none());
         assert_eq!(entry.display_name, "(standard input)");
+    }
+
+    // ── 14. LESS_SHELL_LINES overrides -F screen height ──────────────────
+
+    #[test]
+    fn test_quit_if_one_screen_respects_shell_lines() {
+        // 5 lines of content. With shell_lines=3, it won't fit (returns false).
+        let tmp = make_temp_file(b"line1\nline2\nline3\nline4\nline5\n");
+        let entry = file_entry_from_path(tmp.path()).unwrap();
+        let mut file_list = FileList::new(entry);
+        let env_cfg = EnvConfig {
+            shell_lines: Some(3),
+            ..EnvConfig::default()
+        };
+        let result = check_quit_if_one_screen_file(&mut file_list, &env_cfg).unwrap();
+        assert!(!result);
+    }
+
+    // ── 15. LESS_SHELL_LINES large enough -> fits ────────────────────────
+
+    #[test]
+    fn test_quit_if_one_screen_shell_lines_large_enough() {
+        let tmp = make_temp_file(b"line1\nline2\n");
+        let entry = file_entry_from_path(tmp.path()).unwrap();
+        let mut file_list = FileList::new(entry);
+        let env_cfg = EnvConfig {
+            shell_lines: Some(100),
+            ..EnvConfig::default()
+        };
+        let result = check_quit_if_one_screen_file(&mut file_list, &env_cfg).unwrap();
+        assert!(result);
     }
 }
