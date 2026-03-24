@@ -293,6 +293,24 @@ impl EnvConfig {
             .map(|h| std::path::PathBuf::from(h).join(".local").join("state"))
     }
 
+    /// Returns the path for the history file.
+    ///
+    /// Precedence: `LESSHISTFILE` > `$XDG_STATE_HOME/less/history` >
+    /// `$HOME/.local/state/less/history`. Returns `None` if
+    /// `LESSHISTFILE` is set to `"-"` (disables persistence) or if no
+    /// home directory can be determined.
+    #[must_use]
+    pub fn history_file_path(&self) -> Option<std::path::PathBuf> {
+        if let Some(ref explicit) = self.histfile {
+            if explicit == "-" {
+                return None;
+            }
+            return Some(std::path::PathBuf::from(explicit));
+        }
+        self.state_home()
+            .map(|base| base.join("less").join("history"))
+    }
+
     /// Returns the parsed binary character format string.
     ///
     /// Uses `LESSBINFMT` if set, otherwise the default `*s<%02X>`.
@@ -1450,5 +1468,61 @@ mod tests {
     fn test_parse_less_env_value_whitespace_only() {
         let tokens = parse_less_env_value("   ");
         assert!(tokens.is_empty());
+    }
+
+    // history_file_path tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_history_file_path_explicit_lesshistfile() {
+        let cfg = EnvConfig {
+            histfile: Some("/tmp/my_history".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.history_file_path(),
+            Some(std::path::PathBuf::from("/tmp/my_history"))
+        );
+    }
+
+    #[test]
+    fn test_history_file_path_dash_disables() {
+        let cfg = EnvConfig {
+            histfile: Some("-".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(cfg.history_file_path(), None);
+    }
+
+    #[test]
+    fn test_history_file_path_xdg_state_home() {
+        let cfg = EnvConfig {
+            xdg_state_home: Some("/xdg/state".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.history_file_path(),
+            Some(std::path::PathBuf::from("/xdg/state/less/history"))
+        );
+    }
+
+    #[test]
+    fn test_history_file_path_home_fallback() {
+        let cfg = EnvConfig {
+            home: Some("/home/user".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.history_file_path(),
+            Some(std::path::PathBuf::from(
+                "/home/user/.local/state/less/history"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_history_file_path_no_home_returns_none() {
+        let cfg = EnvConfig::default();
+        assert_eq!(cfg.history_file_path(), None);
     }
 }
