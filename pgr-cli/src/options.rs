@@ -362,6 +362,14 @@ pub struct Options {
     #[arg(long = "search-options")]
     pub search_opts: Option<String>,
 
+    /// Enable backslash escaping in the LESS environment variable value.
+    ///
+    /// When set, `\n`, `\t`, `\e`, and `\\` in the LESS env var are
+    /// interpreted as their corresponding control characters. This flag
+    /// is consumed during env parsing and has no runtime effect.
+    #[arg(long = "use-backslash")]
+    pub use_backslash: bool,
+
     // ── Meta flags ────────────────────────────────────────────────────
     /// Print version information and exit.
     #[arg(short = 'V', long = "version")]

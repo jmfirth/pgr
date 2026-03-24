@@ -342,16 +342,147 @@ impl EnvConfig {
 /// Read the `LESS` environment variable and split it into individual flags.
 ///
 /// Returns an empty vector if the variable is not set or is empty.
-/// Each whitespace-delimited token becomes one element in the result.
+///
+/// Parsing follows GNU less conventions:
+/// - Tokens are whitespace-delimited.
+/// - `$` acts as a value terminator for options that take arguments (e.g.,
+///   `-P$custom prompt$` yields the token `-Pcustom prompt`).
+/// - `-r` is silently replaced with `-R` for safety (raw ANSI only, not all
+///   control chars) when it appears in the env var.
+/// - When `--use-backslash` appears among the tokens, standard backslash
+///   escape sequences (`\t`, `\n`, `\\`, `\e`) are interpreted in all tokens.
 ///
 /// This is a convenience function; prefer [`EnvConfig::from_env()`] for
 /// full environment handling.
 #[must_use]
 pub fn read_less_env() -> Vec<String> {
     match std::env::var("LESS") {
-        Ok(val) if !val.is_empty() => val.split_whitespace().map(String::from).collect(),
+        Ok(val) if !val.is_empty() => parse_less_env_value(&val),
         _ => Vec::new(),
     }
+}
+
+/// Parse a LESS environment variable value into individual option tokens.
+///
+/// Handles `$` delimiters, `-r` to `-R` replacement, and `--use-backslash`
+/// escape processing.
+#[must_use]
+pub fn parse_less_env_value(input: &str) -> Vec<String> {
+    let raw_tokens = tokenize_less_env(input);
+
+    // Check whether --use-backslash appears among the tokens.
+    let use_backslash = raw_tokens.iter().any(|t| t == "--use-backslash");
+
+    let mut result = Vec::with_capacity(raw_tokens.len());
+    for token in raw_tokens {
+        // Strip --use-backslash from the output; it's a parsing directive,
+        // not a runtime flag passed through to clap.
+        if token == "--use-backslash" {
+            continue;
+        }
+        let mut t = token;
+        // Apply backslash escaping if enabled.
+        if use_backslash {
+            t = interpret_backslash_escapes(&t);
+        }
+        // In the LESS env, -r is treated as -R for safety.
+        if t == "-r" {
+            t = String::from("-R");
+        }
+        result.push(t);
+    }
+    result
+}
+
+/// Tokenize a LESS env string, respecting `$` as a value terminator.
+///
+/// In the LESS env var, `$` marks the end of an option value. For example,
+/// `"-P$custom prompt$-S"` yields tokens `["-Pcustom prompt", "-S"]`.
+/// The `$` delimiters are consumed and not included in the output.
+fn tokenize_less_env(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    // Skip leading whitespace.
+    skip_whitespace(&mut chars);
+
+    while chars.peek().is_some() {
+        let mut token = String::new();
+
+        // Read characters until whitespace or end.
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() {
+                break;
+            }
+            if ch == '$' {
+                // `$` starts a dollar-delimited value section.
+                chars.next(); // consume the opening `$`
+                              // Read until the closing `$` or end of string.
+                let mut closed = false;
+                while let Some(&inner) = chars.peek() {
+                    if inner == '$' {
+                        chars.next(); // consume closing `$`
+                        closed = true;
+                        break;
+                    }
+                    token.push(inner);
+                    chars.next();
+                }
+                // A closing `$` terminates the current token.
+                if closed {
+                    break;
+                }
+                // Unclosed `$` — consumed to end of string, token ends naturally.
+                continue;
+            }
+            token.push(ch);
+            chars.next();
+        }
+
+        if !token.is_empty() {
+            tokens.push(token);
+        }
+        skip_whitespace(&mut chars);
+    }
+
+    tokens
+}
+
+/// Skip whitespace characters from a peekable char iterator.
+fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+}
+
+/// Interpret backslash escape sequences in a string.
+///
+/// Supported escapes: `\\` -> `\`, `\n` -> newline, `\t` -> tab, `\e` -> ESC (0x1B).
+/// Unknown escape sequences pass through as-is (backslash + character).
+fn interpret_backslash_escapes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') | None => result.push('\\'),
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('e') => result.push('\x1b'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 /// Read the `LESS` environment variable, splitting tokens into flags and
@@ -1158,5 +1289,166 @@ mod tests {
         assert!(!fmt.standout);
         let result = fmt.format_byte(0xFFFD);
         assert_eq!(result, "<U+FFFD>");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 240: LESS env parsing refinements
+    // ---------------------------------------------------------------------------
+
+    // Test 51: -r in LESS env is replaced with -R
+    #[test]
+    fn test_parse_less_env_value_r_becomes_upper_r() {
+        let tokens = parse_less_env_value("-r -S");
+        assert_eq!(tokens, vec!["-R", "-S"]);
+    }
+
+    // Test 52: -R in LESS env stays -R
+    #[test]
+    fn test_parse_less_env_value_upper_r_unchanged() {
+        let tokens = parse_less_env_value("-R -S");
+        assert_eq!(tokens, vec!["-R", "-S"]);
+    }
+
+    // Test 53: -r replacement only affects standalone -r, not -rS or similar
+    #[test]
+    fn test_parse_less_env_value_r_in_combined_flag_not_replaced() {
+        // "-rS" is not "-r" — it's a combined flag, not a standalone -r.
+        let tokens = parse_less_env_value("-rS");
+        assert_eq!(tokens, vec!["-rS"]);
+    }
+
+    // Test 54: $ delimiter basic usage
+    #[test]
+    fn test_parse_less_env_value_dollar_delimiter_basic() {
+        let tokens = parse_less_env_value("-P$custom prompt$-S");
+        assert_eq!(tokens, vec!["-Pcustom prompt", "-S"]);
+    }
+
+    // Test 55: $ delimiter with spaces in value
+    #[test]
+    fn test_parse_less_env_value_dollar_delimiter_with_spaces() {
+        let tokens = parse_less_env_value("-P$file: %f  line: %l$");
+        assert_eq!(tokens, vec!["-Pfile: %f  line: %l"]);
+    }
+
+    // Test 56: $ delimiter followed by another option
+    #[test]
+    fn test_parse_less_env_value_dollar_delimiter_followed_by_option() {
+        let tokens = parse_less_env_value("-P$my prompt$ -R -S");
+        assert_eq!(tokens, vec!["-Pmy prompt", "-R", "-S"]);
+    }
+
+    // Test 57: $ at start of input (empty dollar section)
+    #[test]
+    fn test_parse_less_env_value_dollar_empty_section() {
+        let tokens = parse_less_env_value("$$-S");
+        assert_eq!(tokens, vec!["-S"]);
+    }
+
+    // Test 58: unclosed $ reads to end of string
+    #[test]
+    fn test_parse_less_env_value_dollar_unclosed() {
+        let tokens = parse_less_env_value("-P$unclosed value");
+        assert_eq!(tokens, vec!["-Punclosed value"]);
+    }
+
+    // Test 59: --use-backslash enables escape interpretation
+    #[test]
+    fn test_parse_less_env_value_use_backslash_tab() {
+        let tokens = parse_less_env_value("--use-backslash -P$col1\\tcol2$");
+        assert_eq!(tokens, vec!["-Pcol1\tcol2"]);
+    }
+
+    // Test 60: --use-backslash interprets \n
+    #[test]
+    fn test_parse_less_env_value_use_backslash_newline() {
+        let tokens = parse_less_env_value("--use-backslash -P$line1\\nline2$");
+        assert_eq!(tokens, vec!["-Pline1\nline2"]);
+    }
+
+    // Test 61: --use-backslash interprets \\
+    #[test]
+    fn test_parse_less_env_value_use_backslash_literal_backslash() {
+        let tokens = parse_less_env_value("--use-backslash -P$path\\\\name$");
+        assert_eq!(tokens, vec!["-Ppath\\name"]);
+    }
+
+    // Test 62: --use-backslash interprets \e (ESC)
+    #[test]
+    fn test_parse_less_env_value_use_backslash_escape() {
+        let tokens = parse_less_env_value("--use-backslash -P$\\etest$");
+        assert_eq!(tokens, vec![format!("-P\x1btest")]);
+    }
+
+    // Test 63: without --use-backslash, backslashes are literal
+    #[test]
+    fn test_parse_less_env_value_no_use_backslash_literal() {
+        let tokens = parse_less_env_value("-P$col1\\tcol2$");
+        assert_eq!(tokens, vec!["-Pcol1\\tcol2"]);
+    }
+
+    // Test 64: --use-backslash is stripped from output
+    #[test]
+    fn test_parse_less_env_value_use_backslash_stripped_from_output() {
+        let tokens = parse_less_env_value("--use-backslash -R");
+        assert_eq!(tokens, vec!["-R"]);
+        assert!(!tokens.iter().any(|t| t == "--use-backslash"));
+    }
+
+    // Test 65: -r combined with $ delimiter and --use-backslash
+    #[test]
+    fn test_parse_less_env_value_r_replaced_with_dollar_and_backslash() {
+        let tokens = parse_less_env_value("--use-backslash -r -P$prompt\\t$ -S");
+        // -r becomes -R, --use-backslash is stripped, \t is interpreted
+        assert_eq!(tokens, vec!["-R", "-Pprompt\t", "-S"]);
+    }
+
+    // Test 66: read_less_env() applies -r -> -R from actual env var
+    #[test]
+    fn test_read_less_env_r_becomes_upper_r() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let original = env::var("LESS").ok();
+        env::set_var("LESS", "-r -S");
+        let result = read_less_env();
+        match original {
+            Some(v) => env::set_var("LESS", v),
+            None => env::remove_var("LESS"),
+        }
+        assert_eq!(result, vec!["-R", "-S"]);
+    }
+
+    // Test 67: read_less_env() handles $ delimiter from actual env var
+    #[test]
+    fn test_read_less_env_dollar_delimiter() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let original = env::var("LESS").ok();
+        env::set_var("LESS", "-P$custom prompt$-S");
+        let result = read_less_env();
+        match original {
+            Some(v) => env::set_var("LESS", v),
+            None => env::remove_var("LESS"),
+        }
+        assert_eq!(result, vec!["-Pcustom prompt", "-S"]);
+    }
+
+    // Test 68: multiple $ sections in one env value
+    #[test]
+    fn test_parse_less_env_value_multiple_dollar_sections() {
+        let tokens = parse_less_env_value("-P$prompt one$ -D$color spec$");
+        assert_eq!(tokens, vec!["-Pprompt one", "-Dcolor spec"]);
+    }
+
+    // Test 69: empty input produces empty output
+    #[test]
+    fn test_parse_less_env_value_empty_input() {
+        let tokens = parse_less_env_value("");
+        assert!(tokens.is_empty());
+    }
+
+    // Test 70: whitespace-only input produces empty output
+    #[test]
+    fn test_parse_less_env_value_whitespace_only() {
+        let tokens = parse_less_env_value("   ");
+        assert!(tokens.is_empty());
     }
 }
