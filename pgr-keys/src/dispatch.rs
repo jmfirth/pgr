@@ -8,7 +8,7 @@ use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    eval_prompt, paint_prompt, paint_screen_mapped, paint_screen_with_options,
+    eval_prompt, paint_info_line, paint_prompt, paint_screen_mapped, paint_screen_with_options,
     squeeze_visible_lines, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
     RawControlMode, RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT,
     DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
@@ -1630,7 +1630,9 @@ impl<R: Read, W: Write> Pager<R, W> {
         let (rows, cols) = self.screen.dimensions();
         // Paint the info on the last content row (rows-1 in 1-based ANSI),
         // not the prompt row (rows), matching GNU less behavior.
-        paint_prompt(&mut self.writer, &text, rows.saturating_sub(1), cols, None)?;
+        // Use right-truncation (paint_info_line) rather than the prompt's
+        // left-truncation, matching how GNU less renders the = info line.
+        paint_info_line(&mut self.writer, &text, rows.saturating_sub(1), cols, None)?;
         Ok(())
     }
 

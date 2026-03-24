@@ -539,6 +539,34 @@ pub fn paint_prompt<W: Write>(
     writer.flush()
 }
 
+/// Render an info line (e.g. the `=` command output) at a given row.
+///
+/// Unlike [`paint_prompt`], which left-truncates long text to keep the
+/// right-side info visible, this function **right-truncates** to match
+/// GNU less's behavior for the `=` info display.
+///
+/// # Errors
+///
+/// Returns an error if writing to the underlying writer fails.
+pub fn paint_info_line<W: Write>(
+    writer: &mut W,
+    text: &str,
+    row: usize,
+    screen_cols: usize,
+    sgr: Option<&str>,
+) -> std::io::Result<()> {
+    // Move cursor to the specified row, column 1 (1-based ANSI coordinates)
+    write!(writer, "\x1b[{row};1H")?;
+    // Clear the entire line
+    write!(writer, "\x1b[2K")?;
+    // Right-truncate: keep leading characters, drop trailing overflow.
+    let display_text: String = text.chars().take(screen_cols).collect();
+    // Render with configured color or fallback to reverse video
+    let sgr_code = sgr.unwrap_or("\x1b[7m");
+    write!(writer, "{sgr_code}{display_text}\x1b[0m")?;
+    writer.flush()
+}
+
 /// Compute the percentage through the file based on byte offset.
 fn compute_byte_percent(ctx: &PromptContext<'_>) -> u64 {
     if ctx.total_bytes == 0 {
