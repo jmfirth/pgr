@@ -201,15 +201,19 @@ pub fn render_line(
     }
 }
 
-/// Render with all ANSI escapes stripped and control chars as `^X`.
+/// Render with control chars displayed as visible notation.
+///
+/// ESC (0x1b) is displayed as "ESC" and other control characters as `^X`,
+/// matching GNU less default mode. ANSI escape sequences are NOT stripped;
+/// instead the ESC byte becomes "ESC" and the remaining sequence characters
+/// (e.g. `[31m`) pass through as visible printable text.
 fn render_off(
     line: &str,
     horizontal_offset: usize,
     max_width: usize,
     tab_stops: &TabStops,
 ) -> (String, usize) {
-    let stripped = ansi::strip_ansi(line);
-    let chars: Vec<char> = stripped.chars().collect();
+    let chars: Vec<char> = line.chars().collect();
     render_chars(&chars, horizontal_offset, max_width, tab_stops, false)
 }
 
@@ -312,6 +316,7 @@ fn expanded_width(c: char, current_col: usize, tab_stops: &TabStops) -> usize {
     match c {
         '\t' => tab_stops.spaces_to_next(current_col),
         '\n' | '\r' => 0,
+        '\x1b' => 3, // ESC displays as "ESC" (matching GNU less)
         '\x7f' => 2,
         c if c.is_ascii_control() => 2,
         c => UnicodeWidthChar::width(c).unwrap_or(0),
@@ -331,6 +336,10 @@ fn expand_char(c: char, current_col: usize, tab_stops: &TabStops) -> String {
             " ".repeat(spaces)
         }
         '\n' | '\r' => String::new(),
+        // ESC displays as "ESC" (matching GNU less, which special-cases 0x1b
+        // to avoid the confusing ^[ caret notation that resembles a real
+        // escape sequence).
+        '\x1b' => "ESC".to_string(),
         '\x7f' => "^?".to_string(),
         c if c.is_ascii_control() => {
             let mut s = String::with_capacity(2);
@@ -382,7 +391,14 @@ pub fn line_display_width(line: &str, config: &RenderConfig) -> usize {
     };
 
     match config.raw_mode {
-        RawControlMode::Off | RawControlMode::AnsiOnly => {
+        RawControlMode::Off => {
+            // In Off mode, ESC is displayed as "ESC" and the rest of ANSI
+            // sequences are visible text — don't strip.
+            compute_display_width(effective_line, &config.tab_stops)
+        }
+        RawControlMode::AnsiOnly => {
+            // In AnsiOnly mode, SGR sequences pass through with zero display
+            // width — strip them for width calculation.
             let stripped = ansi::strip_ansi(effective_line);
             compute_display_width(&stripped, &config.tab_stops)
         }
@@ -626,9 +642,10 @@ fn render_off_highlighted(
     hl_on: &str,
     hl_off: &str,
 ) -> (String, usize) {
-    let stripped = ansi::strip_ansi(line);
+    // In Off mode, ESC is displayed as "ESC" and the remaining sequence
+    // characters are visible — don't strip ANSI.
     render_chars_highlighted(
-        &stripped,
+        line,
         horizontal_offset,
         max_width,
         tab_stops,
@@ -886,10 +903,13 @@ mod tests {
     // --- ANSI escapes in Off mode ---
 
     #[test]
-    fn test_render_line_ansi_off_mode_strips_escapes() {
+    fn test_render_line_ansi_off_mode_shows_esc_notation() {
+        // In Off mode, ESC is displayed as "ESC" (matching GNU less) and the
+        // remaining sequence characters pass through as visible text.
         let (rendered, width) = render_line("\x1b[31mred\x1b[0m", 0, 80, &default_config());
-        assert_eq!(rendered, "red");
-        assert_eq!(width, 3);
+        assert_eq!(rendered, "ESC[31mredESC[0m");
+        // "ESC"(3) + "[31m"(4) + "red"(3) + "ESC"(3) + "[0m"(3) = 16
+        assert_eq!(width, 16);
     }
 
     // --- ANSI escapes in AnsiOnly mode ---
@@ -1332,9 +1352,17 @@ mod tests {
     }
 
     #[test]
-    fn test_line_display_width_with_ansi() {
+    fn test_line_display_width_with_ansi_off_mode() {
         let config = default_config();
-        // ANSI escapes have zero width
+        // In Off mode, ESC is displayed as "ESC" (3 chars) and the rest of
+        // the sequence is visible text: "ESC[31mredESC[0m" = 16 cols
+        assert_eq!(line_display_width("\x1b[31mred\x1b[0m", &config), 16);
+    }
+
+    #[test]
+    fn test_line_display_width_with_ansi_ansi_only_mode() {
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        // In AnsiOnly mode, SGR sequences have zero display width
         assert_eq!(line_display_width("\x1b[31mred\x1b[0m", &config), 3);
     }
 
