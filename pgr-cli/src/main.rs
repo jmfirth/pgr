@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
-    find_tag, parse_lesskey_file, resolve_pattern, FileEntry, FileList, KeyReader, LesskeyConfig,
-    Pager, RawTerminal, RuntimeOptions, TagState,
+    find_tag, parse_lesskey_file, resolve_pattern, ExitReason, FileEntry, FileList, KeyReader,
+    LesskeyConfig, Pager, RawTerminal, RuntimeOptions, TagState,
 };
 
 use crate::env::EnvConfig;
@@ -193,7 +193,7 @@ fn check_quit_if_one_screen_pipe(
     Ok(false)
 }
 
-fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
+fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
     if !stdin_is_pipe() && options.files.is_empty() {
         eprintln!("pgr: missing filename (\"pgr --help\" for help)");
         std::process::exit(1);
@@ -208,7 +208,7 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     if options.quit_if_one_screen
         && check_quit_if_one_screen_pipe(&mut buffer, &mut index, &env_config)?
     {
-        return Ok(());
+        return Ok(ExitReason::Normal);
     }
 
     // Open /dev/tty twice: one handle for raw-mode RAII, one for key reading.
@@ -242,13 +242,14 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<()> {
     }
 
     pager.run()?;
+    let reason = pager.exit_reason();
     drop(pager);
     drop(raw_terminal);
     drop(tty_raw);
-    Ok(())
+    Ok(reason)
 }
 
-fn run_file_mode(options: &Options) -> anyhow::Result<()> {
+fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
     // Set up LESSOPEN preprocessor if configured and not disabled.
     let env_config = EnvConfig::from_env();
     let preprocessor = if options.no_lessopen || env_config.secure_mode {
@@ -275,7 +276,7 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     }
 
     if options.quit_if_one_screen && check_quit_if_one_screen_file(&mut file_list, &env_config)? {
-        return Ok(());
+        return Ok(ExitReason::Normal);
     }
 
     // Build the pager's own buffer for the first file.
@@ -347,10 +348,11 @@ fn run_file_mode(options: &Options) -> anyhow::Result<()> {
     }
 
     pager.run()?;
+    let reason = pager.exit_reason();
     drop(pager);
     drop(raw_terminal);
     drop(tty_raw);
-    Ok(())
+    Ok(reason)
 }
 
 /// Apply common option-derived settings to the pager.
@@ -439,6 +441,9 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     if options.redraw_on_quit {
         pager.set_redraw_on_quit(true);
     }
+    if options.quit_on_intr {
+        pager.set_quit_on_intr(true);
+    }
 }
 
 /// Discover and load a lesskey source file.
@@ -525,7 +530,7 @@ fn apply_lesskey<R: std::io::Read, W: std::io::Write>(
     }
 }
 
-fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<()> {
+fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<ExitReason> {
     let tags_file_path = options.tag_file.as_deref().unwrap_or("tags");
     let tags_path = std::path::Path::new(tags_file_path);
 
@@ -576,10 +581,11 @@ fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<()> {
     }
 
     pager.run()?;
+    let reason = pager.exit_reason();
     drop(pager);
     drop(raw_terminal);
     drop(tty_raw);
-    Ok(())
+    Ok(reason)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -595,15 +601,21 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Some(ref tag) = options.tag {
-        return run_tag_mode(&options, tag);
+    let reason = if let Some(ref tag) = options.tag {
+        run_tag_mode(&options, tag)?
+    } else if is_stdin_mode(&options) {
+        run_stdin_mode(&options)?
+    } else {
+        run_file_mode(&options)?
+    };
+
+    // GNU less exit codes: 0 = normal, 1 = error (handled by anyhow),
+    // 2 = interrupt with -K flag.
+    if reason == ExitReason::Interrupt && options.quit_on_intr {
+        std::process::exit(2);
     }
 
-    if is_stdin_mode(&options) {
-        run_stdin_mode(&options)
-    } else {
-        run_file_mode(&options)
-    }
+    Ok(())
 }
 
 #[cfg(test)]

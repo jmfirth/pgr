@@ -24,7 +24,7 @@ pub use completion::{
     complete, complete_filename, complete_option, longest_common_prefix, tab_complete,
     CompletionMode, CompletionResult,
 };
-pub use dispatch::{Pager, PendingCommand};
+pub use dispatch::{ExitReason, Pager, PendingCommand};
 pub use error::{KeyError, Result};
 pub use file_list::{FileEntry, FileList, FileListError};
 pub use filename::{expand_filename, FilenameError};
