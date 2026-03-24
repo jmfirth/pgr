@@ -269,6 +269,26 @@ pub struct Options {
     #[arg(long = "header")]
     pub header: Option<String>,
 
+    /// Parse first N lines of each file for vim-style modelines (e.g., tabstop).
+    #[arg(long = "modelines")]
+    pub modelines: Option<usize>,
+
+    /// Treat form feed characters (^L) as page breaks.
+    #[arg(long = "form-feed")]
+    pub form_feed: bool,
+
+    /// Determine total file size immediately on open (for accurate percentage).
+    #[arg(long = "file-size")]
+    pub file_size: bool,
+
+    /// Initial commands to execute (alternative to +cmd syntax).
+    #[arg(long = "cmd")]
+    pub cmd: Option<String>,
+
+    /// Save search/command history automatically to the given file.
+    #[arg(long = "autosave")]
+    pub autosave: Option<String>,
+
     /// Enable mouse support (Phase 2).
     #[arg(long = "mouse", hide = true)]
     pub mouse: bool,
@@ -1274,5 +1294,85 @@ mod tests {
         assert!(opts.no_keypad);
         assert!(opts.no_vbell);
         assert!(opts.redraw_on_quit);
+    }
+
+    // ── Task 224: Long flags batch 3 ────────────────────────────────
+
+    #[test]
+    fn test_options_modelines_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--modelines=5", "file.txt"]);
+        assert_eq!(opts.modelines, Some(5));
+    }
+
+    #[test]
+    fn test_options_modelines_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.modelines.is_none());
+    }
+
+    #[test]
+    fn test_options_form_feed_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--form-feed", "file.txt"]);
+        assert!(opts.form_feed);
+    }
+
+    #[test]
+    fn test_options_form_feed_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.form_feed);
+    }
+
+    #[test]
+    fn test_options_file_size_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--file-size", "file.txt"]);
+        assert!(opts.file_size);
+    }
+
+    #[test]
+    fn test_options_file_size_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.file_size);
+    }
+
+    #[test]
+    fn test_options_cmd_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--cmd=G", "file.txt"]);
+        assert_eq!(opts.cmd.as_deref(), Some("G"));
+    }
+
+    #[test]
+    fn test_options_cmd_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.cmd.is_none());
+    }
+
+    #[test]
+    fn test_options_autosave_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--autosave=/tmp/hist", "file.txt"]);
+        assert_eq!(opts.autosave.as_deref(), Some("/tmp/hist"));
+    }
+
+    #[test]
+    fn test_options_autosave_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.autosave.is_none());
+    }
+
+    #[test]
+    fn test_options_batch3_all_flags_combined() {
+        let opts = Options::parse_from([
+            "pgr",
+            "--modelines=3",
+            "--form-feed",
+            "--file-size",
+            "--cmd=100g",
+            "--autosave=/tmp/hist",
+            "file.txt",
+        ]);
+        assert_eq!(opts.modelines, Some(3));
+        assert!(opts.form_feed);
+        assert!(opts.file_size);
+        assert_eq!(opts.cmd.as_deref(), Some("100g"));
+        assert_eq!(opts.autosave.as_deref(), Some("/tmp/hist"));
     }
 }
