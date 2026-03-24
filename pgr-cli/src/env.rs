@@ -11,11 +11,13 @@
 // for this module so the complete implementation can land without phantom usage.
 #![allow(dead_code)]
 
+use pgr_display::BinFmt;
+
 /// Parsed environment variable configuration.
 ///
 /// Holds all less-related environment variables needed for pager operation.
 /// Variables are read once at startup and stored here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EnvConfig {
     /// LESS: default command-line options.
     pub less_options: Vec<String>,
@@ -57,6 +59,37 @@ pub struct EnvConfig {
     /// LESSSEPARATOR: character used to separate directory components
     /// in filenames displayed in prompts.
     pub separator: Option<String>,
+
+    // --- Task 206: batch 1 environment variables ---
+    /// LESSBINFMT: format for displaying binary/control characters.
+    /// Default: `*s<%02X>`. The `*` prefix means standout mode.
+    pub bin_fmt: Option<String>,
+
+    /// LESSUTFBINFMT: format for displaying invalid UTF-8 byte sequences.
+    /// Default: `<U+%04X>`.
+    pub utf_bin_fmt: Option<String>,
+
+    /// `LESS_IS_MORE`: when set (non-empty), behave as `more(1)`.
+    /// Actual `more(1)` behavior is Task 250; we just store the flag.
+    pub is_more: bool,
+
+    /// `LESS_COLUMNS`: override terminal width (takes precedence over `COLUMNS`).
+    pub less_columns: Option<usize>,
+
+    /// `LESS_LINES`: override terminal height (takes precedence over `LINES`).
+    pub less_lines: Option<usize>,
+
+    /// `LESS_SHELL_LINES`: override screen height for `-F` (quit-if-one-screen).
+    pub shell_lines: Option<usize>,
+
+    /// `XDG_CONFIG_HOME`: base directory for config files. Defaults to `~/.config`.
+    pub xdg_config_home: Option<String>,
+
+    /// `XDG_DATA_HOME`: base directory for data files. Defaults to `~/.local/share`.
+    pub xdg_data_home: Option<String>,
+
+    /// `XDG_STATE_HOME`: base directory for state files. Defaults to `~/.local/state`.
+    pub xdg_state_home: Option<String>,
 
     // --- Phase 2 variables (parsed, stored, not yet used) ---
     /// LESSOPEN: input preprocessor command.
@@ -108,6 +141,20 @@ impl EnvConfig {
             .map(|v| v.trim() == "1")
             .unwrap_or(false);
 
+        // Task 206: batch 1 env vars
+        let bin_fmt = env_nonempty("LESSBINFMT");
+        let utf_bin_fmt = env_nonempty("LESSUTFBINFMT");
+        let is_more = std::env::var("LESS_IS_MORE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some();
+        let less_columns = env_parse_usize("LESS_COLUMNS");
+        let less_lines = env_parse_usize("LESS_LINES");
+        let shell_lines = env_parse_usize("LESS_SHELL_LINES");
+        let xdg_config_home = env_nonempty("XDG_CONFIG_HOME");
+        let xdg_data_home = env_nonempty("XDG_DATA_HOME");
+        let xdg_state_home = env_nonempty("XDG_STATE_HOME");
+
         let lessopen = env_nonempty("LESSOPEN");
         let lessclose = env_nonempty("LESSCLOSE");
 
@@ -132,6 +179,15 @@ impl EnvConfig {
             secure_mode,
             window_size,
             separator,
+            bin_fmt,
+            utf_bin_fmt,
+            is_more,
+            less_columns,
+            less_lines,
+            shell_lines,
+            xdg_config_home,
+            xdg_data_home,
+            xdg_state_home,
             lessopen,
             lessclose,
             lesskey,
@@ -171,6 +227,87 @@ impl EnvConfig {
             (Some(cols), Some(lines)) => Some((cols, lines)),
             _ => None,
         }
+    }
+
+    /// Returns the effective terminal dimensions, applying `LESS_COLUMNS` / `LESS_LINES`
+    /// overrides on top of the ioctl-detected values.
+    ///
+    /// Each dimension is independently overridden: if only `LESS_COLUMNS` is set,
+    /// only width changes.
+    #[must_use]
+    pub fn effective_dimensions(
+        &self,
+        detected_rows: usize,
+        detected_cols: usize,
+    ) -> (usize, usize) {
+        let rows = self.less_lines.unwrap_or(detected_rows);
+        let cols = self.less_columns.unwrap_or(detected_cols);
+        (rows, cols)
+    }
+
+    /// Returns the screen height to use for `-F` (quit-if-one-screen) checks.
+    ///
+    /// Uses `LESS_SHELL_LINES` if set, otherwise falls back to the given
+    /// terminal height.
+    #[must_use]
+    pub fn shell_screen_height(&self, terminal_rows: usize) -> usize {
+        self.shell_lines.unwrap_or(terminal_rows)
+    }
+
+    /// Returns the XDG config home directory.
+    ///
+    /// Uses `XDG_CONFIG_HOME` if set, otherwise `$HOME/.config`.
+    #[must_use]
+    pub fn config_home(&self) -> Option<std::path::PathBuf> {
+        if let Some(ref dir) = self.xdg_config_home {
+            return Some(std::path::PathBuf::from(dir));
+        }
+        self.home
+            .as_ref()
+            .map(|h| std::path::PathBuf::from(h).join(".config"))
+    }
+
+    /// Returns the XDG data home directory.
+    ///
+    /// Uses `XDG_DATA_HOME` if set, otherwise `$HOME/.local/share`.
+    #[must_use]
+    pub fn data_home(&self) -> Option<std::path::PathBuf> {
+        if let Some(ref dir) = self.xdg_data_home {
+            return Some(std::path::PathBuf::from(dir));
+        }
+        self.home
+            .as_ref()
+            .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+    }
+
+    /// Returns the XDG state home directory.
+    ///
+    /// Uses `XDG_STATE_HOME` if set, otherwise `$HOME/.local/state`.
+    #[must_use]
+    pub fn state_home(&self) -> Option<std::path::PathBuf> {
+        if let Some(ref dir) = self.xdg_state_home {
+            return Some(std::path::PathBuf::from(dir));
+        }
+        self.home
+            .as_ref()
+            .map(|h| std::path::PathBuf::from(h).join(".local").join("state"))
+    }
+
+    /// Returns the parsed binary character format string.
+    ///
+    /// Uses `LESSBINFMT` if set, otherwise the default `*s<%02X>`.
+    /// The returned `BinFmt` can be used by the renderer.
+    #[must_use]
+    pub fn binary_format(&self) -> BinFmt {
+        BinFmt::parse(self.bin_fmt.as_deref().unwrap_or("*s<%02X>"))
+    }
+
+    /// Returns the parsed UTF-8 binary format string.
+    ///
+    /// Uses `LESSUTFBINFMT` if set, otherwise the default `<U+%04X>`.
+    #[must_use]
+    pub fn utf_binary_format(&self) -> BinFmt {
+        BinFmt::parse(self.utf_bin_fmt.as_deref().unwrap_or("<U+%04X>"))
     }
 
     /// Returns whether a specific command is allowed under the current security mode.
@@ -276,6 +413,7 @@ fn env_parse_usize(key: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pgr_display::BinFmtSegment;
     use std::env;
     use std::sync::Mutex;
 
@@ -538,26 +676,8 @@ mod tests {
     #[test]
     fn test_env_config_is_command_allowed_normal_mode() {
         let cfg = EnvConfig {
-            less_options: vec![],
-            charset: None,
-            less_edit: None,
-            visual: None,
-            editor: None,
-            shell: None,
-            columns: None,
-            lines: None,
-            term: None,
-            home: None,
             secure_mode: false,
-            window_size: None,
-            separator: None,
-            lessopen: None,
-            lessclose: None,
-            lesskey: None,
-            histfile: None,
-            histsize: None,
-            ansi_mid_chars: None,
-            ansi_end_chars: None,
+            ..EnvConfig::default()
         };
         assert!(cfg.is_command_allowed("shell"));
         assert!(cfg.is_command_allowed("pipe"));
@@ -576,25 +696,7 @@ mod tests {
     fn test_env_config_is_command_allowed_secure_blocks_shell() {
         let cfg = EnvConfig {
             secure_mode: true,
-            less_options: vec![],
-            charset: None,
-            less_edit: None,
-            visual: None,
-            editor: None,
-            shell: None,
-            columns: None,
-            lines: None,
-            term: None,
-            home: None,
-            window_size: None,
-            separator: None,
-            lessopen: None,
-            lessclose: None,
-            lesskey: None,
-            histfile: None,
-            histsize: None,
-            ansi_mid_chars: None,
-            ansi_end_chars: None,
+            ..EnvConfig::default()
         };
         assert!(!cfg.is_command_allowed("shell"));
     }
@@ -604,25 +706,7 @@ mod tests {
     fn test_env_config_is_command_allowed_secure_blocks_pipe() {
         let cfg = EnvConfig {
             secure_mode: true,
-            less_options: vec![],
-            charset: None,
-            less_edit: None,
-            visual: None,
-            editor: None,
-            shell: None,
-            columns: None,
-            lines: None,
-            term: None,
-            home: None,
-            window_size: None,
-            separator: None,
-            lessopen: None,
-            lessclose: None,
-            lesskey: None,
-            histfile: None,
-            histsize: None,
-            ansi_mid_chars: None,
-            ansi_end_chars: None,
+            ..EnvConfig::default()
         };
         assert!(!cfg.is_command_allowed("pipe"));
     }
@@ -632,25 +716,7 @@ mod tests {
     fn test_env_config_is_command_allowed_secure_blocks_editor() {
         let cfg = EnvConfig {
             secure_mode: true,
-            less_options: vec![],
-            charset: None,
-            less_edit: None,
-            visual: None,
-            editor: None,
-            shell: None,
-            columns: None,
-            lines: None,
-            term: None,
-            home: None,
-            window_size: None,
-            separator: None,
-            lessopen: None,
-            lessclose: None,
-            lesskey: None,
-            histfile: None,
-            histsize: None,
-            ansi_mid_chars: None,
-            ansi_end_chars: None,
+            ..EnvConfig::default()
         };
         assert!(!cfg.is_command_allowed("editor"));
     }
@@ -752,5 +818,345 @@ mod tests {
         assert_eq!(flags, vec!["-R"]);
         assert!(initial.is_empty());
         assert_eq!(every_file, vec!["G"]);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 206: batch 1 env var tests
+    // ---------------------------------------------------------------------------
+
+    // Test 21: LESS_COLUMNS overrides terminal width
+    #[test]
+    fn test_env_config_less_columns_overrides_width() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_COLUMNS", "132")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.less_columns, Some(132));
+    }
+
+    // Test 22: LESS_LINES overrides terminal height
+    #[test]
+    fn test_env_config_less_lines_overrides_height() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_LINES", "50")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.less_lines, Some(50));
+    }
+
+    // Test 23: effective_dimensions applies LESS_COLUMNS/LESS_LINES
+    #[test]
+    fn test_env_config_effective_dimensions_both_overridden() {
+        let cfg = EnvConfig {
+            less_columns: Some(132),
+            less_lines: Some(50),
+            ..EnvConfig::default()
+        };
+        assert_eq!(cfg.effective_dimensions(24, 80), (50, 132));
+    }
+
+    // Test 24: effective_dimensions partial override (only columns)
+    #[test]
+    fn test_env_config_effective_dimensions_partial_override() {
+        let cfg = EnvConfig {
+            less_columns: Some(132),
+            ..EnvConfig::default()
+        };
+        assert_eq!(cfg.effective_dimensions(24, 80), (24, 132));
+    }
+
+    // Test 25: effective_dimensions no overrides passes through
+    #[test]
+    fn test_env_config_effective_dimensions_no_override() {
+        let cfg = EnvConfig::default();
+        assert_eq!(cfg.effective_dimensions(24, 80), (24, 80));
+    }
+
+    // Test 26: LESS_SHELL_LINES read and used
+    #[test]
+    fn test_env_config_shell_lines_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_SHELL_LINES", "30")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.shell_lines, Some(30));
+        assert_eq!(cfg.shell_screen_height(24), 30);
+    }
+
+    // Test 27: shell_screen_height falls back to terminal rows
+    #[test]
+    fn test_env_config_shell_screen_height_fallback() {
+        let cfg = EnvConfig::default();
+        assert_eq!(cfg.shell_screen_height(24), 24);
+    }
+
+    // Test 28: LESSBINFMT stored correctly
+    #[test]
+    fn test_env_config_lessbinfmt_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSBINFMT", "*d<%02X>")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.bin_fmt.as_deref(), Some("*d<%02X>"));
+    }
+
+    // Test 29: LESSUTFBINFMT stored correctly
+    #[test]
+    fn test_env_config_lessutfbinfmt_parsed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESSUTFBINFMT", "<U+%04X>")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.utf_bin_fmt.as_deref(), Some("<U+%04X>"));
+    }
+
+    // Test 30: LESS_IS_MORE set -> is_more = true
+    #[test]
+    fn test_env_config_less_is_more_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("LESS_IS_MORE", "1")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.is_more);
+    }
+
+    // Test 31: LESS_IS_MORE not set -> is_more = false
+    #[test]
+    fn test_env_config_less_is_more_unset() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&["LESS_IS_MORE"]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(!cfg.is_more);
+    }
+
+    // Test 32: XDG_CONFIG_HOME set -> config_home returns it
+    #[test]
+    fn test_env_config_xdg_config_home_set() {
+        let cfg = EnvConfig {
+            xdg_config_home: Some("/custom/config".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.config_home(),
+            Some(std::path::PathBuf::from("/custom/config"))
+        );
+    }
+
+    // Test 33: XDG_CONFIG_HOME unset, HOME set -> defaults to ~/.config
+    #[test]
+    fn test_env_config_xdg_config_home_default() {
+        let cfg = EnvConfig {
+            home: Some("/home/user".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.config_home(),
+            Some(std::path::PathBuf::from("/home/user/.config"))
+        );
+    }
+
+    // Test 34: XDG_DATA_HOME set -> data_home returns it
+    #[test]
+    fn test_env_config_xdg_data_home_set() {
+        let cfg = EnvConfig {
+            xdg_data_home: Some("/custom/data".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.data_home(),
+            Some(std::path::PathBuf::from("/custom/data"))
+        );
+    }
+
+    // Test 35: XDG_DATA_HOME unset, HOME set -> defaults to ~/.local/share
+    #[test]
+    fn test_env_config_xdg_data_home_default() {
+        let cfg = EnvConfig {
+            home: Some("/home/user".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.data_home(),
+            Some(std::path::PathBuf::from("/home/user/.local/share"))
+        );
+    }
+
+    // Test 36: XDG_STATE_HOME set -> state_home returns it
+    #[test]
+    fn test_env_config_xdg_state_home_set() {
+        let cfg = EnvConfig {
+            xdg_state_home: Some("/custom/state".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.state_home(),
+            Some(std::path::PathBuf::from("/custom/state"))
+        );
+    }
+
+    // Test 37: XDG_STATE_HOME unset, HOME set -> defaults to ~/.local/state
+    #[test]
+    fn test_env_config_xdg_state_home_default() {
+        let cfg = EnvConfig {
+            home: Some("/home/user".to_string()),
+            ..EnvConfig::default()
+        };
+        assert_eq!(
+            cfg.state_home(),
+            Some(std::path::PathBuf::from("/home/user/.local/state"))
+        );
+    }
+
+    // Test 38: no HOME, no XDG -> all XDG paths are None
+    #[test]
+    fn test_env_config_xdg_no_home_returns_none() {
+        let cfg = EnvConfig::default();
+        assert!(cfg.config_home().is_none());
+        assert!(cfg.data_home().is_none());
+        assert!(cfg.state_home().is_none());
+    }
+
+    // Test 39: missing env vars use defaults
+    #[test]
+    fn test_env_config_missing_vars_use_defaults() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&[
+            "LESS_COLUMNS",
+            "LESS_LINES",
+            "LESS_SHELL_LINES",
+            "LESSBINFMT",
+            "LESSUTFBINFMT",
+            "LESS_IS_MORE",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.less_columns.is_none());
+        assert!(cfg.less_lines.is_none());
+        assert!(cfg.shell_lines.is_none());
+        assert!(cfg.bin_fmt.is_none());
+        assert!(cfg.utf_bin_fmt.is_none());
+        assert!(!cfg.is_more);
+        assert!(cfg.xdg_config_home.is_none());
+        assert!(cfg.xdg_data_home.is_none());
+        assert!(cfg.xdg_state_home.is_none());
+    }
+
+    // Test 40: XDG env vars actually parsed from environment
+    #[test]
+    fn test_env_config_xdg_vars_from_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[
+            ("XDG_CONFIG_HOME", "/xdg/config"),
+            ("XDG_DATA_HOME", "/xdg/data"),
+            ("XDG_STATE_HOME", "/xdg/state"),
+        ]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.xdg_config_home.as_deref(), Some("/xdg/config"));
+        assert_eq!(cfg.xdg_data_home.as_deref(), Some("/xdg/data"));
+        assert_eq!(cfg.xdg_state_home.as_deref(), Some("/xdg/state"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // BinFmt parsing tests
+    // ---------------------------------------------------------------------------
+
+    // Test 41: default LESSBINFMT parses correctly
+    #[test]
+    fn test_binfmt_parse_default() {
+        let fmt = BinFmt::parse("*s<%02X>");
+        assert!(fmt.standout);
+        assert_eq!(fmt.segments.len(), 4);
+        assert_eq!(fmt.segments[0], BinFmtSegment::Literal("*".to_string()));
+        assert_eq!(fmt.segments[1], BinFmtSegment::Literal("<".to_string()));
+        assert_eq!(fmt.segments[2], BinFmtSegment::Format("%02X".to_string()));
+        assert_eq!(fmt.segments[3], BinFmtSegment::Literal(">".to_string()));
+    }
+
+    // Test 42: BinFmt format_byte with default format
+    #[test]
+    fn test_binfmt_format_byte_default() {
+        let fmt = BinFmt::parse("*s<%02X>");
+        // Byte 0x01 -> "*<01>"
+        let result = fmt.format_byte(0x01);
+        assert_eq!(result, "*<01>");
+    }
+
+    // Test 43: BinFmt format_byte hex uppercase
+    #[test]
+    fn test_binfmt_format_byte_hex_uppercase() {
+        let fmt = BinFmt::parse("*s<%02X>");
+        let result = fmt.format_byte(0xFF);
+        assert_eq!(result, "*<FF>");
+    }
+
+    // Test 44: LESSUTFBINFMT default format
+    #[test]
+    fn test_binfmt_utf_default() {
+        let fmt = BinFmt::parse("<U+%04X>");
+        assert!(!fmt.standout);
+        let result = fmt.format_byte(0xFFFD);
+        assert_eq!(result, "<U+FFFD>");
+    }
+
+    // Test 45: BinFmt without standout
+    #[test]
+    fn test_binfmt_no_standout() {
+        let fmt = BinFmt::parse("[%02x]");
+        assert!(!fmt.standout);
+        let result = fmt.format_byte(0x0A);
+        assert_eq!(result, "[0a]");
+    }
+
+    // Test 46: BinFmt with octal format
+    #[test]
+    fn test_binfmt_octal() {
+        let fmt = BinFmt::parse("\\%03o");
+        assert!(!fmt.standout);
+        let result = fmt.format_byte(0o177);
+        assert_eq!(result, "\\177");
+    }
+
+    // Test 47: BinFmt with decimal format
+    #[test]
+    fn test_binfmt_decimal() {
+        let fmt = BinFmt::parse("(%d)");
+        assert!(!fmt.standout);
+        let result = fmt.format_byte(127);
+        assert_eq!(result, "(127)");
+    }
+
+    // Test 48: BinFmt standout only (no `s`)
+    #[test]
+    fn test_binfmt_standout_no_literal_star() {
+        let fmt = BinFmt::parse("*<%02X>");
+        assert!(fmt.standout);
+        // No `s` after `*`, so no literal `*` segment
+        let result = fmt.format_byte(0x01);
+        assert_eq!(result, "<01>");
+    }
+
+    // Test 49: binary_format() uses default when env not set
+    #[test]
+    fn test_env_config_binary_format_default() {
+        let cfg = EnvConfig::default();
+        let fmt = cfg.binary_format();
+        assert!(fmt.standout);
+        let result = fmt.format_byte(0x01);
+        assert_eq!(result, "*<01>");
+    }
+
+    // Test 50: utf_binary_format() uses default when env not set
+    #[test]
+    fn test_env_config_utf_binary_format_default() {
+        let cfg = EnvConfig::default();
+        let fmt = cfg.utf_binary_format();
+        assert!(!fmt.standout);
+        let result = fmt.format_byte(0xFFFD);
+        assert_eq!(result, "<U+FFFD>");
     }
 }
