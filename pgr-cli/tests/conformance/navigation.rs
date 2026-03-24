@@ -101,8 +101,9 @@ fn test_conformance_navigation_g_upper_goes_to_end() {
 fn test_conformance_navigation_down_arrow() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
-    // Down arrow is ESC [ B
-    assert_content_conformance_bytes(&[], file.path().to_str().unwrap(), b"\x1b[B");
+    // Down arrow in xterm-256color terminfo is ESC O B (SS3), not ESC [ B (CSI).
+    // less uses terminfo to identify cursor keys, so we must send the correct sequence.
+    assert_content_conformance_bytes(&[], file.path().to_str().unwrap(), b"\x1bOB");
 }
 
 /// Test 11: Up arrow — send up arrow after scrolling, compare with same result as `k`.
@@ -112,11 +113,11 @@ fn test_conformance_navigation_up_arrow() {
     skip_if_no_less!();
     let file = generate_numbered_file(100);
     // Scroll down 3 lines then up 1 via arrow keys.
-    // Down arrow = ESC [ B, Up arrow = ESC [ A
+    // In xterm-256color terminfo: Down = ESC O B, Up = ESC O A (SS3 sequences).
     assert_content_conformance_byte_steps(
         &[],
         file.path().to_str().unwrap(),
-        &[b"\x1b[B\x1b[B\x1b[B", b"\x1b[A"],
+        &[b"\x1bOB\x1bOB\x1bOB", b"\x1bOA"],
     );
 }
 
@@ -240,8 +241,8 @@ fn test_conformance_navigation_w_sets_backward_window() {
 fn test_conformance_navigation_horizontal_scroll_right() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
-    // Right arrow = ESC [ C (in less, right arrow scrolls horizontally with -S)
-    assert_content_conformance_bytes(&["-S"], file.path().to_str().unwrap(), b"\x1b[C");
+    // Right arrow in xterm-256color terminfo = ESC O C (SS3)
+    assert_content_conformance_bytes(&["-S"], file.path().to_str().unwrap(), b"\x1bOC");
 }
 
 /// Test 24: Left arrow (horizontal scroll left) — after scrolling right,
@@ -251,12 +252,11 @@ fn test_conformance_navigation_horizontal_scroll_right() {
 fn test_conformance_navigation_horizontal_scroll_left() {
     skip_if_no_less!();
     let file = generate_long_lines_file(50, 200);
-    // Right arrow then left arrow with -S flag.
-    // Right = ESC [ C, Left = ESC [ D
+    // Right/Left arrows in xterm-256color terminfo = ESC O C / ESC O D (SS3)
     assert_content_conformance_byte_steps(
         &["-S"],
         file.path().to_str().unwrap(),
-        &[b"\x1b[C", b"\x1b[D"],
+        &[b"\x1bOC", b"\x1bOD"],
     );
 }
 

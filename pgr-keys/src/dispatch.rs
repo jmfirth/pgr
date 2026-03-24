@@ -164,6 +164,9 @@ pub struct Pager<R: Read, W: Write> {
     editing_filter: bool,
     /// Whether the current filter prompt has inversion toggled via `^N`.
     filter_invert: bool,
+    /// Whether the next keypress should be absorbed (used to dismiss
+    /// option toggle/query status messages, matching GNU less behavior).
+    absorb_next_key: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -220,6 +223,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             filtered_lines: None,
             editing_filter: false,
             filter_invert: false,
+            absorb_next_key: false,
         }
     }
 
@@ -262,6 +266,15 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Process a single key event. Returns `Ok(true)` if the pager should
     /// continue, `Ok(false)` if it should quit.
     fn process_key(&mut self, key: &Key) -> Result<bool> {
+        // After an option toggle/query, the next keypress dismisses the
+        // status message without executing a command (matching GNU less).
+        if self.absorb_next_key {
+            self.absorb_next_key = false;
+            self.status_message = None;
+            self.repaint()?;
+            return Ok(true);
+        }
+
         // Clear any transient status message on the next keypress.
         if self.status_message.is_some() && !self.editing_search {
             self.status_message = None;
@@ -420,8 +433,12 @@ impl<R: Read, W: Write> Pager<R, W> {
             Key::Char('$') => {
                 self.save_last_position();
                 let total = self.index.total_lines(&*self.buffer)?;
-                let end = total.saturating_sub(self.screen.content_rows());
-                self.screen.goto_line(end, total);
+                // Match less: '$' mark positions 1 line past what G does,
+                // showing the last (content_rows - 1) lines plus a tilde row.
+                let end = total
+                    .saturating_sub(self.screen.content_rows())
+                    .saturating_add(1);
+                self.screen.set_top_line(end);
                 self.repaint()?;
             }
             Key::Char(c) => {
@@ -506,10 +523,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if let Some(c) = count {
                     self.sticky_half_page = Some(c);
                 }
-                // less uses (screen_height / 2) not (content_rows / 2)
+                // less uses (screen_height / 2), not (content_rows / 2)
                 let amount = self
                     .sticky_half_page
-                    .unwrap_or(self.screen.content_rows() / 2);
+                    .unwrap_or(self.screen.dimensions().0 / 2);
                 self.screen.scroll_forward(amount, total);
                 self.repaint()?;
                 self.check_eof_quit(total);
@@ -519,10 +536,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if let Some(c) = count {
                     self.sticky_half_page = Some(c);
                 }
-                // less uses (screen_height / 2) not (content_rows / 2)
+                // less uses (screen_height / 2), not (content_rows / 2)
                 let amount = self
                     .sticky_half_page
-                    .unwrap_or(self.screen.content_rows() / 2);
+                    .unwrap_or(self.screen.dimensions().0 / 2);
                 self.screen.scroll_backward(amount);
                 self.repaint()?;
             }
@@ -1605,8 +1622,15 @@ impl<R: Read, W: Write> Pager<R, W> {
             false, // TODO: pipe detection deferred to Phase 2
         );
 
+        // GNU less scrolls forward 1 line and replaces the last content
+        // row with the info text (the prompt row stays).
+        self.screen.scroll_forward(1, total_lines);
+        self.repaint()?;
+
         let (rows, cols) = self.screen.dimensions();
-        paint_prompt(&mut self.writer, &text, rows, cols, None)?;
+        // Paint the info on the last content row (rows-1 in 1-based ANSI),
+        // not the prompt row (rows), matching GNU less behavior.
+        paint_prompt(&mut self.writer, &text, rows.saturating_sub(1), cols, None)?;
         Ok(())
     }
 
@@ -2065,6 +2089,7 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn handle_toggle_option(&mut self, flag: char) -> Result<()> {
         if let Ok(msg) = self.runtime_options.toggle(flag) {
             self.status_message = Some(msg);
+            self.absorb_next_key = true;
             // Sync render-affecting options to the screen/render_config.
             self.sync_runtime_to_render();
             self.repaint()?;
@@ -2079,6 +2104,7 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn handle_query_option(&mut self, flag: char) -> Result<()> {
         if let Ok(msg) = self.runtime_options.query(flag) {
             self.status_message = Some(msg);
+            self.absorb_next_key = true;
             self.repaint()?;
         }
         Ok(())
@@ -2551,8 +2577,9 @@ mod tests {
         keys.push(b'$');
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        // End: total(100) - content_rows(23) = 77
-        assert_eq!(pager.screen().top_line(), 77);
+        // End: total(100) - content_rows(23) + 1 = 78
+        // less '$' mark positions 1 line past G (shows tilde at bottom).
+        assert_eq!(pager.screen().top_line(), 78);
     }
 
     #[test]
@@ -2703,11 +2730,11 @@ mod tests {
 
     #[test]
     fn test_dispatch_half_page_default_amount_matches_less() {
-        // 24-row terminal: content_rows = 23, default half = 23 / 2 = 11 (floor).
-        // less uses (screen_height - 1) / 2 = 11.
+        // 24-row terminal: screen_height = 24, default half = 24 / 2 = 12.
+        // less uses (screen_height / 2), not (content_rows / 2).
         let content = make_test_content(100);
         let pager = run_pager(b"dq", &content);
-        assert_eq!(pager.screen().top_line(), 11);
+        assert_eq!(pager.screen().top_line(), 12);
     }
 
     // ── Window sizing ────────────────────────────────────────────────
@@ -3020,8 +3047,8 @@ mod tests {
     #[test]
     fn test_dispatch_dash_i_toggles_case_insensitive() {
         let content = make_test_content(50);
-        // `-` then `i` toggles case_insensitive, then quit.
-        let pager = run_pager(b"-iq", &content);
+        // `-i` toggles case_insensitive; next key absorbed (less compat), then quit.
+        let pager = run_pager(b"-i\nq", &content);
         assert!(pager.runtime_options().case_insensitive);
     }
 
@@ -3029,14 +3056,14 @@ mod tests {
     fn test_dispatch_dash_n_upper_toggles_line_numbers_and_repaints() {
         let content = make_test_content(50);
         // Toggling -N should flip line_numbers and trigger a repaint.
-        let pager = run_pager(b"-Nq", &content);
+        let pager = run_pager(b"-N\nq", &content);
         assert!(pager.runtime_options().line_numbers);
     }
 
     #[test]
     fn test_dispatch_dash_s_upper_toggles_chop_long_lines() {
         let content = make_test_content(50);
-        let pager = run_pager(b"-Sq", &content);
+        let pager = run_pager(b"-S\nq", &content);
         assert!(pager.runtime_options().chop_long_lines);
         // Screen chop mode should also be updated.
         assert!(pager.screen().chop_mode());
@@ -3045,7 +3072,7 @@ mod tests {
     #[test]
     fn test_dispatch_dash_s_lower_toggles_squeeze_blank_lines() {
         let content = make_test_content(50);
-        let pager = run_pager(b"-sq", &content);
+        let pager = run_pager(b"-s\nq", &content);
         assert!(pager.runtime_options().squeeze_blank_lines);
     }
 
@@ -3053,15 +3080,15 @@ mod tests {
     fn test_dispatch_underscore_queries_option() {
         // Pressing _ then i should not change any state.
         let content = make_test_content(50);
-        let pager = run_pager(b"_iq", &content);
+        let pager = run_pager(b"_i\nq", &content);
         assert!(!pager.runtime_options().case_insensitive);
     }
 
     #[test]
     fn test_dispatch_dash_toggle_twice_reverts() {
         let content = make_test_content(50);
-        // Toggle i on, then off.
-        let pager = run_pager(b"-i-iq", &content);
+        // Toggle i on (absorbed), then toggle off (absorbed), then quit.
+        let pager = run_pager(b"-i\n-i\nq", &content);
         assert!(!pager.runtime_options().case_insensitive);
     }
 
@@ -3070,8 +3097,8 @@ mod tests {
     #[test]
     fn test_dispatch_dash_i_toggle_shows_status_message_in_output() {
         let content = make_test_content(50);
-        // `-i` toggles case_insensitive on; output should contain the message.
-        let pager = run_pager(b"-iq", &content);
+        // `-i` toggles case_insensitive on; next key absorbed; output has the message.
+        let pager = run_pager(b"-i\nq", &content);
         let output = String::from_utf8_lossy(&pager.writer);
         assert!(
             output.contains("Case-insensitive search is ON"),
@@ -3082,8 +3109,8 @@ mod tests {
     #[test]
     fn test_dispatch_dash_s_upper_toggle_shows_status_message_in_output() {
         let content = make_test_content(50);
-        // `-S` toggles chop_long_lines on; output should contain the message.
-        let pager = run_pager(b"-Sq", &content);
+        // `-S` toggles chop_long_lines on; next key absorbed.
+        let pager = run_pager(b"-S\nq", &content);
         let output = String::from_utf8_lossy(&pager.writer);
         assert!(
             output.contains("Chop long lines is ON"),
@@ -3094,8 +3121,8 @@ mod tests {
     #[test]
     fn test_dispatch_dash_n_upper_toggle_shows_status_message_in_output() {
         let content = make_test_content(50);
-        // `-N` toggles line_numbers on; output should contain the message.
-        let pager = run_pager(b"-Nq", &content);
+        // `-N` toggles line_numbers on; next key absorbed.
+        let pager = run_pager(b"-N\nq", &content);
         let output = String::from_utf8_lossy(&pager.writer);
         assert!(
             output.contains("Line numbers is ON"),
@@ -3106,8 +3133,8 @@ mod tests {
     #[test]
     fn test_dispatch_underscore_i_query_shows_status_message_in_output() {
         let content = make_test_content(50);
-        // `_i` queries case_insensitive (default OFF); output should show state.
-        let pager = run_pager(b"_iq", &content);
+        // `_i` queries case_insensitive (default OFF); next key absorbed.
+        let pager = run_pager(b"_i\nq", &content);
         let output = String::from_utf8_lossy(&pager.writer);
         assert!(
             output.contains("Case-insensitive search is OFF"),
@@ -3120,8 +3147,8 @@ mod tests {
     #[test]
     fn test_dispatch_underscore_query_after_toggle_shows_new_state() {
         let content = make_test_content(50);
-        // Toggle `-i` (ON), then `_i` queries and should show ON.
-        let pager = run_pager(b"-i_iq", &content);
+        // Toggle `-i` (ON), absorbed, then `_i` queries, absorbed, then quit.
+        let pager = run_pager(b"-i\n_i\nq", &content);
         let output = String::from_utf8_lossy(&pager.writer);
         // The query output should contain "ON" (the toggled state).
         assert!(
@@ -3133,8 +3160,8 @@ mod tests {
     #[test]
     fn test_dispatch_dash_toggle_off_shows_off_message() {
         let content = make_test_content(50);
-        // Toggle twice: on then off. The second toggle should show OFF.
-        let pager = run_pager(b"-i-iq", &content);
+        // Toggle twice: on (absorbed) then off (absorbed). The second should show OFF.
+        let pager = run_pager(b"-i\n-i\nq", &content);
         let output = String::from_utf8_lossy(&pager.writer);
         // The last status message rendered should be the OFF message.
         assert!(
@@ -4085,11 +4112,12 @@ mod tests {
             "more text",
         ]);
 
-        // Toggle -I on, then search for "ERROR" (all caps). Should match "Error"
-        // at line 24 thanks to case insensitive mode.
+        // Toggle -I on (next key absorbed), then search for "ERROR" (all caps).
+        // Should match "Error" at line 24 thanks to case insensitive mode.
         let mut keys: Vec<u8> = Vec::new();
         keys.push(b'-');
         keys.push(b'I');
+        keys.push(b'\n'); // absorbed (dismiss toggle message)
         keys.push(b'/');
         keys.extend_from_slice(b"ERROR");
         keys.push(b'\n');
