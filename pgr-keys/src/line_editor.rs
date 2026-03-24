@@ -69,7 +69,10 @@ impl LineEditor {
             Key::Ctrl('e') | Key::End => self.end(),
             Key::Left => self.cursor_left(),
             Key::Right => self.cursor_right(),
+            Key::CtrlLeft | Key::EscSeq('b') => self.move_word_backward(),
+            Key::CtrlRight | Key::EscSeq('f') => self.move_word_forward(),
             Key::Ctrl('w') => self.delete_word_backward(),
+            Key::EscSeq('d') => self.delete_word_forward(),
             _ => {}
         }
         LineEditResult::Continue
@@ -129,6 +132,38 @@ impl LineEditor {
     /// Move the cursor to the end of the buffer.
     pub fn end(&mut self) {
         self.cursor = self.buf.len();
+    }
+
+    /// Move the cursor backward by one word.
+    ///
+    /// Skips any whitespace immediately before the cursor, then moves to the
+    /// start of the preceding word (the next whitespace boundary going left,
+    /// or the beginning of the buffer).
+    pub fn move_word_backward(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor = self.word_start_before_cursor();
+    }
+
+    /// Move the cursor forward by one word.
+    ///
+    /// Skips any whitespace immediately after the cursor, then moves past the
+    /// next word to the following whitespace boundary (or end of buffer).
+    pub fn move_word_forward(&mut self) {
+        if self.cursor >= self.buf.len() {
+            return;
+        }
+        self.cursor = self.word_end_after_cursor();
+    }
+
+    /// Delete from the cursor forward to the next word boundary.
+    pub fn delete_word_forward(&mut self) {
+        if self.cursor >= self.buf.len() {
+            return;
+        }
+        let end = self.word_end_after_cursor();
+        self.buf.drain(self.cursor..end);
     }
 
     /// Return the current buffer contents.
@@ -195,36 +230,63 @@ impl LineEditor {
     }
 
     /// Delete from the cursor backward to the previous whitespace boundary.
-    fn delete_word_backward(&mut self) {
+    pub fn delete_word_backward(&mut self) {
         if self.cursor == 0 {
             return;
         }
+        let word_start = self.word_start_before_cursor();
+        self.buf.drain(word_start..self.cursor);
+        self.cursor = word_start;
+    }
 
+    /// Find the byte offset of the start of the word before the cursor.
+    ///
+    /// Skips trailing whitespace, then finds the preceding whitespace boundary
+    /// (or the beginning of the buffer).
+    fn word_start_before_cursor(&self) -> usize {
         let before_cursor = &self.buf[..self.cursor];
 
         // Skip any trailing whitespace.
-        let end_pos = before_cursor
+        let non_ws = before_cursor
             .char_indices()
             .rev()
-            .find(|(_, c)| !c.is_whitespace())
-            .map_or(0, |(i, _)| i);
+            .find(|(_, c)| !c.is_whitespace());
 
-        if end_pos == 0 && before_cursor.starts_with(|c: char| c.is_whitespace()) {
-            // Everything before cursor is whitespace — delete it all.
-            self.buf.drain(..self.cursor);
-            self.cursor = 0;
-            return;
-        }
+        let Some((end_pos, _)) = non_ws else {
+            // Everything before cursor is whitespace.
+            return 0;
+        };
 
         // Find the start of the word (next whitespace going backward, or start of string).
-        let word_start = before_cursor[..end_pos]
+        before_cursor[..end_pos]
             .char_indices()
             .rev()
             .find(|(_, c)| c.is_whitespace())
-            .map_or(0, |(i, c)| i + c.len_utf8());
+            .map_or(0, |(i, c)| i + c.len_utf8())
+    }
 
-        self.buf.drain(word_start..self.cursor);
-        self.cursor = word_start;
+    /// Find the byte offset of the end of the word after the cursor.
+    ///
+    /// Skips leading whitespace, then finds the next whitespace boundary
+    /// (or the end of the buffer).
+    fn word_end_after_cursor(&self) -> usize {
+        let after_cursor = &self.buf[self.cursor..];
+
+        // Skip any leading whitespace.
+        let non_ws = after_cursor
+            .char_indices()
+            .find(|(_, c)| !c.is_whitespace());
+
+        let Some((ws_end, _)) = non_ws else {
+            // Everything after cursor is whitespace.
+            return self.buf.len();
+        };
+
+        // Find the end of the word (next whitespace, or end of string).
+        after_cursor[ws_end..]
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(self.buf.len(), |(i, _)| self.cursor + ws_end + i)
     }
 
     /// Find the byte offset of the previous character boundary before `self.cursor`.
@@ -538,5 +600,179 @@ mod tests {
         editor.process_key(&Key::Ctrl('e'));
         editor.insert('x');
         assert_eq!(editor.contents(), "abcx");
+    }
+
+    // ── Word movement tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_line_editor_move_word_backward_from_end() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "hello Xworld");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_backward_skips_trailing_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "hello   ");
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "Xhello   ");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_backward_at_start_is_noop() {
+        let mut editor = LineEditor::with_initial("/", "hello");
+        editor.home();
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "Xhello");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_backward_multiple_words() {
+        let mut editor = LineEditor::with_initial("/", "one two three");
+        editor.move_word_backward();
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "one Xtwo three");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_from_start() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX world");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_skips_leading_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "   hello");
+        editor.home();
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "   helloX");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_at_end_is_noop() {
+        let mut editor = LineEditor::with_initial("/", "hello");
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX");
+    }
+
+    #[test]
+    fn test_line_editor_move_word_forward_multiple_words() {
+        let mut editor = LineEditor::with_initial("/", "one two three");
+        editor.home();
+        editor.move_word_forward();
+        editor.move_word_forward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "one twoX three");
+    }
+
+    #[test]
+    fn test_line_editor_ctrl_left_moves_word_backward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.process_key(&Key::CtrlLeft);
+        editor.insert('X');
+        assert_eq!(editor.contents(), "hello Xworld");
+    }
+
+    #[test]
+    fn test_line_editor_ctrl_right_moves_word_forward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.process_key(&Key::CtrlRight);
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX world");
+    }
+
+    #[test]
+    fn test_line_editor_esc_b_moves_word_backward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.process_key(&Key::EscSeq('b'));
+        editor.insert('X');
+        assert_eq!(editor.contents(), "hello Xworld");
+    }
+
+    #[test]
+    fn test_line_editor_esc_f_moves_word_forward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.process_key(&Key::EscSeq('f'));
+        editor.insert('X');
+        assert_eq!(editor.contents(), "helloX world");
+    }
+
+    // ── Word delete tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_line_editor_delete_word_forward_from_start() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), " world");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_forward_skips_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "   hello");
+        editor.home();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_forward_at_end_is_noop() {
+        let mut editor = LineEditor::with_initial("/", "hello");
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "hello");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_forward_mid_word() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.cursor_right();
+        editor.cursor_right();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "he world");
+    }
+
+    #[test]
+    fn test_line_editor_esc_d_deletes_word_forward() {
+        let mut editor = LineEditor::with_initial("/", "hello world");
+        editor.home();
+        editor.process_key(&Key::EscSeq('d'));
+        assert_eq!(editor.contents(), " world");
+    }
+
+    #[test]
+    fn test_line_editor_word_movement_empty_buffer() {
+        let mut editor = LineEditor::new("/");
+        editor.move_word_backward();
+        editor.move_word_forward();
+        editor.delete_word_forward();
+        assert_eq!(editor.contents(), "");
+    }
+
+    #[test]
+    fn test_line_editor_word_boundaries_at_whitespace() {
+        let mut editor = LineEditor::with_initial("/", "a b c");
+        // Move backward from end: should land before 'c'
+        editor.move_word_backward();
+        editor.insert('X');
+        assert_eq!(editor.contents(), "a b Xc");
+    }
+
+    #[test]
+    fn test_line_editor_delete_word_backward_with_multiple_spaces() {
+        let mut editor = LineEditor::with_initial("/", "hello    world");
+        editor.delete_word_backward();
+        assert_eq!(editor.contents(), "hello    ");
     }
 }
