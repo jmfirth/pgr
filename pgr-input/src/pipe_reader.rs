@@ -4,6 +4,8 @@ use std::io::Read;
 
 use pgr_core::buffer::Buffer;
 
+use crate::log_file::LogWriter;
+
 /// Default read chunk size for pulling data from the pipe.
 const PIPE_READ_CHUNK: usize = 64 * 1024;
 
@@ -17,6 +19,8 @@ pub struct PipeBuffer<R: Read> {
     source: R,
     /// Whether the source has reached EOF.
     eof: bool,
+    /// Optional log writer for tee-ing data to a file (`-o` / `-O`).
+    log_writer: Option<LogWriter>,
 }
 
 impl<R: Read> PipeBuffer<R> {
@@ -27,6 +31,7 @@ impl<R: Read> PipeBuffer<R> {
             data: Vec::new(),
             source,
             eof: false,
+            log_writer: None,
         }
     }
 
@@ -34,6 +39,12 @@ impl<R: Read> PipeBuffer<R> {
     #[must_use]
     pub fn is_eof(&self) -> bool {
         self.eof
+    }
+
+    /// Attaches a log writer that will receive a copy of all data read from
+    /// the source. Used to implement `-o` / `-O` flags.
+    pub fn set_log_writer(&mut self, writer: LogWriter) {
+        self.log_writer = Some(writer);
     }
 }
 
@@ -70,6 +81,11 @@ impl<R: Read + Send> Buffer for PipeBuffer<R> {
         if n == 0 {
             self.eof = true;
         } else {
+            if let Some(ref mut writer) = self.log_writer {
+                // Best-effort write to log file; ignore errors to avoid
+                // disrupting the pager's primary function.
+                let _ = writer.write_chunk(&chunk[..n]);
+            }
             self.data.extend_from_slice(&chunk[..n]);
         }
 

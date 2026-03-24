@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_display::TabStops;
-use pgr_input::{stdin_is_pipe, LoadedFile, PipeBuffer, PreprocessResult, Preprocessor};
+use pgr_input::{stdin_is_pipe, LoadedFile, LogWriter, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
     find_tag, parse_lesskey_file, resolve_pattern, ExitReason, FileEntry, FileList, KeyReader,
     LesskeyConfig, Pager, RawTerminal, RuntimeOptions, TagState,
@@ -194,6 +194,52 @@ fn check_quit_if_one_screen_pipe(
     Ok(false)
 }
 
+/// Opens a log file for `-o` / `-O` flags if configured.
+///
+/// `-o` prompts before overwriting an existing file. `-O` overwrites without
+/// prompting. Only meaningful when reading from stdin; callers should not
+/// invoke this for named file inputs.
+fn open_log_file(options: &Options) -> anyhow::Result<Option<LogWriter>> {
+    let path_str = options
+        .log_file_overwrite
+        .as_deref()
+        .or(options.log_file.as_deref());
+
+    let Some(path_str) = path_str else {
+        return Ok(None);
+    };
+
+    let path = std::path::Path::new(path_str);
+
+    // `-o` (non-overwrite) prompts if file already exists.
+    if options.log_file.is_some() && options.log_file_overwrite.is_none() && path.exists() {
+        eprint!("pgr: \"{path_str}\" exists; overwrite? (y/n) ");
+        // Read confirmation from /dev/tty (stdin is the pipe).
+        let answer = read_tty_line();
+        if !answer.starts_with('y') && !answer.starts_with('Y') {
+            return Ok(None);
+        }
+    }
+
+    let writer = LogWriter::create(path)
+        .map_err(|e| anyhow::anyhow!("cannot open log file \"{path_str}\": {e}"))?;
+    Ok(Some(writer))
+}
+
+/// Reads a single line from `/dev/tty` for interactive prompts.
+///
+/// Used by `-o` to confirm overwriting an existing log file, since stdin
+/// is occupied by the pipe.
+fn read_tty_line() -> String {
+    let Ok(file) = std::fs::File::open("/dev/tty") else {
+        return String::new();
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let _ = std::io::BufRead::read_line(&mut reader, &mut line);
+    line.trim().to_string()
+}
+
 fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
     if !stdin_is_pipe() && options.files.is_empty() {
         eprintln!("pgr: missing filename (\"pgr --help\" for help)");
@@ -202,7 +248,13 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
 
     let env_config = EnvConfig::from_env();
 
-    let pipe = PipeBuffer::new(std::io::stdin());
+    let mut pipe = PipeBuffer::new(std::io::stdin());
+
+    // Wire log file (`-o` / `-O`) for stdin input.
+    if let Some(log_writer) = open_log_file(options)? {
+        pipe.set_log_writer(log_writer);
+    }
+
     let mut buffer: Box<dyn Buffer> = Box::new(pipe);
     let mut index = LineIndex::new(buffer.len() as u64);
 
@@ -911,5 +963,85 @@ mod tests {
         let tmp = make_temp_file(b"x quit\n");
         let result = load_lesskey_from_path(&tmp.path().to_path_buf());
         assert!(result.is_some());
+    }
+
+    // ── Task 243: log file wiring tests ─────────────────────────────────
+
+    #[test]
+    fn test_open_log_file_none_when_no_flags() {
+        let opts = Options::parse_from(["pgr"]);
+        let result = open_log_file(&opts).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_open_log_file_overwrite_creates_file() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let log_path = dir.path().join("output.log");
+        let opts = Options::parse_from(["pgr", "-O", log_path.to_str().unwrap()]);
+        let result = open_log_file(&opts).unwrap();
+        assert!(result.is_some());
+        assert!(log_path.exists());
+    }
+
+    #[test]
+    fn test_open_log_file_overwrite_truncates_existing() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let log_path = dir.path().join("output.log");
+        std::fs::write(&log_path, b"old data").expect("pre-write failed");
+        let opts = Options::parse_from(["pgr", "-O", log_path.to_str().unwrap()]);
+        let writer = open_log_file(&opts).unwrap();
+        assert!(writer.is_some());
+        drop(writer);
+        // File should be truncated (empty after create, nothing written yet).
+        let contents = std::fs::read(&log_path).expect("read failed");
+        assert!(contents.is_empty());
+    }
+
+    #[test]
+    fn test_open_log_file_invalid_path_returns_error() {
+        let opts = Options::parse_from(["pgr", "-O", "/nonexistent/dir/output.log"]);
+        let result = open_log_file(&opts);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_open_log_file_only_works_with_stdin_flags() {
+        // Named files should not have -o/-O wired in. Since open_log_file
+        // only checks the option flags (not whether stdin is actually a pipe),
+        // we verify it returns Some when -O is set even with files.
+        // The actual stdin-only gating is in run_stdin_mode vs run_file_mode.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let log_path = dir.path().join("output.log");
+        let opts = Options::parse_from(["pgr", "-O", log_path.to_str().unwrap(), "somefile.txt"]);
+        let result = open_log_file(&opts).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_pipe_buffer_log_writer_tees_data() {
+        use std::io::Cursor;
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let log_path = dir.path().join("tee.log");
+        let log_writer = LogWriter::create(&log_path).expect("create failed");
+
+        let data = b"hello from pipe";
+        let mut pipe = PipeBuffer::new(Cursor::new(data.to_vec()));
+        pipe.set_log_writer(log_writer);
+
+        // Refresh reads data and tees to log.
+        pipe.refresh().expect("refresh failed");
+
+        // Verify the pipe buffer has the data.
+        let mut out = vec![0u8; 20];
+        let n = pipe.read_at(0, &mut out).expect("read_at failed");
+        assert_eq!(&out[..n], b"hello from pipe");
+
+        // Drop to flush.
+        drop(pipe);
+
+        // Verify the log file has the data.
+        let log_contents = std::fs::read(&log_path).expect("read failed");
+        assert_eq!(log_contents, b"hello from pipe");
     }
 }
