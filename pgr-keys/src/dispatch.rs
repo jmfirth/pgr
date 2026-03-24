@@ -187,6 +187,10 @@ pub struct Pager<R: Read, W: Write> {
     cross_file_search: bool,
     /// Tag navigation state for `t`/`T` commands (populated by `-t` flag).
     tag_state: Option<TagState>,
+    /// Whether follow mode should reopen the file by name on rename/delete.
+    follow_name: bool,
+    /// Whether follow mode should exit when the input pipe closes.
+    exit_follow_on_close: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -250,6 +254,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             initial_commands_executed: false,
             cross_file_search: false,
             tag_state: None,
+            follow_name: false,
+            exit_follow_on_close: false,
         }
     }
 
@@ -697,6 +703,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::FollowMode => {
                 self.follow_mode()?;
+            }
+            Command::FollowModeStopOnMatch => {
+                self.follow_mode_stop_on_match()?;
             }
             Command::RepaintRefresh => {
                 self.buffer.refresh()?;
@@ -1792,10 +1801,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             .ok_or_else(|| std::io::Error::other("no filename for follow mode"))?;
 
         // Open a fresh fd for the file to watch with kqueue.
-        let watch_file = std::fs::File::open(Path::new(&filename))?;
-        let watch_fd = std::os::unix::io::AsRawFd::as_raw_fd(&watch_file);
+        let mut watch_file = std::fs::File::open(Path::new(&filename))?;
+        let mut watch_fd = std::os::unix::io::AsRawFd::as_raw_fd(&watch_file);
 
-        let watcher = FileWatcher::watch(watch_fd)
+        let mut watcher = FileWatcher::watch(watch_fd)
             .map_err(|e| std::io::Error::other(format!("kqueue watch failed: {e}")))?;
 
         loop {
@@ -1805,48 +1814,39 @@ impl<R: Read, W: Write> Pager<R, W> {
 
             match event {
                 FollowEvent::NewData => {
-                    let old_len = self.buffer.len();
-                    self.buffer.refresh()?;
-                    let new_len = self.buffer.len();
-                    if new_len > old_len {
-                        self.index = LineIndex::new(new_len as u64);
-                        self.index.index_all(&*self.buffer)?;
-                        let total = self.index.lines_indexed();
-                        let target = total.saturating_sub(self.screen.content_rows());
-                        self.screen.goto_line(target, total);
-                        self.status_message =
-                            Some("Waiting for data... (interrupt to abort)".to_string());
-                        self.repaint()?;
-                    }
+                    self.follow_refresh_and_scroll()?;
                 }
                 FollowEvent::KeyReady => {
-                    match self.reader.read_key() {
-                        Ok(Key::Ctrl('c')) => break,
-                        Ok(Key::Char('q' | 'Q')) => {
-                            self.should_quit = true;
-                            return Ok(());
-                        }
-                        Ok(_) => {} // Ignore other keys while in follow mode.
-                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                        Err(e) => return Err(e.into()),
+                    if self.follow_handle_key()? {
+                        break;
                     }
                 }
                 FollowEvent::Timeout => {
                     // Poll-based fallback: also check if the file grew even
                     // without a kqueue notification (e.g. NFS, some edge cases).
-                    let old_len = self.buffer.len();
-                    self.buffer.refresh()?;
-                    let new_len = self.buffer.len();
-                    if new_len > old_len {
-                        self.index = LineIndex::new(new_len as u64);
-                        self.index.index_all(&*self.buffer)?;
-                        let total = self.index.lines_indexed();
-                        let target = total.saturating_sub(self.screen.content_rows());
-                        self.screen.goto_line(target, total);
-                        self.status_message =
-                            Some("Waiting for data... (interrupt to abort)".to_string());
-                        self.repaint()?;
+                    self.follow_refresh_and_scroll()?;
+
+                    // Exit on close: if pipe input and buffer didn't grow,
+                    // check if the underlying growable source is exhausted.
+                    if self.exit_follow_on_close && self.is_pipe && !self.buffer.is_growable() {
+                        break;
                     }
+                }
+                FollowEvent::FileRenamed | FollowEvent::FileDeleted => {
+                    if self.follow_name {
+                        // Attempt to reopen the file by its original path.
+                        if let Ok(new_file) = std::fs::File::open(Path::new(&filename)) {
+                            watch_file = new_file;
+                            watch_fd = std::os::unix::io::AsRawFd::as_raw_fd(&watch_file);
+                            if let Ok(new_watcher) = FileWatcher::watch(watch_fd) {
+                                watcher = new_watcher;
+                            }
+                            // Refresh buffer to pick up data from the new file.
+                            self.follow_refresh_and_scroll()?;
+                        }
+                        // If reopen fails, keep waiting — the file may reappear.
+                    }
+                    // Without --follow-name, ignore rename/delete events.
                 }
             }
         }
@@ -1867,7 +1867,13 @@ impl<R: Read, W: Write> Pager<R, W> {
                     self.should_quit = true;
                     return Ok(());
                 }
-                Ok(_) => {} // Ignore other keys while in follow mode.
+                Ok(_) => {
+                    // For exit-follow-on-close on pipe input: exit if the
+                    // buffer is no longer growable (pipe closed).
+                    if self.exit_follow_on_close && self.is_pipe && !self.buffer.is_growable() {
+                        break;
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
                 Err(e) => return Err(e.into()),
             }
@@ -1876,6 +1882,191 @@ impl<R: Read, W: Write> Pager<R, W> {
         // Repaint after exiting follow mode.
         self.repaint()?;
         Ok(())
+    }
+
+    /// Refresh the buffer and scroll to the new end if data grew.
+    ///
+    /// Used by the follow mode loop to avoid duplicating the
+    /// refresh-reindex-scroll-repaint pattern.
+    fn follow_refresh_and_scroll(&mut self) -> Result<()> {
+        let old_len = self.buffer.len();
+        self.buffer.refresh()?;
+        let new_len = self.buffer.len();
+        if new_len > old_len {
+            self.index = LineIndex::new(new_len as u64);
+            self.index.index_all(&*self.buffer)?;
+            let total = self.index.lines_indexed();
+            let target = total.saturating_sub(self.screen.content_rows());
+            self.screen.goto_line(target, total);
+            self.status_message = Some("Waiting for data... (interrupt to abort)".to_string());
+            self.repaint()?;
+        }
+        Ok(())
+    }
+
+    /// Handle a key event during follow mode.
+    ///
+    /// Returns `Ok(true)` if follow mode should break (Ctrl-C or quit),
+    /// `Ok(false)` to continue. Sets `should_quit` on `q`/`Q`.
+    fn follow_handle_key(&mut self) -> Result<bool> {
+        match self.reader.read_key() {
+            Ok(Key::Ctrl('c')) => Ok(true),
+            Ok(Key::Char('q' | 'Q')) => {
+                self.should_quit = true;
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                self.should_quit = true;
+                Ok(true)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Follow mode that stops when a search pattern matches new data (ESC-F).
+    ///
+    /// Like `follow_mode`, but watches for new data and searches the newly
+    /// arrived lines for the active search pattern. When a match is found,
+    /// exits follow mode and positions the viewport at the matching line.
+    /// If no search pattern is active, behaves identically to `follow_mode`.
+    fn follow_mode_stop_on_match(&mut self) -> Result<()> {
+        // If no search pattern is active, fall back to regular follow mode.
+        if self.last_pattern.is_none() {
+            return self.follow_mode();
+        }
+
+        // Refresh and scroll to EOF.
+        self.refresh_and_scroll_to_end()?;
+        self.status_message = Some("Waiting for data... (will stop at highlight)".to_string());
+        self.repaint()?;
+
+        let use_kqueue = self.key_fd.is_some() && self.filename.is_some();
+
+        if use_kqueue {
+            self.follow_stop_on_match_kqueue()?;
+        } else {
+            self.follow_stop_on_match_blocking()?;
+        }
+
+        Ok(())
+    }
+
+    /// ESC-F follow mode using kqueue.
+    #[allow(clippy::cast_possible_wrap)] // fd values are always small positive ints
+    fn follow_stop_on_match_kqueue(&mut self) -> Result<()> {
+        let key_fd = self
+            .key_fd
+            .ok_or_else(|| std::io::Error::other("no key fd for follow mode"))?;
+        let filename = self
+            .filename
+            .clone()
+            .ok_or_else(|| std::io::Error::other("no filename for follow mode"))?;
+
+        let watch_file = std::fs::File::open(Path::new(&filename))?;
+        let watch_fd = std::os::unix::io::AsRawFd::as_raw_fd(&watch_file);
+
+        let watcher = FileWatcher::watch(watch_fd)
+            .map_err(|e| std::io::Error::other(format!("kqueue watch failed: {e}")))?;
+
+        loop {
+            let event = watcher
+                .wait_with_key_check(key_fd, Duration::from_millis(500))
+                .map_err(|e| std::io::Error::other(format!("kqueue wait failed: {e}")))?;
+
+            match event {
+                FollowEvent::NewData | FollowEvent::Timeout => {
+                    if self.follow_check_new_data_for_match()? {
+                        return Ok(());
+                    }
+                }
+                FollowEvent::KeyReady => {
+                    if self.follow_handle_key()? {
+                        break;
+                    }
+                }
+                FollowEvent::FileRenamed | FollowEvent::FileDeleted => {}
+            }
+        }
+
+        // Repaint after exiting follow mode.
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// ESC-F follow mode with blocking key reads (fallback).
+    fn follow_stop_on_match_blocking(&mut self) -> Result<()> {
+        loop {
+            match self.reader.read_key() {
+                Ok(Key::Ctrl('c')) => break,
+                Ok(Key::Char('q' | 'Q')) => {
+                    self.should_quit = true;
+                    return Ok(());
+                }
+                Ok(_) => {
+                    // Check for new data on each key event.
+                    if self.follow_check_new_data_for_match()? {
+                        return Ok(());
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Repaint after exiting follow mode.
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Check new data for a search pattern match.
+    ///
+    /// Called from the ESC-F follow loop. Refreshes the buffer, and if new
+    /// lines appeared, searches them for `last_pattern`. Returns `true` if a
+    /// match was found (and the viewport has been repositioned), `false` if
+    /// follow mode should continue waiting.
+    fn follow_check_new_data_for_match(&mut self) -> Result<bool> {
+        let old_total = self.index.lines_indexed();
+        let old_len = self.buffer.len();
+        self.buffer.refresh()?;
+        let new_len = self.buffer.len();
+
+        if new_len <= old_len {
+            return Ok(false);
+        }
+
+        // Re-index to discover any new lines.
+        self.index = LineIndex::new(new_len as u64);
+        self.index.index_all(&*self.buffer)?;
+        let new_total = self.index.lines_indexed();
+
+        if new_total <= old_total {
+            return Ok(false);
+        }
+
+        // Search the newly arrived lines for the active pattern.
+        if let Some(ref pattern) = self.last_pattern {
+            for line_num in old_total..new_total {
+                if let Some(text) = self.index.get_line(line_num, &*self.buffer)? {
+                    if pattern.is_match(&text) {
+                        // Match found — position viewport at the match line.
+                        let total = self.index.lines_indexed();
+                        self.screen.goto_line(line_num, total);
+                        self.status_message = None;
+                        self.repaint()?;
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        // No match yet — scroll to the new end and keep waiting.
+        let total = self.index.lines_indexed();
+        let target = total.saturating_sub(self.screen.content_rows());
+        self.screen.goto_line(target, total);
+        self.status_message = Some("Waiting for data... (will stop at highlight)".to_string());
+        self.repaint()?;
+        Ok(false)
     }
 
     /// Switch to the next file in the file list.
@@ -2869,6 +3060,22 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.keymap.apply_lesskey(config);
     }
 
+    /// Enable follow-name mode (`--follow-name`).
+    ///
+    /// When enabled, follow mode reopens the file by pathname when a
+    /// rename or delete is detected (e.g. log rotation).
+    pub fn set_follow_name(&mut self, enabled: bool) {
+        self.follow_name = enabled;
+    }
+
+    /// Enable exit-follow-on-close mode (`--exit-follow-on-close`).
+    ///
+    /// When enabled, follow mode exits when the buffer reports no growth
+    /// on a pipe that has reached EOF, instead of waiting forever.
+    pub fn set_exit_follow_on_close(&mut self, enabled: bool) {
+        self.exit_follow_on_close = enabled;
+    }
+
     /// Execute a command string by converting each byte to a [`Key`] event
     /// and feeding it through [`process_key`](Self::process_key).
     ///
@@ -3533,6 +3740,62 @@ mod tests {
         let pager = run_pager(b"Fq", &content);
         // Follow mode scrolls to end: total(100) - content_rows(23) = 77
         assert_eq!(pager.screen().top_line(), 77);
+    }
+
+    #[test]
+    fn test_dispatch_esc_f_no_pattern_falls_back_to_follow() {
+        // ESC-F with no active search pattern should behave like regular F.
+        let content = make_test_content(100);
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(0x1B); // ESC
+        keys.push(b'F'); // -> EscSeq('F') -> FollowModeStopOnMatch
+        keys.push(b'q'); // quit
+        let pager = run_pager(&keys, &content);
+        // Falls back to follow_mode which scrolls to end.
+        assert_eq!(pager.screen().top_line(), 77);
+    }
+
+    #[test]
+    fn test_dispatch_esc_f_with_pattern_scrolls_to_end() {
+        // ESC-F with a search pattern should scroll to end and enter follow mode.
+        let content = make_test_content(100);
+        // First search for "line", then ESC-F, then quit.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.extend_from_slice(b"/line\n"); // search for "line"
+        keys.push(0x1B); // ESC
+        keys.push(b'F'); // -> FollowModeStopOnMatch
+        keys.push(b'q'); // quit
+        let pager = run_pager(&keys, &content);
+        // Should have scrolled to end in follow mode.
+        assert_eq!(pager.screen().top_line(), 77);
+    }
+
+    #[test]
+    fn test_dispatch_follow_name_setter() {
+        let content = make_test_content(10);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("test.txt".to_string()));
+        pager.set_follow_name(true);
+        // The pager runs and quits; we're just verifying the setter doesn't panic.
+        let _ = pager.run();
+    }
+
+    #[test]
+    fn test_dispatch_exit_follow_on_close_setter() {
+        let content = make_test_content(10);
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("test.txt".to_string()));
+        pager.set_exit_follow_on_close(true);
+        // The pager runs and quits; we're just verifying the setter doesn't panic.
+        let _ = pager.run();
     }
 
     // ── Repaint refresh ──────────────────────────────────────────────

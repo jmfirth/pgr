@@ -377,6 +377,14 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
         pager.set_quit_at_first_eof(true);
     }
 
+    // Wire follow mode enhancements.
+    if options.follow_name {
+        pager.set_follow_name(true);
+    }
+    if options.exit_follow_on_close {
+        pager.set_exit_follow_on_close(true);
+    }
+
     // Wire initial commands (+cmd / ++cmd).
     if !options.initial_commands.is_empty() {
         pager.set_initial_commands(options.initial_commands.clone());

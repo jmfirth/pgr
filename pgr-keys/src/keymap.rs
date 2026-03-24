@@ -85,6 +85,8 @@ impl Keymap {
             (Key::Char('w'), Command::WindowBackward),
             // Follow mode
             (Key::Char('F'), Command::FollowMode),
+            // Follow mode stop on match (ESC-F)
+            (Key::EscSeq('F'), Command::FollowModeStopOnMatch),
             // Repaint with refresh
             (Key::Char('R'), Command::RepaintRefresh),
             // File line navigation
@@ -610,5 +612,16 @@ mod tests {
     fn test_keymap_upper_t_maps_to_prev_tag() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::Char('T')), Command::PrevTag);
+    }
+
+    // ── Task 211: ESC-F maps to FollowModeStopOnMatch ──
+
+    #[test]
+    fn test_keymap_esc_f_maps_to_follow_mode_stop_on_match() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::EscSeq('F')),
+            Command::FollowModeStopOnMatch
+        );
     }
 }

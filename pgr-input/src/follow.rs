@@ -15,6 +15,10 @@ pub enum FollowEvent {
     KeyReady,
     /// The timeout expired with no activity.
     Timeout,
+    /// The watched file was renamed (e.g. log rotation).
+    FileRenamed,
+    /// The watched file was deleted.
+    FileDeleted,
 }
 
 /// Convert a non-negative `RawFd` (`i32`) to `uintptr_t` for kqueue ident.
@@ -54,12 +58,12 @@ impl FileWatcher {
             return Err(std::io::Error::last_os_error().into());
         }
 
-        // Register the file fd for vnode write notifications.
+        // Register the file fd for vnode write, rename, and delete notifications.
         let changelist = [libc::kevent {
             ident: fd_to_ident(file_fd),
             filter: libc::EVFILT_VNODE,
             flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
-            fflags: libc::NOTE_WRITE | libc::NOTE_EXTEND,
+            fflags: libc::NOTE_WRITE | libc::NOTE_EXTEND | libc::NOTE_RENAME | libc::NOTE_DELETE,
             data: 0,
             udata: std::ptr::null_mut(),
         }];
@@ -111,7 +115,10 @@ impl FileWatcher {
                 ident: file_ident,
                 filter: libc::EVFILT_VNODE,
                 flags: libc::EV_ADD | libc::EV_ENABLE | libc::EV_CLEAR,
-                fflags: libc::NOTE_WRITE | libc::NOTE_EXTEND,
+                fflags: libc::NOTE_WRITE
+                    | libc::NOTE_EXTEND
+                    | libc::NOTE_RENAME
+                    | libc::NOTE_DELETE,
                 data: 0,
                 udata: std::ptr::null_mut(),
             },
@@ -183,6 +190,13 @@ impl FileWatcher {
         }
         for ev in &events[..event_count] {
             if ev.filter == libc::EVFILT_VNODE && ev.ident == file_ident {
+                // Check rename/delete before write so the caller can reopen.
+                if ev.fflags & libc::NOTE_RENAME != 0 {
+                    return Ok(FollowEvent::FileRenamed);
+                }
+                if ev.fflags & libc::NOTE_DELETE != 0 {
+                    return Ok(FollowEvent::FileDeleted);
+                }
                 return Ok(FollowEvent::NewData);
             }
         }
@@ -307,6 +321,8 @@ mod tests {
             FollowEvent::NewData,
             FollowEvent::KeyReady,
             FollowEvent::Timeout,
+            FollowEvent::FileRenamed,
+            FollowEvent::FileDeleted,
         ];
         for ev in &events {
             let _ = format!("{ev:?}");

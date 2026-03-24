@@ -311,7 +311,7 @@ fn build_action_map() -> HashMap<&'static str, Command> {
     m.insert("forw-line-force", Command::ScrollForwardForce(1));
     m.insert("back-line-force", Command::ScrollBackwardForce(1));
     m.insert("forw-forever", Command::FollowMode);
-    m.insert("forw-until-hilite", Command::FollowMode);
+    m.insert("forw-until-hilite", Command::FollowModeStopOnMatch);
 
     // Half-page navigation
     m.insert("forw-half-screen", Command::HalfPageForward);
@@ -1050,6 +1050,15 @@ k  back-line
     fn test_action_map_forw_forever() {
         let m = build_action_map();
         assert_eq!(m.get("forw-forever"), Some(&Command::FollowMode));
+    }
+
+    #[test]
+    fn test_action_map_forw_until_hilite() {
+        let m = build_action_map();
+        assert_eq!(
+            m.get("forw-until-hilite"),
+            Some(&Command::FollowModeStopOnMatch)
+        );
     }
 
     #[test]
