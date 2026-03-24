@@ -8,7 +8,7 @@ use std::path::Path;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    clear_screen, eval_prompt, paint_prompt, paint_screen_mapped, paint_screen_with_options,
+    eval_prompt, paint_prompt, paint_screen_mapped, paint_screen_with_options,
     squeeze_visible_lines, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
     RawControlMode, RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT,
     DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
@@ -846,6 +846,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         self.last_shell_command = Some(cmd.clone());
+
+        // Exit alternate screen so shell output appears on the normal screen.
+        self.writer.write_all(b"\x1b[?1049l")?;
+        self.writer.flush()?;
+
         let _ = shell::execute_shell_command(&cmd, &self.shell);
 
         // Show "!done" and wait for a keypress before repainting,
@@ -854,8 +859,13 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.writer.flush()?;
         let _ = self.reader.read_key();
 
-        clear_screen(&mut self.writer)?;
-        self.repaint()?;
+        // Re-enter alternate screen. GNU less relies on the terminal to
+        // restore the previous alt-screen content and does not explicitly
+        // repaint. We match that behavior.
+        self.writer.write_all(b"\x1b[?1049h")?;
+        self.writer.flush()?;
+        // Reset initial_render so the next repaint bottom-aligns short files.
+        self.initial_render = true;
         Ok(())
     }
 
@@ -880,14 +890,21 @@ impl<R: Read, W: Write> Pager<R, W> {
             shell::expand_command_string(&input, self.filename.as_deref(), line_number, total, 0);
 
         self.last_shell_command = Some(expanded.clone());
+
+        // Exit alternate screen so shell output appears on the normal screen.
+        self.writer.write_all(b"\x1b[?1049l")?;
+        self.writer.flush()?;
+
         let _ = shell::execute_shell_command(&expanded, &self.shell);
 
         write!(self.writer, "\r\n!done  (press RETURN)")?;
         self.writer.flush()?;
         let _ = self.reader.read_key();
 
-        clear_screen(&mut self.writer)?;
-        self.repaint()?;
+        // Re-enter alternate screen — same behavior as handle_shell_command.
+        self.writer.write_all(b"\x1b[?1049h")?;
+        self.writer.flush()?;
+        self.initial_render = true;
         Ok(())
     }
 
@@ -1268,9 +1285,17 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn submit_filter(&mut self, pattern_str: &str) -> Result<()> {
         if pattern_str.is_empty() {
             // Empty pattern clears the filter.
+            // Preserve position: map the current filtered top_line back to an
+            // actual buffer line so the viewport stays at the same content.
+            let actual_top = self
+                .filtered_lines
+                .as_ref()
+                .and_then(|fl| fl.actual_line(self.screen.top_line()));
             self.filter.clear();
             self.filtered_lines = None;
-            self.screen.goto_line(0, usize::MAX);
+            self.index.index_all(&*self.buffer)?;
+            let total = self.index.lines_indexed();
+            self.screen.goto_line(actual_top.unwrap_or(0), total);
             self.repaint()?;
             return Ok(());
         }
@@ -1301,12 +1326,12 @@ impl<R: Read, W: Write> Pager<R, W> {
         Ok(())
     }
 
-    /// Enter basic follow mode: scroll to end and exit immediately.
+    /// Enter follow mode: scroll to end and wait for interrupt.
     ///
-    /// A full follow mode with `inotify`/`kqueue` polling and non-blocking key
-    /// reading is deferred to Phase 2. This stub scrolls to the end of the
-    /// buffer and returns, which satisfies the basic "F scrolls to bottom"
-    /// contract.
+    /// Scrolls to the end of the buffer and displays "Waiting for data...
+    /// (interrupt to abort)" on the status line. Blocks reading keys until
+    /// Ctrl-C (or `q`/`Q`) is received, then repaints the screen and returns
+    /// to normal viewing mode.
     fn follow_mode(&mut self) -> Result<()> {
         self.buffer.refresh()?;
         let new_len = self.buffer.len() as u64;
@@ -1315,6 +1340,24 @@ impl<R: Read, W: Write> Pager<R, W> {
         let total = self.index.lines_indexed();
         let default = total.saturating_sub(self.screen.content_rows());
         self.screen.goto_line(default, total);
+        self.status_message = Some("Waiting for data... (interrupt to abort)".to_string());
+        self.repaint()?;
+
+        // Block reading keys until Ctrl-C exits follow mode.
+        loop {
+            match self.reader.read_key() {
+                Ok(Key::Ctrl('c')) => break,
+                Ok(Key::Char('q' | 'Q')) => {
+                    self.should_quit = true;
+                    return Ok(());
+                }
+                Ok(_) => {} // Ignore other keys while in follow mode.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // Repaint after exiting follow mode.
         self.repaint()?;
         Ok(())
     }
@@ -1445,6 +1488,8 @@ impl<R: Read, W: Write> Pager<R, W> {
                             self.buffer.refresh()?;
                             let new_len = self.buffer.len() as u64;
                             self.index = LineIndex::new(new_len);
+                            // Reset initial_render so short files get bottom-aligned.
+                            self.initial_render = true;
                             self.repaint()?;
                         } else {
                             self.examine_file(&input)?;
@@ -1452,6 +1497,8 @@ impl<R: Read, W: Write> Pager<R, W> {
                         return Ok(());
                     }
                     LineEditResult::Cancel => {
+                        // Reset initial_render so short files get bottom-aligned.
+                        self.initial_render = true;
                         self.repaint()?;
                         return Ok(());
                     }
@@ -1513,10 +1560,14 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.previous_file = old_name;
                 // Always swap: loads the new file's buffer into the pager.
                 self.apply_current_file_impl(true);
+                // Reset initial_render so short files get bottom-aligned.
+                self.initial_render = true;
                 self.repaint()?;
             }
             Err(e) => {
                 self.status_message = Some(format!("{expanded}: {e}"));
+                // Reset initial_render so short files get bottom-aligned.
+                self.initial_render = true;
                 self.repaint()?;
             }
         }
