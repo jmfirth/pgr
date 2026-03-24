@@ -71,7 +71,7 @@ pub struct EnvConfig {
     pub utf_bin_fmt: Option<String>,
 
     /// `LESS_IS_MORE`: when set (non-empty), behave as `more(1)`.
-    /// Actual `more(1)` behavior is Task 250; we just store the flag.
+    /// Wired in `Options::parse()` (Task 250) to enable more-compat defaults.
     pub is_more: bool,
 
     /// `LESS_COLUMNS`: override terminal width (takes precedence over `COLUMNS`).

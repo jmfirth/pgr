@@ -391,6 +391,14 @@ pub struct Options {
     /// Commands to execute after opening every file (`++cmd` syntax).
     #[arg(skip)]
     pub every_file_commands: Vec<String>,
+
+    /// POSIX `more(1)` compatibility mode.
+    ///
+    /// Enabled when invoked as `more` (argv[0] ends in "more") or when
+    /// the `LESS_IS_MORE` environment variable is set. When active,
+    /// `-e` (quit at second EOF) and `-m` (medium prompt) become defaults.
+    #[arg(skip)]
+    pub more_mode: bool,
 }
 
 impl Options {
@@ -430,6 +438,15 @@ impl Options {
         opts.every_file_commands = env_every_file;
         opts.every_file_commands.extend(cli_every_file);
 
+        // Detect more(1) compatibility mode from argv[0] or LESS_IS_MORE.
+        let argv0 = real_args.first().map_or("", String::as_str);
+        opts.more_mode = is_more_invocation(argv0)
+            || std::env::var("LESS_IS_MORE")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .is_some();
+        opts.apply_more_defaults();
+
         opts
     }
 
@@ -458,12 +475,17 @@ impl Options {
         let (flags, initial, every_file) = split_flags_and_commands(&rest);
 
         let mut clap_args = Vec::with_capacity(1 + flags.len());
-        clap_args.push(prog);
+        clap_args.push(prog.clone());
         clap_args.extend(flags);
 
         let mut opts = <Self as Parser>::parse_from(clap_args);
         opts.initial_commands = initial;
         opts.every_file_commands = every_file;
+
+        // Detect more(1) compatibility mode from argv[0].
+        opts.more_mode = is_more_invocation(&prog);
+        opts.apply_more_defaults();
+
         opts
     }
 
@@ -570,6 +592,29 @@ impl Options {
         };
         parse_search_options(opts_str)
     }
+
+    /// Apply `more(1)` compatibility defaults when more mode is active.
+    ///
+    /// Sets `-e` (quit at second EOF) and `-m` (medium prompt) unless
+    /// they were already set by explicit CLI flags.
+    fn apply_more_defaults(&mut self) {
+        if !self.more_mode {
+            return;
+        }
+        self.quit_at_eof = true;
+        self.medium_prompt = true;
+    }
+}
+
+/// Check whether the program was invoked as `more`.
+///
+/// Returns `true` when `argv[0]` ends with the path component `more`
+/// (e.g., `/usr/bin/more`, `./more`, or just `more`).
+fn is_more_invocation(argv0: &str) -> bool {
+    std::path::Path::new(argv0)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name == "more")
 }
 
 /// Parse a `--search-options` string into [`SearchModifiers`].
@@ -1561,5 +1606,87 @@ mod tests {
         assert!(opts.incsearch);
         assert_eq!(opts.match_shift, Some(5));
         assert_eq!(opts.search_opts.as_deref(), Some("W"));
+    }
+
+    // ── Task 250: more(1) compatibility mode ─────────────────────────
+
+    #[test]
+    fn test_is_more_invocation_bare_more() {
+        assert!(is_more_invocation("more"));
+    }
+
+    #[test]
+    fn test_is_more_invocation_absolute_path() {
+        assert!(is_more_invocation("/usr/bin/more"));
+    }
+
+    #[test]
+    fn test_is_more_invocation_relative_path() {
+        assert!(is_more_invocation("./more"));
+    }
+
+    #[test]
+    fn test_is_more_invocation_pgr_returns_false() {
+        assert!(!is_more_invocation("pgr"));
+    }
+
+    #[test]
+    fn test_is_more_invocation_less_returns_false() {
+        assert!(!is_more_invocation("/usr/bin/less"));
+    }
+
+    #[test]
+    fn test_is_more_invocation_empty_returns_false() {
+        assert!(!is_more_invocation(""));
+    }
+
+    #[test]
+    fn test_options_more_mode_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.more_mode);
+    }
+
+    #[test]
+    fn test_options_more_mode_enabled_by_argv0() {
+        let opts = Options::parse_from(["more", "file.txt"]);
+        assert!(opts.more_mode);
+    }
+
+    #[test]
+    fn test_options_more_mode_sets_quit_at_eof() {
+        let opts = Options::parse_from(["more", "file.txt"]);
+        assert!(opts.quit_at_eof);
+    }
+
+    #[test]
+    fn test_options_more_mode_sets_medium_prompt() {
+        let opts = Options::parse_from(["more", "file.txt"]);
+        assert!(opts.medium_prompt);
+        assert_eq!(opts.prompt_style(), PromptStyle::Medium);
+    }
+
+    #[test]
+    fn test_options_more_mode_argv0_with_path() {
+        let opts = Options::parse_from(["/usr/bin/more", "file.txt"]);
+        assert!(opts.more_mode);
+        assert!(opts.quit_at_eof);
+        assert!(opts.medium_prompt);
+    }
+
+    #[test]
+    fn test_options_normal_mode_no_quit_at_eof() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.quit_at_eof);
+        assert!(!opts.medium_prompt);
+    }
+
+    #[test]
+    fn test_options_more_mode_with_explicit_flags() {
+        let opts = Options::parse_from(["more", "-M", "file.txt"]);
+        assert!(opts.more_mode);
+        assert!(opts.quit_at_eof);
+        // -M overrides -m to long prompt
+        assert!(opts.long_prompt);
+        assert_eq!(opts.prompt_style(), PromptStyle::Long);
     }
 }
