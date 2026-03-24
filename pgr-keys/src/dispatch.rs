@@ -92,6 +92,8 @@ pub enum PendingCommand {
     ToggleOption,
     /// `_` pressed; waiting for the option flag character to query.
     QueryOption,
+    /// `Z` pressed; waiting for a second `Z` to quit (vi-style `ZZ`).
+    ZPrefix,
 }
 
 /// The main pager state, tying together all subsystems.
@@ -352,6 +354,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             Key::EscSeq('m') => Some(PendingCommand::ClearMark),
             Key::Ctrl('x') => Some(PendingCommand::CtrlXPrefix),
             Key::Char(':') => Some(PendingCommand::ColonPrefix),
+            Key::Char('Z') => Some(PendingCommand::ZPrefix),
             _ => None,
         }
     }
@@ -410,7 +413,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('p') => self.execute(&Command::PreviousFile, count)?,
                     Key::Char('x') => self.execute(&Command::FirstFile, count)?,
                     Key::Char('d') => self.execute(&Command::RemoveFile, count)?,
-                    Key::Char('q') => self.execute(&Command::Quit, count)?,
+                    Key::Char('q' | 'Q') => self.execute(&Command::Quit, count)?,
                     Key::Char('e') => self.execute(&Command::Examine, count)?,
                     Key::Char('f') => self.execute(&Command::FileInfo, count)?,
                     _ => {} // Unknown colon command: ignore.
@@ -426,6 +429,13 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if let Key::Char(c) = *key {
                     self.handle_query_option(c)?;
                 }
+            }
+            PendingCommand::ZPrefix => {
+                if *key == Key::Char('Z') {
+                    self.execute(&Command::Quit, None)?;
+                }
+                // Non-Z key after Z: ignore the prefix (not a valid command).
+                return Ok(!self.should_quit);
             }
         }
         Ok(!self.should_quit)
@@ -859,26 +869,47 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Handle the `!` (shell command) dispatch.
+    ///
+    /// If the very first key after `!` is another `!`, immediately re-execute
+    /// the last shell command without opening the full line editor (the `!!`
+    /// shortcut). An empty Enter also repeats. Otherwise the key is fed into
+    /// the line editor for normal command entry.
     fn handle_shell_command(&mut self) -> Result<()> {
         if self.secure_mode {
             self.write_status("Command not available")?;
             return Ok(());
         }
 
-        // Read a command line from the user using the line editor.
-        let input = self.read_command_line("!")?;
-        let Some(input) = input else {
-            return Ok(());
+        // Peek at the next key to support the `!!` shortcut.
+        let first_key = match self.reader.read_key() {
+            Ok(k) => k,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e.into()),
         };
 
-        // "!" with no command (or "!!") repeats the last command.
-        let cmd = if input.is_empty() || input == "!" {
+        let cmd = if first_key == Key::Char('!') || first_key == Key::Enter {
+            // `!!` or `!<Enter>` — repeat last shell command.
             match self.last_shell_command.clone() {
                 Some(prev) => prev,
                 None => return Ok(()),
             }
+        } else if first_key == Key::Escape {
+            // Cancel.
+            return Ok(());
         } else {
-            input
+            // Feed the first key into the line editor for normal command entry.
+            let input = self.read_command_line_with_initial("!", &first_key)?;
+            let Some(input) = input else {
+                return Ok(());
+            };
+            if input.is_empty() {
+                match self.last_shell_command.clone() {
+                    Some(prev) => prev,
+                    None => return Ok(()),
+                }
+            } else {
+                input
+            }
         };
 
         self.last_shell_command = Some(cmd.clone());
@@ -1069,6 +1100,46 @@ impl<R: Read, W: Write> Pager<R, W> {
         editor.render(&mut self.writer, prompt_row, 0, cols)?;
         self.writer.flush()?;
 
+        loop {
+            match self.reader.read_key() {
+                Ok(key) => match editor.process_key(&key) {
+                    LineEditResult::Continue => {
+                        editor.render(&mut self.writer, prompt_row, 0, cols)?;
+                        self.writer.flush()?;
+                    }
+                    LineEditResult::Confirm(s) => return Ok(Some(s)),
+                    LineEditResult::Cancel => return Ok(None),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// Read a command line, feeding an initial key into the editor first.
+    ///
+    /// Used when the caller has already consumed a key that should be part
+    /// of the command input (e.g., after peeking at the first character).
+    fn read_command_line_with_initial(
+        &mut self,
+        prompt: &str,
+        initial_key: &Key,
+    ) -> Result<Option<String>> {
+        let mut editor = LineEditor::new(prompt);
+        let (rows, cols) = self.screen.dimensions();
+        let prompt_row = rows.saturating_sub(1);
+
+        // Process the initial key first.
+        match editor.process_key(initial_key) {
+            LineEditResult::Continue => {
+                editor.render(&mut self.writer, prompt_row, 0, cols)?;
+                self.writer.flush()?;
+            }
+            LineEditResult::Confirm(s) => return Ok(Some(s)),
+            LineEditResult::Cancel => return Ok(None),
+        }
+
+        // Continue reading keys normally.
         loop {
             match self.reader.read_key() {
                 Ok(key) => match editor.process_key(&key) {
@@ -4719,5 +4790,72 @@ mod tests {
         // Search for "line 10" via initial command with explicit newline.
         let pager = run_pager_with_initial_commands(b"q", &content, vec!["/line 10\n"], vec![]);
         assert_eq!(pager.screen().top_line(), 10);
+    }
+
+    // ── Task 216: Quit variants (ZZ, :Q) and !! repeat shell command ──
+
+    // Test 1: ZZ quits the pager.
+    #[test]
+    fn test_dispatch_zz_quits() {
+        let content = make_test_content(50);
+        let pager = run_pager(b"ZZ", &content);
+        assert!(pager.should_quit);
+    }
+
+    // Test 2: Z followed by non-Z does not quit.
+    #[test]
+    fn test_dispatch_z_non_z_does_not_quit() {
+        let content = make_test_content(50);
+        // Z followed by 'j' should not quit; 'j' is consumed by resolve_pending
+        // as a non-Z key, so the ZPrefix is discarded. Then 'q' quits normally.
+        let pager = run_pager(b"Zjq", &content);
+        assert!(pager.should_quit);
+        // The 'j' in "Zj" was consumed by resolve_pending, not as a scroll.
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test 3: :Q quits the pager.
+    #[test]
+    fn test_dispatch_colon_upper_q_quits() {
+        let content = make_test_content(50);
+        let pager = run_pager(b":Q", &content);
+        assert!(pager.should_quit);
+    }
+
+    // Test 4: ^X^V triggers examine and does not quit.
+    #[test]
+    fn test_dispatch_ctrl_x_ctrl_v_examine_does_not_quit() {
+        let content = make_test_content(50);
+        // ^X^V opens the examine prompt. Since no filename is provided and
+        // input exhausts, the examine prompt cancels and we fall through.
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(0x18); // Ctrl+X
+        keys.push(0x16); // Ctrl+V
+        let pager = run_pager(&keys, &content);
+        // Examine was attempted; pager should not have quit.
+        assert!(!pager.should_quit);
+    }
+
+    // Test 5: !! repeats last shell command (blocked in secure mode shows message).
+    #[test]
+    fn test_dispatch_double_bang_repeat_blocked_in_secure_mode() {
+        let content = make_test_content(10);
+        // In secure mode, `!` shows "Command not available".
+        // The second `!` is then processed as the next key, which maps to
+        // ShellCommand again (also blocked).
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b'!');
+        keys.push(b'!');
+        keys.push(b'q');
+        let pager = run_pager_with_settings(&keys, &content, Some("test.txt"), true, false);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Command not available"));
+    }
+
+    // Test 6: Z key enters ZPrefix pending state.
+    #[test]
+    fn test_keymap_z_upper_starts_pending_command() {
+        let result = Pager::<Cursor<Vec<u8>>, Vec<u8>>::check_pending_start(&Key::Char('Z'));
+        assert_eq!(result, Some(PendingCommand::ZPrefix));
     }
 }
