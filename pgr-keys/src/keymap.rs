@@ -119,9 +119,12 @@ impl Keymap {
             (Key::Char('n'), Command::RepeatSearch),
             (Key::Char('N'), Command::RepeatSearchReverse),
             (Key::EscSeq('u'), Command::ToggleHighlight),
-            // Phase 1: ESC-n/ESC-N behave the same as n/N (cross-file in Phase 2)
-            (Key::EscSeq('n'), Command::RepeatSearch),
-            (Key::EscSeq('N'), Command::RepeatSearchReverse),
+            // Cross-file search repeat (ESC-n, ESC-N)
+            (Key::EscSeq('n'), Command::SearchNextCrossFile),
+            (Key::EscSeq('N'), Command::SearchPrevCrossFile),
+            // Cross-file search with new pattern (ESC-/, ESC-?)
+            (Key::EscSeq('/'), Command::SearchForwardCrossFile),
+            (Key::EscSeq('?'), Command::SearchBackwardCrossFile),
         ];
 
         Self { bindings }
@@ -494,17 +497,38 @@ mod tests {
     }
 
     #[test]
-    fn test_keymap_esc_n_maps_to_repeat_search() {
+    fn test_keymap_esc_n_maps_to_search_next_cross_file() {
         let keymap = Keymap::default_less();
-        assert_eq!(keymap.lookup(&Key::EscSeq('n')), Command::RepeatSearch);
+        assert_eq!(
+            keymap.lookup(&Key::EscSeq('n')),
+            Command::SearchNextCrossFile
+        );
     }
 
     #[test]
-    fn test_keymap_esc_upper_n_maps_to_repeat_search_reverse() {
+    fn test_keymap_esc_upper_n_maps_to_search_prev_cross_file() {
         let keymap = Keymap::default_less();
         assert_eq!(
             keymap.lookup(&Key::EscSeq('N')),
-            Command::RepeatSearchReverse
+            Command::SearchPrevCrossFile
+        );
+    }
+
+    #[test]
+    fn test_keymap_esc_slash_maps_to_search_forward_cross_file() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::EscSeq('/')),
+            Command::SearchForwardCrossFile
+        );
+    }
+
+    #[test]
+    fn test_keymap_esc_question_maps_to_search_backward_cross_file() {
+        let keymap = Keymap::default_less();
+        assert_eq!(
+            keymap.lookup(&Key::EscSeq('?')),
+            Command::SearchBackwardCrossFile
         );
     }
 }

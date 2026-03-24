@@ -103,6 +103,14 @@ pub enum Command {
     RepeatSearchReverse,
     /// Toggle search highlighting (ESC-u).
     ToggleHighlight,
+    /// Repeat last search forward, crossing file boundaries. ESC-n.
+    SearchNextCrossFile,
+    /// Repeat last search backward, crossing file boundaries. ESC-N.
+    SearchPrevCrossFile,
+    /// Enter forward search mode with cross-file behavior. ESC-/.
+    SearchForwardCrossFile,
+    /// Enter backward search mode with cross-file behavior. ESC-?.
+    SearchBackwardCrossFile,
 }
 
 #[cfg(test)]
