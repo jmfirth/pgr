@@ -483,6 +483,7 @@ mod tests {
             total_lines: 100,
             line_num_width: None,
             suppress_tildes: false,
+            start_row: 0,
         };
         let output =
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
@@ -520,6 +521,7 @@ mod tests {
             total_lines: 50,
             line_num_width: None,
             suppress_tildes: false,
+            start_row: 0,
         };
         let output_ln =
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
@@ -583,6 +585,7 @@ mod tests {
             total_lines: 10,
             line_num_width: None,
             suppress_tildes: false,
+            start_row: 0,
         };
         let output =
             capture_output(|w| paint_screen_mapped(w, &screen, &screen_lines, &config, &options));

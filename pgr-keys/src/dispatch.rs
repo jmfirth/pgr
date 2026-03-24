@@ -1062,7 +1062,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 if !modifiers.is_empty() {
                     self.last_modifiers = modifiers;
                 }
-                return self.do_search(direction, count);
+                return self.do_search(direction, count, true);
             }
             self.repaint()?;
             return Ok(());
@@ -1087,11 +1087,21 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.last_direction = direction;
         self.last_modifiers = modifiers;
         self.highlight_state.clear();
-        self.do_search(direction, count)
+        self.do_search(direction, count, false)
     }
 
     /// Perform a search in the given direction using `last_pattern`.
-    fn do_search(&mut self, direction: SearchDirection, count: Option<usize>) -> Result<()> {
+    ///
+    /// When `is_repeat` is true (e.g., `n`/`N` commands), the search start
+    /// position advances past the current match to avoid re-finding it.
+    /// When false (new `/` or `?` search), the start position includes the
+    /// current viewport.
+    fn do_search(
+        &mut self,
+        direction: SearchDirection,
+        count: Option<usize>,
+        is_repeat: bool,
+    ) -> Result<()> {
         let Some(ref pattern) = self.last_pattern else {
             self.status_message = Some("No previous search pattern".to_string());
             self.repaint()?;
@@ -1113,9 +1123,19 @@ impl<R: Read, W: Write> Pager<R, W> {
         searcher.set_wrap(WrapMode::Wrap);
         searcher.set_inverted(self.last_modifiers.invert);
 
-        // Determine start line. If from_first is set, start from the boundary.
-        // For backward search, less starts from the bottom of the visible screen,
-        // not the top. Forward search starts from top_line as before.
+        // Determine start line.
+        //
+        // GNU less search start positions:
+        //
+        // New search (is_repeat = false):
+        //   Forward: top_line (inclusive — check the current top line)
+        //   Backward: top_line + content_rows - 1 (bottom of visible screen)
+        //
+        // Repeat search (is_repeat = true):
+        //   Forward: top_line + 1 (skip current match at top)
+        //   Backward: top_line - 1 (skip current match at top, search upward)
+        //
+        // The from_first modifier overrides to search from file boundaries.
         let start = if self.last_modifiers.from_first {
             match direction {
                 SearchDirection::Forward => 0,
@@ -1123,6 +1143,11 @@ impl<R: Read, W: Write> Pager<R, W> {
                     let total = self.index.total_lines(&*self.buffer)?;
                     total.saturating_sub(1)
                 }
+            }
+        } else if is_repeat {
+            match direction {
+                SearchDirection::Forward => self.screen.top_line() + 1,
+                SearchDirection::Backward => self.screen.top_line().saturating_sub(1),
             }
         } else {
             match direction {
@@ -1142,8 +1167,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             } else {
                 self.save_last_position();
-                let total = self.index.total_lines(&*self.buffer)?;
-                self.screen.goto_line(line, total);
+                // Use set_top_line (unclamped) so the match appears at the
+                // top of the viewport even near EOF, matching GNU less which
+                // shows tilde lines below the last file line.
+                self.screen.set_top_line(line);
                 self.repaint()?;
             }
         } else {
@@ -1170,7 +1197,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.last_direction
         };
 
-        self.do_search(direction, count)
+        self.do_search(direction, count, true)
     }
 
     /// Enter filter prompt mode for the `&` command.
@@ -1727,8 +1754,10 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         // For short files, GNU less renders content at the bottom of the
         // screen (not the top). Calculate the start row offset.
+        // Bottom-align only for genuinely short files (total fits on screen),
+        // not when viewport extends past EOF due to search.
         let visible_content = total.saturating_sub(start);
-        let start_row = if visible_content < content_rows {
+        let start_row = if total <= content_rows {
             // Bottom-align: content_rows - visible_content + 1 (1-based)
             content_rows - visible_content + 1
         } else {
@@ -3444,9 +3473,9 @@ mod tests {
         keys.push(b'\n');
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        // 7 lines < 23 content_rows, so max_top = 0. Search finds "target" at
-        // line 5 but goto_line(5, 7) clamps to 0. The match is still visible.
-        assert_eq!(pager.screen().top_line(), 0);
+        // Search finds "target" at line 5. set_top_line places the match at
+        // the top of the viewport without clamping, matching GNU less behavior.
+        assert_eq!(pager.screen().top_line(), 5);
     }
 
     // Test 7: Backward search finds and scrolls to matching line.
@@ -3547,9 +3576,9 @@ mod tests {
         keys.push(b'n'); // repeats forward → finds "match2" at line 21
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        // 32 total lines, 23 content_rows. max_top = 32-23 = 9.
-        // goto_line(21, 32) = min(21, 9) = 9.
-        assert_eq!(pager.screen().top_line(), 9);
+        // Search finds "match2" at line 21. set_top_line places the match at
+        // the top of the viewport without clamping.
+        assert_eq!(pager.screen().top_line(), 21);
     }
 
     // Test 11: `N` reverses last search direction.
@@ -3598,8 +3627,9 @@ mod tests {
         keys.extend_from_slice(b"2n"); // from line 1, 2nd match = line 5
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        // File fits on one screen (7 < 23), so top_line stays 0.
-        assert_eq!(pager.screen().top_line(), 0);
+        // `/match` finds line 1, `2n` finds the 2nd next match = line 5.
+        // set_top_line places the match at the top without clamping.
+        assert_eq!(pager.screen().top_line(), 5);
     }
 
     // Test 14: Search pattern is stored and reused across repeat searches.
@@ -3962,8 +3992,8 @@ mod tests {
         keys.push(b'\n');
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        // max_top = 50-23 = 27. goto_line(49, 50) clamps to 27.
-        assert_eq!(pager.screen().top_line(), 27);
+        // set_top_line(49) places the match at the top without clamping.
+        assert_eq!(pager.screen().top_line(), 49);
     }
 
     // Test: -I case-insensitive-always mode makes search case insensitive.
@@ -4021,8 +4051,8 @@ mod tests {
         let mut pager = Pager::new(reader, writer, buffer, index, None);
         let _ = pager.run();
 
-        // "Error" is at line 24. max_top = 30 - 23 = 7. goto_line(24) clamps to 7.
-        assert_eq!(pager.screen().top_line(), 7);
+        // "Error" is at line 24. set_top_line(24) places match at top.
+        assert_eq!(pager.screen().top_line(), 24);
         // Should NOT show "Pattern not found" — the search succeeded.
         let output = String::from_utf8_lossy(&pager.writer);
         assert!(
@@ -4045,8 +4075,8 @@ mod tests {
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
         // With literal search, only line 1 "foo.bar" matches.
-        // 3 lines < 23 content_rows, so top_line stays 0.
-        assert_eq!(pager.screen().top_line(), 0);
+        // set_top_line(1) places the match at the top without clamping.
+        assert_eq!(pager.screen().top_line(), 1);
         // The stored pattern should be the escaped version.
         assert!(pager.last_pattern().is_some());
         // Verify the pattern doesn't match "fooXbar" (which "foo.bar" regex would).

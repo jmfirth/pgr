@@ -77,7 +77,7 @@ impl Searcher {
         &self.pattern
     }
 
-    /// Search forward from `start_line` (exclusive — starts checking at `start_line + 1`).
+    /// Search forward from `start_line` (inclusive — starts checking at `start_line`).
     ///
     /// Returns the zero-based line number of the first matching line, or `None`
     /// if no match is found.
@@ -102,8 +102,9 @@ impl Searcher {
             return Ok(None);
         }
 
-        // Phase 1: search from start_line + 1 to end.
-        for line in (start_line + 1)..total {
+        // Phase 1: search from start_line to end.
+        let clamped_start = start_line.min(total);
+        for line in clamped_start..total {
             if self.line_matches(line, buffer, index)? {
                 return Ok(Some(line));
             }
@@ -111,7 +112,7 @@ impl Searcher {
 
         // Phase 2: wrap around if enabled.
         if self.wrap == WrapMode::Wrap {
-            let upper = start_line.min(total);
+            let upper = clamped_start.min(total);
             for line in 0..upper {
                 if self.line_matches(line, buffer, index)? {
                     return Ok(Some(line));
@@ -122,7 +123,7 @@ impl Searcher {
         Ok(None)
     }
 
-    /// Search backward from `start_line` (exclusive — starts checking at `start_line - 1`).
+    /// Search backward from `start_line` (inclusive — starts checking at `start_line`).
     ///
     /// Returns the zero-based line number of the first matching line, or `None`
     /// if no match is found.
@@ -142,22 +143,12 @@ impl Searcher {
         index.index_all(buffer)?;
         let total = index.lines_indexed();
 
-        if total == 0 || start_line == 0 {
-            // If start_line is 0, there's nothing before it in phase 1.
-            // But we may still wrap.
-            if start_line == 0 && total > 0 && self.wrap == WrapMode::Wrap {
-                // Wrap: search from last line down to (not including) start_line.
-                for line in (1..total).rev() {
-                    if self.line_matches(line, buffer, index)? {
-                        return Ok(Some(line));
-                    }
-                }
-            }
+        if total == 0 {
             return Ok(None);
         }
 
-        // Phase 1: search from start_line - 1 down to 0.
-        let first_check = (start_line - 1).min(total - 1);
+        // Phase 1: search from start_line down to 0.
+        let first_check = start_line.min(total - 1);
         for line in (0..=first_check).rev() {
             if self.line_matches(line, buffer, index)? {
                 return Ok(Some(line));
@@ -180,7 +171,8 @@ impl Searcher {
     /// Search for the N-th match in the configured direction from `start_line`.
     ///
     /// Returns the line number of the N-th match, or `None` if fewer than N
-    /// matches exist.
+    /// matches exist. After each found match, the search position advances
+    /// past it so the next iteration finds a different match.
     ///
     /// # Errors
     ///
@@ -192,21 +184,36 @@ impl Searcher {
         buffer: &dyn Buffer,
         index: &mut LineIndex,
     ) -> Result<Option<usize>> {
-        let mut current = start_line;
-        for _ in 0..n {
-            let result = match self.direction {
-                SearchDirection::Forward => self.search_forward(current, buffer, index)?,
-                SearchDirection::Backward => self.search_backward(current, buffer, index)?,
-            };
-            match result {
-                Some(line) => current = line,
-                None => return Ok(None),
-            }
-        }
         if n == 0 {
             return Ok(None);
         }
-        Ok(Some(current))
+        let mut search_from = start_line;
+        let mut last_found = None;
+        for _ in 0..n {
+            let result = match self.direction {
+                SearchDirection::Forward => self.search_forward(search_from, buffer, index)?,
+                SearchDirection::Backward => self.search_backward(search_from, buffer, index)?,
+            };
+            match result {
+                Some(line) => {
+                    last_found = Some(line);
+                    // Advance past the found match for the next iteration.
+                    search_from = match self.direction {
+                        SearchDirection::Forward => line + 1,
+                        SearchDirection::Backward => {
+                            if line == 0 {
+                                // Cannot go before line 0; subsequent iterations
+                                // will rely on wrapping if enabled.
+                                return Ok(last_found);
+                            }
+                            line - 1
+                        }
+                    };
+                }
+                None => return Ok(None),
+            }
+        }
+        Ok(last_found)
     }
 
     /// Check if a single line matches the pattern.
@@ -302,14 +309,14 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // ── Test 3: search_forward starts after start_line (exclusive) ────
+    // ── Test 3: search_forward includes start_line (inclusive) ─────────
     #[test]
-    fn test_search_forward_exclusive_start_does_not_match_start_line() {
+    fn test_search_forward_inclusive_start_matches_start_line() {
         let (buf, mut idx) = make_buffer(&["match", "no", "no"]);
         let searcher = Searcher::new(pattern("match"), SearchDirection::Forward);
-        // Start at line 0 which matches, but search should start at line 1.
+        // Start at line 0 which matches; inclusive search finds it.
         let result = searcher.search_forward(0, &buf, &mut idx).unwrap();
-        assert_eq!(result, None);
+        assert_eq!(result, Some(0));
     }
 
     // ── Test 4: search_forward with multiple matches returns first ────
@@ -339,14 +346,14 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    // ── Test 7: search_backward starts before start_line (exclusive) ──
+    // ── Test 7: search_backward includes start_line (inclusive) ────────
     #[test]
-    fn test_search_backward_exclusive_start_does_not_match_start_line() {
+    fn test_search_backward_inclusive_start_matches_start_line() {
         let (buf, mut idx) = make_buffer(&["no", "no", "match"]);
         let searcher = Searcher::new(pattern("match"), SearchDirection::Backward);
-        // Start at line 2 which matches, but search should start at line 1.
+        // Start at line 2 which matches; inclusive search finds it.
         let result = searcher.search_backward(2, &buf, &mut idx).unwrap();
-        assert_eq!(result, None);
+        assert_eq!(result, Some(2));
     }
 
     // ── Test 8: search_backward with multiple matches returns closest ─

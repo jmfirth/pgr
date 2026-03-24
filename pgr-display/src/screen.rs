@@ -83,6 +83,16 @@ impl Screen {
         self.top_line
     }
 
+    /// Set `top_line` directly without clamping.
+    ///
+    /// Used by search to place the found match at the top of the viewport,
+    /// even when the match is near the end of the file (GNU less shows
+    /// tilde lines below EOF rather than preventing the match from being
+    /// at the top).
+    pub fn set_top_line(&mut self, line: usize) {
+        self.top_line = line;
+    }
+
     /// Update the terminal dimensions (e.g., after a `SIGWINCH` resize).
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.rows = rows;
