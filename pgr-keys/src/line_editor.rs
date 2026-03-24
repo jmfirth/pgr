@@ -2,6 +2,7 @@
 
 use std::io::Write;
 
+use crate::completion::{tab_complete, CompletionMode, CompletionState};
 use crate::key::Key;
 
 /// Result of processing a key event in the line editor.
@@ -13,6 +14,9 @@ pub enum LineEditResult {
     Confirm(String),
     /// The user pressed Escape or Ctrl+C. Editing was cancelled.
     Cancel,
+    /// The user pressed Tab and there are multiple completions.
+    /// Contains a status message listing the candidates.
+    ContinueWithStatus(String),
 }
 
 /// A single-line text editor for command prompts and search input.
@@ -27,6 +31,10 @@ pub struct LineEditor {
     cursor: usize,
     /// The prompt prefix displayed before the input (e.g., "/" or ":").
     prompt: String,
+    /// The completion mode for Tab key handling.
+    completion_mode: CompletionMode,
+    /// Active completion state for cycling through multiple matches.
+    completion_state: Option<CompletionState>,
 }
 
 impl LineEditor {
@@ -40,6 +48,23 @@ impl LineEditor {
             buf: String::new(),
             cursor: 0,
             prompt: prompt.to_owned(),
+            completion_mode: CompletionMode::None,
+            completion_state: None,
+        }
+    }
+
+    /// Create a new line editor with the given prompt prefix and completion mode.
+    ///
+    /// The completion mode determines what kind of tab completion is
+    /// available (filenames, option names, or none).
+    #[must_use]
+    pub fn with_completion(prompt: &str, mode: CompletionMode) -> Self {
+        Self {
+            buf: String::new(),
+            cursor: 0,
+            prompt: prompt.to_owned(),
+            completion_mode: mode,
+            completion_state: None,
         }
     }
 
@@ -52,6 +77,8 @@ impl LineEditor {
             buf: initial.to_owned(),
             cursor: initial.len(),
             prompt: prompt.to_owned(),
+            completion_mode: CompletionMode::None,
+            completion_state: None,
         }
     }
 
@@ -61,21 +88,59 @@ impl LineEditor {
         match key {
             Key::Enter => return LineEditResult::Confirm(self.buf.clone()),
             Key::Escape | Key::Ctrl('c') => return LineEditResult::Cancel,
-            Key::Char(c) => self.insert(*c),
-            Key::Backspace => self.backspace(),
-            Key::Delete => self.delete(),
-            Key::Ctrl('u') => self.clear(),
+            Key::Tab => return self.handle_tab(),
+            Key::Char(c) => {
+                self.completion_state = None;
+                self.insert(*c);
+            }
+            Key::Backspace => {
+                self.completion_state = None;
+                self.backspace();
+            }
+            Key::Delete => {
+                self.completion_state = None;
+                self.delete();
+            }
+            Key::Ctrl('u') => {
+                self.completion_state = None;
+                self.clear();
+            }
             Key::Ctrl('a') | Key::Home => self.home(),
             Key::Ctrl('e') | Key::End => self.end(),
             Key::Left => self.cursor_left(),
             Key::Right => self.cursor_right(),
             Key::CtrlLeft | Key::EscSeq('b') => self.move_word_backward(),
             Key::CtrlRight | Key::EscSeq('f') => self.move_word_forward(),
-            Key::Ctrl('w') => self.delete_word_backward(),
+            Key::Ctrl('w') => {
+                self.completion_state = None;
+                self.delete_word_backward();
+            }
             Key::EscSeq('d') => self.delete_word_forward(),
             _ => {}
         }
         LineEditResult::Continue
+    }
+
+    /// Handle tab key press for completion.
+    fn handle_tab(&mut self) -> LineEditResult {
+        let (replacement, status, new_state) = tab_complete(
+            &self.buf,
+            &self.completion_mode,
+            self.completion_state.take(),
+        );
+
+        if let Some(text) = replacement {
+            self.buf = text;
+            self.cursor = self.buf.len();
+        }
+
+        self.completion_state = new_state;
+
+        if let Some(msg) = status {
+            LineEditResult::ContinueWithStatus(msg)
+        } else {
+            LineEditResult::Continue
+        }
     }
 
     /// Insert a character at the cursor position.
@@ -757,6 +822,99 @@ mod tests {
         editor.move_word_backward();
         editor.move_word_forward();
         editor.delete_word_forward();
+    }
+
+    // ── Tab completion integration tests ──
+
+    #[test]
+    fn test_line_editor_tab_no_completion_mode_is_noop() {
+        let mut editor = LineEditor::new("/");
+        for c in "test".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "test");
+    }
+
+    #[test]
+    fn test_line_editor_tab_option_completion_single_match() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "wordw".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "wordwrap");
+    }
+
+    #[test]
+    fn test_line_editor_tab_option_completion_multiple_matches() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "quit".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        // Should return ContinueWithStatus since there are multiple matches.
+        match result {
+            LineEditResult::ContinueWithStatus(msg) => {
+                assert!(msg.contains("completions"));
+            }
+            _ => panic!("Expected ContinueWithStatus, got {result:?}"),
+        }
+        // Buffer should contain the common prefix.
+        assert!(editor.contents().starts_with("quit"));
+    }
+
+    #[test]
+    fn test_line_editor_tab_no_matches_is_noop() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "zzzzz".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert_eq!(editor.contents(), "zzzzz");
+    }
+
+    #[test]
+    fn test_line_editor_tab_completion_state_reset_on_char() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "quit".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        // Trigger completion (creates state).
+        editor.process_key(&Key::Tab);
+        // Type a character — should reset the completion state.
+        editor.process_key(&Key::Char('x'));
+        // Contents should have appended 'x' to whatever Tab set.
+        assert!(editor.contents().ends_with('x'));
+    }
+
+    #[test]
+    fn test_line_editor_tab_completion_cycles_on_repeated_tab() {
+        let mut editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        for c in "quit".chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        // First Tab sets common prefix and creates cycling state.
+        editor.process_key(&Key::Tab);
+        let after_first = editor.contents().to_owned();
+
+        // Second Tab should cycle to first candidate.
+        editor.process_key(&Key::Tab);
+        let after_second = editor.contents().to_owned();
+
+        // The two should differ (prefix vs. a specific candidate).
+        // Both should start with "quit".
+        assert!(after_first.starts_with("quit"));
+        assert!(after_second.starts_with("quit"));
+    }
+
+    #[test]
+    fn test_line_editor_with_completion_creates_correct_mode() {
+        let editor = LineEditor::with_completion("-- ", CompletionMode::OptionName);
+        assert!(editor.is_empty());
         assert_eq!(editor.contents(), "");
     }
 
@@ -774,5 +932,23 @@ mod tests {
         let mut editor = LineEditor::with_initial("/", "hello    world");
         editor.delete_word_backward();
         assert_eq!(editor.contents(), "hello    ");
+    }
+
+    #[test]
+    fn test_line_editor_tab_filename_completion_in_temp_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Create a uniquely-named file.
+        std::fs::write(base.join("unique_test_file.txt"), "").unwrap();
+
+        let mut editor = LineEditor::with_completion("Examine: ", CompletionMode::Filename);
+        let partial = format!("{}/unique_test_f", base.display());
+        for c in partial.chars() {
+            editor.process_key(&Key::Char(c));
+        }
+        let result = editor.process_key(&Key::Tab);
+        assert_eq!(result, LineEditResult::Continue);
+        assert!(editor.contents().contains("unique_test_file.txt"));
     }
 }
