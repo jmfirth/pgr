@@ -172,11 +172,13 @@ pub struct Pager<R: Read, W: Write> {
     /// option toggle/query status messages, matching GNU less behavior).
     absorb_next_key: bool,
     /// Raw file descriptor for the key input source (e.g. `/dev/tty`).
-    ///
-    /// When set, follow mode uses kqueue to multiplex between file changes
-    /// and key input. When `None`, follow mode falls back to a simple
-    /// blocking key-read loop.
     key_fd: Option<RawFd>,
+    /// Commands to execute after the first repaint (`+cmd` syntax).
+    initial_commands: Vec<String>,
+    /// Commands to execute after every file switch (`++cmd` syntax).
+    every_file_commands: Vec<String>,
+    /// Whether initial commands have been executed (prevents re-execution).
+    initial_commands_executed: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -235,6 +237,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             filter_invert: false,
             absorb_next_key: false,
             key_fd: None,
+            initial_commands: Vec::new(),
+            every_file_commands: Vec::new(),
+            initial_commands_executed: false,
         }
     }
 
@@ -249,6 +254,9 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.writer.flush()?;
 
         self.repaint()?;
+
+        // Execute initial commands after the first repaint (before user input).
+        self.execute_initial_commands()?;
 
         loop {
             match self.reader.read_key() {
@@ -1515,6 +1523,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         if switched {
             self.apply_current_file_impl(true);
             self.repaint()?;
+            self.execute_every_file_commands()?;
         }
         Ok(())
     }
@@ -1539,6 +1548,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         if switched {
             self.apply_current_file_impl(true);
             self.repaint()?;
+            self.execute_every_file_commands()?;
         }
         Ok(())
     }
@@ -1561,6 +1571,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         if switched {
             self.apply_current_file_impl(true);
             self.repaint()?;
+            self.execute_every_file_commands()?;
         }
         Ok(())
     }
@@ -1700,6 +1711,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 // Reset initial_render so short files get bottom-aligned.
                 self.initial_render = true;
                 self.repaint()?;
+                self.execute_every_file_commands()?;
             }
             Err(e) => {
                 self.status_message = Some(format!("{expanded}: {e}"));
@@ -2365,6 +2377,86 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Return a mutable reference to the file list (for testing).
     pub fn file_list_mut(&mut self) -> Option<&mut FileList> {
         self.file_list.as_mut()
+    }
+
+    /// Set the initial commands to execute after the first repaint.
+    ///
+    /// These correspond to `+cmd` on the command line or in the `LESS`
+    /// environment variable. Each string is a sequence of less keystrokes
+    /// (e.g., `"G"` for go-to-end, `"/pattern\n"` for search).
+    pub fn set_initial_commands(&mut self, cmds: Vec<String>) {
+        self.initial_commands = cmds;
+    }
+
+    /// Set the every-file commands to execute after each file switch.
+    ///
+    /// These correspond to `++cmd` on the command line or in the `LESS`
+    /// environment variable. Executed after `:n`, `:p`, `:e`, and at
+    /// initial open.
+    pub fn set_every_file_commands(&mut self, cmds: Vec<String>) {
+        self.every_file_commands = cmds;
+    }
+
+    /// Execute a command string by converting each byte to a [`Key`] event
+    /// and feeding it through [`process_key`](Self::process_key).
+    ///
+    /// This is the mechanism for `+cmd` / `++cmd` initial commands. The
+    /// command string is treated as a sequence of keystrokes: each byte
+    /// becomes a `Key::Char` (or `Key::Enter` for `\n`).
+    fn execute_command_string(&mut self, cmd: &str) -> Result<()> {
+        for byte in cmd.bytes() {
+            let key = match byte {
+                b'\n' | b'\r' => Key::Enter,
+                b'\x1b' => Key::Escape,
+                b if b < 0x20 => {
+                    // Control characters: Ctrl+A = 0x01 .. Ctrl+Z = 0x1a
+                    #[allow(clippy::cast_possible_truncation)] // byte is < 0x20, result fits in u8
+                    let ch = (b + b'a' - 1) as char;
+                    Key::Ctrl(ch)
+                }
+                _ => Key::Char(byte as char),
+            };
+            if !self.process_key(&key)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute queued initial and every-file commands.
+    ///
+    /// Called once after the first repaint. Runs initial commands first,
+    /// then every-file commands.
+    fn execute_initial_commands(&mut self) -> Result<()> {
+        if self.initial_commands_executed {
+            return Ok(());
+        }
+        self.initial_commands_executed = true;
+
+        let initial = std::mem::take(&mut self.initial_commands);
+        let every_file = self.every_file_commands.clone();
+
+        for cmd in &initial {
+            self.execute_command_string(cmd)?;
+        }
+        for cmd in &every_file {
+            self.execute_command_string(cmd)?;
+        }
+
+        // Restore initial_commands — they won't re-execute due to the flag,
+        // but keeping them preserves debuggability.
+        self.initial_commands = initial;
+
+        Ok(())
+    }
+
+    /// Execute every-file commands after a file switch.
+    fn execute_every_file_commands(&mut self) -> Result<()> {
+        let cmds = self.every_file_commands.clone();
+        for cmd in &cmds {
+            self.execute_command_string(cmd)?;
+        }
+        Ok(())
     }
 }
 
@@ -4414,5 +4506,130 @@ mod tests {
         pager.runtime_options.case_insensitive_always = true;
         // -I takes precedence over -i
         assert_eq!(pager.effective_case_mode(), CaseMode::Insensitive);
+    }
+
+    // ── Initial commands (+cmd / ++cmd) ──────────────────────────────
+
+    /// Create a pager with initial commands, run it, and return for inspection.
+    fn run_pager_with_initial_commands(
+        keys: &[u8],
+        content: &[u8],
+        initial_commands: Vec<&str>,
+        every_file_commands: Vec<&str>,
+    ) -> Pager<Cursor<Vec<u8>>, Vec<u8>> {
+        let reader = KeyReader::new(Cursor::new(keys.to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, None);
+        pager.set_initial_commands(initial_commands.iter().map(|s| s.to_string()).collect());
+        pager.set_every_file_commands(every_file_commands.iter().map(|s| s.to_string()).collect());
+        let _ = pager.run();
+        pager
+    }
+
+    // Test: +G opens file at end of file.
+    #[test]
+    fn test_dispatch_initial_command_g_goes_to_end() {
+        let content = make_test_content(100);
+        let pager = run_pager_with_initial_commands(b"q", &content, vec!["G"], vec![]);
+        // G = go to end: total_lines(100) - content_rows(23) = 77
+        assert_eq!(pager.screen().top_line(), 77);
+    }
+
+    // Test: +/pattern searches for pattern after open.
+    #[test]
+    fn test_dispatch_initial_command_search() {
+        // Create content where "line 25" first appears at line 25.
+        let content = make_test_content(50);
+        let pager = run_pager_with_initial_commands(b"q", &content, vec!["/line 25\n"], vec![]);
+        // After search, should be scrolled to line 25.
+        assert_eq!(pager.screen().top_line(), 25);
+    }
+
+    // Test: Multiple + commands execute in order.
+    #[test]
+    fn test_dispatch_initial_commands_execute_in_order() {
+        let content = make_test_content(100);
+        // G (go to end, line 77), then g (go to start, line 0).
+        let pager = run_pager_with_initial_commands(b"q", &content, vec!["G", "g"], vec![]);
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test: +10g goes to line 10 (1-based), top_line = 9 (0-based).
+    #[test]
+    fn test_dispatch_initial_command_number_g() {
+        let content = make_test_content(200);
+        let pager = run_pager_with_initial_commands(b"q", &content, vec!["10g"], vec![]);
+        // `10g` = go to line 10 (1-based), so top_line = 9 (0-based).
+        assert_eq!(pager.screen().top_line(), 9);
+    }
+
+    // Test: ++G applies to every file opened.
+    #[test]
+    fn test_dispatch_every_file_command_applies_on_file_switch() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(80);
+
+        let first_content = content1.as_slice();
+        let reader = KeyReader::new(Cursor::new(b":nq".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(first_content));
+        let buf_len = first_content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("file1.txt".to_string()));
+        pager.set_every_file_commands(vec!["G".to_string()]);
+
+        let first_entry = make_file_entry("file1.txt", &content1);
+        let mut file_list = FileList::new(first_entry);
+        file_list.push(make_file_entry("file2.txt", &content2));
+        pager.set_file_list(file_list);
+
+        let _ = pager.run();
+
+        // After switching to file2 (80 lines) with ++G, should be at end.
+        // End = 80 - 23 = 57.
+        assert_eq!(pager.screen().top_line(), 57);
+    }
+
+    // Test: Initial commands don't re-execute on file switch.
+    #[test]
+    fn test_dispatch_initial_commands_only_execute_once() {
+        let content1 = make_test_content(50);
+        let content2 = make_test_content(80);
+
+        let first_content = content1.as_slice();
+        let reader = KeyReader::new(Cursor::new(b":nq".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(first_content));
+        let buf_len = first_content.len() as u64;
+        let index = LineIndex::new(buf_len);
+
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("file1.txt".to_string()));
+        // +G only for initial, not every file.
+        pager.set_initial_commands(vec!["G".to_string()]);
+
+        let first_entry = make_file_entry("file1.txt", &content1);
+        let mut file_list = FileList::new(first_entry);
+        file_list.push(make_file_entry("file2.txt", &content2));
+        pager.set_file_list(file_list);
+
+        let _ = pager.run();
+
+        // After switching to file2, +G should NOT have re-executed.
+        // File2 opens at top (line 0), not end.
+        assert_eq!(pager.screen().top_line(), 0);
+    }
+
+    // Test: execute_command_string handles newlines as Enter key.
+    #[test]
+    fn test_dispatch_execute_command_string_newline_as_enter() {
+        let content = make_test_content(50);
+        // Search for "line 10" via initial command with explicit newline.
+        let pager = run_pager_with_initial_commands(b"q", &content, vec!["/line 10\n"], vec![]);
+        assert_eq!(pager.screen().top_line(), 10);
     }
 }

@@ -357,6 +357,14 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     if options.quit_at_first_eof {
         pager.set_quit_at_first_eof(true);
     }
+
+    // Wire initial commands (+cmd / ++cmd).
+    if !options.initial_commands.is_empty() {
+        pager.set_initial_commands(options.initial_commands.clone());
+    }
+    if !options.every_file_commands.is_empty() {
+        pager.set_every_file_commands(options.every_file_commands.clone());
+    }
 }
 
 fn main() -> anyhow::Result<()> {

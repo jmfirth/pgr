@@ -217,6 +217,48 @@ pub fn read_less_env() -> Vec<String> {
     }
 }
 
+/// Read the `LESS` environment variable, splitting tokens into flags and
+/// initial commands.
+///
+/// Tokens starting with `++` are every-file commands (the `++` prefix is
+/// stripped). Tokens starting with `+` (but not `++`) are initial commands
+/// (the `+` prefix is stripped). Everything else is a regular flag.
+///
+/// Returns `(flags, initial_commands, every_file_commands)`.
+#[must_use]
+pub fn read_less_env_split() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let tokens = read_less_env();
+    split_flags_and_commands(&tokens)
+}
+
+/// Partition a list of argument tokens into flags and initial commands.
+///
+/// Tokens starting with `++` become every-file commands (prefix stripped).
+/// Tokens starting with `+` become initial commands (prefix stripped).
+/// All other tokens are returned as flags.
+#[must_use]
+pub fn split_flags_and_commands(tokens: &[String]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut flags = Vec::new();
+    let mut initial = Vec::new();
+    let mut every_file = Vec::new();
+
+    for token in tokens {
+        if let Some(cmd) = token.strip_prefix("++") {
+            if !cmd.is_empty() {
+                every_file.push(cmd.to_string());
+            }
+        } else if let Some(cmd) = token.strip_prefix('+') {
+            if !cmd.is_empty() {
+                initial.push(cmd.to_string());
+            }
+        } else {
+            flags.push(token.clone());
+        }
+    }
+
+    (flags, initial, every_file)
+}
+
 /// Read an environment variable, returning `None` if not set or empty.
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -627,5 +669,88 @@ mod tests {
         assert_eq!(cfg.lessopen.as_deref(), Some("|lesspipe %s"));
         assert_eq!(cfg.lessclose.as_deref(), Some("lesspipe %s %s"));
         assert_eq!(cfg.lesskey.as_deref(), Some("/home/user/.lesskey"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // split_flags_and_commands tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_split_flags_and_commands_flags_only() {
+        let tokens: Vec<String> = vec!["-R".into(), "-S".into()];
+        let (flags, initial, every_file) = split_flags_and_commands(&tokens);
+        assert_eq!(flags, vec!["-R", "-S"]);
+        assert!(initial.is_empty());
+        assert!(every_file.is_empty());
+    }
+
+    #[test]
+    fn test_split_flags_and_commands_initial_command() {
+        let tokens: Vec<String> = vec!["-R".into(), "+Gg".into(), "-S".into()];
+        let (flags, initial, every_file) = split_flags_and_commands(&tokens);
+        assert_eq!(flags, vec!["-R", "-S"]);
+        assert_eq!(initial, vec!["Gg"]);
+        assert!(every_file.is_empty());
+    }
+
+    #[test]
+    fn test_split_flags_and_commands_every_file_command() {
+        let tokens: Vec<String> = vec!["++G".into(), "-R".into()];
+        let (flags, initial, every_file) = split_flags_and_commands(&tokens);
+        assert_eq!(flags, vec!["-R"]);
+        assert!(initial.is_empty());
+        assert_eq!(every_file, vec!["G"]);
+    }
+
+    #[test]
+    fn test_split_flags_and_commands_mixed() {
+        let tokens: Vec<String> = vec!["-R".into(), "+Gg".into(), "++G".into(), "-S".into()];
+        let (flags, initial, every_file) = split_flags_and_commands(&tokens);
+        assert_eq!(flags, vec!["-R", "-S"]);
+        assert_eq!(initial, vec!["Gg"]);
+        assert_eq!(every_file, vec!["G"]);
+    }
+
+    #[test]
+    fn test_split_flags_and_commands_bare_plus_ignored() {
+        let tokens: Vec<String> = vec!["+".into(), "++".into()];
+        let (flags, initial, every_file) = split_flags_and_commands(&tokens);
+        assert!(flags.is_empty());
+        assert!(initial.is_empty());
+        assert!(every_file.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // read_less_env_split tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_read_less_env_split_with_initial_commands() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let original = env::var("LESS").ok();
+        env::set_var("LESS", "-R +Gg -S");
+        let (flags, initial, every_file) = read_less_env_split();
+        match original {
+            Some(v) => env::set_var("LESS", v),
+            None => env::remove_var("LESS"),
+        }
+        assert_eq!(flags, vec!["-R", "-S"]);
+        assert_eq!(initial, vec!["Gg"]);
+        assert!(every_file.is_empty());
+    }
+
+    #[test]
+    fn test_read_less_env_split_with_every_file_command() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let original = env::var("LESS").ok();
+        env::set_var("LESS", "-R ++G");
+        let (flags, initial, every_file) = read_less_env_split();
+        match original {
+            Some(v) => env::set_var("LESS", v),
+            None => env::remove_var("LESS"),
+        }
+        assert_eq!(flags, vec!["-R"]);
+        assert!(initial.is_empty());
+        assert_eq!(every_file, vec!["G"]);
     }
 }
