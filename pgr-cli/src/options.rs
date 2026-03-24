@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use pgr_display::{PromptStyle, RawControlMode};
 
-use crate::env::read_less_env;
+use crate::env::{read_less_env_split, split_flags_and_commands};
 
 /// Search case sensitivity mode derived from `-i` / `-I` flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,38 +278,89 @@ pub struct Options {
     /// Print help information and exit.
     #[arg(short = '?', long = "help")]
     pub help: bool,
+
+    // ── Initial commands (not clap flags — populated by parse()) ─────
+    /// Commands to execute after opening the first file (`+cmd` syntax).
+    #[arg(skip)]
+    pub initial_commands: Vec<String>,
+
+    /// Commands to execute after opening every file (`++cmd` syntax).
+    #[arg(skip)]
+    pub every_file_commands: Vec<String>,
 }
 
 impl Options {
     /// Parse command-line arguments, prepending flags from the `LESS`
     /// environment variable so that explicit arguments override the env.
+    ///
+    /// Arguments starting with `+` are extracted as initial commands
+    /// (`+cmd`) or every-file commands (`++cmd`) before passing the
+    /// remaining flags to clap.
     pub fn parse() -> Self {
-        let env_args = read_less_env();
+        let (env_flags, env_initial, env_every_file) = read_less_env_split();
         let real_args: Vec<String> = std::env::args().collect();
 
-        // Build merged argv: program name, env flags, then real flags (skip argv[0]).
-        let mut merged = Vec::with_capacity(1 + env_args.len() + real_args.len());
+        // Separate `+cmd`/`++cmd` from regular args in the CLI arguments.
+        let cli_tokens: Vec<String> = if real_args.len() > 1 {
+            real_args[1..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let (cli_flags, cli_initial, cli_every_file) = split_flags_and_commands(&cli_tokens);
+
+        // Build merged argv: program name, env flags, then real flags.
+        let mut merged = Vec::with_capacity(1 + env_flags.len() + cli_flags.len());
         if let Some(prog) = real_args.first() {
             merged.push(prog.clone());
         } else {
             merged.push(String::from("pgr"));
         }
-        merged.extend(env_args);
-        if real_args.len() > 1 {
-            merged.extend_from_slice(&real_args[1..]);
-        }
+        merged.extend(env_flags);
+        merged.extend(cli_flags);
 
-        <Self as Parser>::parse_from(merged)
+        let mut opts = <Self as Parser>::parse_from(merged);
+
+        // Env commands first, then CLI commands (CLI takes precedence by running after).
+        opts.initial_commands = env_initial;
+        opts.initial_commands.extend(cli_initial);
+        opts.every_file_commands = env_every_file;
+        opts.every_file_commands.extend(cli_every_file);
+
+        opts
     }
 
     /// Parse from an explicit argument list (for testing).
+    ///
+    /// Extracts `+cmd` and `++cmd` arguments before passing the rest to clap,
+    /// matching the behavior of the real `parse()` method.
     #[cfg(test)]
     pub fn parse_from<I, T>(args: I) -> Self
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        <Self as Parser>::parse_from(args)
+        let all_args: Vec<String> = args
+            .into_iter()
+            .map(|a| a.into().to_string_lossy().into_owned())
+            .collect();
+
+        // First element is program name.
+        let (prog, rest) = if all_args.is_empty() {
+            (String::from("pgr"), Vec::new())
+        } else {
+            (all_args[0].clone(), all_args[1..].to_vec())
+        };
+
+        let (flags, initial, every_file) = split_flags_and_commands(&rest);
+
+        let mut clap_args = Vec::with_capacity(1 + flags.len());
+        clap_args.push(prog);
+        clap_args.extend(flags);
+
+        let mut opts = <Self as Parser>::parse_from(clap_args);
+        opts.initial_commands = initial;
+        opts.every_file_commands = every_file;
+        opts
     }
 
     /// Derive the prompt style from the `-m` / `-M` / `-P` flags.
@@ -825,5 +876,73 @@ mod tests {
         ]);
         assert_eq!(opts.lesskey_src.as_deref(), Some("src.txt"));
         assert_eq!(opts.lesskey_content.as_deref(), Some("inline"));
+    }
+
+    // ── Initial command (+cmd / ++cmd) tests ─────────────────────────
+
+    #[test]
+    fn test_options_plus_g_parsed_as_initial_command() {
+        let opts = Options::parse_from(["pgr", "+G", "file.txt"]);
+        assert_eq!(opts.initial_commands, vec!["G"]);
+        assert_eq!(opts.files, vec![PathBuf::from("file.txt")]);
+    }
+
+    #[test]
+    fn test_options_plus_plus_g_parsed_as_every_file_command() {
+        let opts = Options::parse_from(["pgr", "++G", "file.txt"]);
+        assert_eq!(opts.every_file_commands, vec!["G"]);
+        assert!(opts.initial_commands.is_empty());
+    }
+
+    #[test]
+    fn test_options_plus_search_parsed_as_initial_command() {
+        let opts = Options::parse_from(["pgr", "+/pattern", "file.txt"]);
+        assert_eq!(opts.initial_commands, vec!["/pattern"]);
+    }
+
+    #[test]
+    fn test_options_multiple_plus_commands_preserve_order() {
+        let opts = Options::parse_from(["pgr", "+G", "+g", "file.txt"]);
+        assert_eq!(opts.initial_commands, vec!["G", "g"]);
+    }
+
+    #[test]
+    fn test_options_mixed_flags_and_plus_commands() {
+        let opts = Options::parse_from(["pgr", "-R", "+G", "-S", "file.txt"]);
+        assert!(opts.raw_control_chars);
+        assert!(opts.chop_long_lines);
+        assert_eq!(opts.initial_commands, vec!["G"]);
+        assert_eq!(opts.files, vec![PathBuf::from("file.txt")]);
+    }
+
+    #[test]
+    fn test_options_plus_number_g_parsed_as_initial_command() {
+        let opts = Options::parse_from(["pgr", "+100g", "file.txt"]);
+        assert_eq!(opts.initial_commands, vec!["100g"]);
+    }
+
+    #[test]
+    fn test_options_plus_gg_parsed_as_initial_command() {
+        let opts = Options::parse_from(["pgr", "+Gg", "file.txt"]);
+        assert_eq!(opts.initial_commands, vec!["Gg"]);
+    }
+
+    #[test]
+    fn test_options_no_plus_args_yields_empty_commands() {
+        let opts = Options::parse_from(["pgr", "-R", "file.txt"]);
+        assert!(opts.initial_commands.is_empty());
+        assert!(opts.every_file_commands.is_empty());
+    }
+
+    #[test]
+    fn test_options_bare_plus_ignored() {
+        let opts = Options::parse_from(["pgr", "+", "file.txt"]);
+        assert!(opts.initial_commands.is_empty());
+    }
+
+    #[test]
+    fn test_options_bare_plus_plus_ignored() {
+        let opts = Options::parse_from(["pgr", "++", "file.txt"]);
+        assert!(opts.every_file_commands.is_empty());
     }
 }
