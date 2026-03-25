@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    eval_prompt, paint_info_line, paint_prompt, paint_screen_mapped, paint_screen_with_options,
-    squeeze_visible_lines, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
-    RawControlMode, RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT,
-    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    eval_prompt, line_number_width, paint_info_line, paint_prompt, paint_screen_mapped,
+    paint_screen_with_options, squeeze_visible_lines, wordwrap_segments, OverstrikeMode,
+    PaintOptions, PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, ScreenLine,
+    TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
@@ -2829,9 +2829,33 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         // GNU less bottom-aligns short files only on the initial render.
         // After any keypress, less repaints top-aligned with tildes filling below.
+        // When wordwrap is active, buffer line count does not reflect the number
+        // of screen rows each line will occupy — compute the effective row count
+        // by summing wordwrap segments for each visible line.
         let visible_content = total.saturating_sub(start);
-        let start_row = if self.initial_render && total <= content_rows && start == 0 {
-            content_rows - visible_content + 1
+        let effective_rows = if self.runtime_options.wordwrap {
+            let (_, cols) = self.screen.dimensions();
+            let status_w = if self.runtime_options.status_column {
+                2
+            } else {
+                0
+            };
+            let ln_w = if self.runtime_options.line_numbers {
+                line_number_width(total)
+            } else {
+                0
+            };
+            let content_cols = cols.saturating_sub(status_w + ln_w);
+            lines
+                .iter()
+                .filter_map(|opt| opt.as_deref())
+                .map(|text| wordwrap_segments(text, content_cols).len())
+                .sum::<usize>()
+        } else {
+            visible_content
+        };
+        let start_row = if self.initial_render && effective_rows <= content_rows && start == 0 {
+            content_rows - effective_rows + 1
         } else {
             0
         };
