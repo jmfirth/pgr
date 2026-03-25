@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    eval_prompt, line_number_width, paint_info_line, paint_prompt, paint_screen_mapped,
-    paint_screen_with_options, squeeze_visible_lines, wordwrap_segments, OverstrikeMode,
-    PaintOptions, PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, ScreenLine,
-    TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    compute_line_screen_rows, eval_prompt, line_number_width, paint_info_line, paint_prompt,
+    paint_screen_mapped, paint_screen_with_options, squeeze_visible_lines, wordwrap_segments,
+    OverstrikeMode, PaintOptions, PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen,
+    ScreenLine, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
@@ -598,6 +598,111 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.last_position = Some(self.screen.top_line());
     }
 
+    /// Compute the margin width (status column + line numbers) for the current
+    /// display settings. Used by sub-line scrolling calculations.
+    fn margin_width(&self, total_lines: usize) -> usize {
+        let status_w = if self.runtime_options.status_column {
+            2
+        } else {
+            0
+        };
+        let ln_w = if self.runtime_options.line_numbers {
+            line_number_width(total_lines)
+        } else {
+            0
+        };
+        status_w + ln_w
+    }
+
+    /// Compute how many screen rows a given file line occupies when rendered
+    /// in the current terminal with wrapping. Returns 1 for lines that fit
+    /// on a single row. In chop mode, always returns 1.
+    fn screen_rows_for_line(&mut self, line_num: usize, total_lines: usize) -> usize {
+        if self.screen.chop_mode() {
+            return 1;
+        }
+        let (_, cols) = self.screen.dimensions();
+        if cols == 0 {
+            return 1;
+        }
+        let content = self.index.get_line(line_num, &*self.buffer).ok().flatten();
+        let width = match content {
+            Some(ref text) => {
+                let render_width = usize::MAX / 2;
+                let (_, w) = pgr_display::render_line(text, 0, render_width, &self.render_config);
+                w
+            }
+            None => 0,
+        };
+        let margin = self.margin_width(total_lines);
+        compute_line_screen_rows(width, margin, cols)
+    }
+
+    /// Scroll forward by `n` screen rows, handling sub-line offsets for
+    /// wrapped lines. Advances through file lines as needed, tracking how
+    /// many screen rows have been consumed.
+    fn scroll_forward_screen_rows(&mut self, n: usize, total_lines: usize) {
+        let mut remaining = n;
+        while remaining > 0 {
+            let top = self.screen.top_line();
+            if top >= total_lines.saturating_sub(self.screen.content_rows()) {
+                break;
+            }
+            let rows_for_line = self.screen_rows_for_line(top, total_lines);
+            let current_offset = self.screen.sub_line_offset();
+            let rows_left_in_line = rows_for_line.saturating_sub(current_offset);
+
+            if remaining < rows_left_in_line {
+                // Stay in the same file line, advance sub-line offset.
+                self.screen.set_sub_line_offset(current_offset + remaining);
+                remaining = 0;
+            } else {
+                // Consume the rest of this file line, move to the next.
+                remaining -= rows_left_in_line;
+                self.screen.set_sub_line_offset(0);
+                self.screen.scroll_forward(1, total_lines);
+            }
+        }
+    }
+
+    /// Scroll backward by `n` screen rows, handling sub-line offsets for
+    /// wrapped lines.
+    fn scroll_backward_screen_rows(&mut self, n: usize, total_lines: usize) {
+        let mut remaining = n;
+        while remaining > 0 {
+            let current_offset = self.screen.sub_line_offset();
+            if current_offset > 0 {
+                // Still within the current file line's wrapped rows.
+                if remaining <= current_offset {
+                    self.screen.set_sub_line_offset(current_offset - remaining);
+                    remaining = 0;
+                } else {
+                    remaining -= current_offset;
+                    self.screen.set_sub_line_offset(0);
+                    // Continue scrolling backward into previous lines.
+                }
+            } else {
+                // At the start of the current file line. Move to previous.
+                let top = self.screen.top_line();
+                if top <= self.screen.header_lines() {
+                    break;
+                }
+                self.screen.scroll_backward(1);
+                let new_top = self.screen.top_line();
+                let rows_for_prev = self.screen_rows_for_line(new_top, total_lines);
+                // Position at the last screen row of the previous line.
+                let new_offset = rows_for_prev.saturating_sub(1);
+                if remaining <= 1 {
+                    self.screen.set_sub_line_offset(new_offset);
+                    remaining = 0;
+                } else {
+                    self.screen.set_sub_line_offset(new_offset);
+                    remaining -= 1;
+                }
+            }
+        }
+    }
+
     /// Check if the viewport is at EOF and quit-at-eof behavior should trigger.
     ///
     /// With `-E`: quit on first forward scroll that lands at or past EOF.
@@ -631,21 +736,26 @@ impl<R: Read, W: Write> Pager<R, W> {
         match *command {
             Command::ScrollForward(n) => {
                 let old_top = self.screen.top_line();
-                self.screen.scroll_forward(count.unwrap_or(n), total);
-                if self.screen.top_line() != old_top {
+                let old_offset = self.screen.sub_line_offset();
+                self.scroll_forward_screen_rows(count.unwrap_or(n), total);
+                if self.screen.top_line() != old_top || self.screen.sub_line_offset() != old_offset
+                {
                     self.repaint()?;
                 }
                 self.check_eof_quit(total);
             }
             Command::ScrollBackward(n) => {
                 let old_top = self.screen.top_line();
-                self.screen.scroll_backward(count.unwrap_or(n));
-                if self.screen.top_line() != old_top {
+                let old_offset = self.screen.sub_line_offset();
+                self.scroll_backward_screen_rows(count.unwrap_or(n), total);
+                if self.screen.top_line() != old_top || self.screen.sub_line_offset() != old_offset
+                {
                     self.repaint()?;
                 }
             }
             Command::PageForward => {
                 self.save_last_position();
+                self.screen.set_sub_line_offset(0);
                 let window = self.resolve_window_size();
                 self.screen.scroll_forward(count.unwrap_or(window), total);
                 self.repaint()?;
@@ -653,12 +763,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::PageBackward => {
                 self.save_last_position();
+                self.screen.set_sub_line_offset(0);
                 let window = self.resolve_window_size();
                 self.screen.scroll_backward(count.unwrap_or(window));
                 self.repaint()?;
             }
             Command::HalfPageForward => {
                 self.save_last_position();
+                self.screen.set_sub_line_offset(0);
                 if let Some(c) = count {
                     self.sticky_half_page = Some(c);
                 }
@@ -672,6 +784,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::HalfPageBackward => {
                 self.save_last_position();
+                self.screen.set_sub_line_offset(0);
                 if let Some(c) = count {
                     self.sticky_half_page = Some(c);
                 }
@@ -684,6 +797,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::GotoBeginning(n) => {
                 self.save_last_position();
+                self.screen.set_sub_line_offset(0);
                 // ng uses 1-based line numbers; convert to 0-based index
                 let target = count.or(n).map_or(0, |line| line.saturating_sub(1));
                 self.screen.goto_line(target, total);
@@ -691,6 +805,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::GotoEnd(n) => {
                 self.save_last_position();
+                self.screen.set_sub_line_offset(0);
                 let default = total.saturating_sub(self.screen.content_rows());
                 // nG uses 1-based line numbers; convert to 0-based index
                 let target = count.or(n).map_or(default, |line| line.saturating_sub(1));
@@ -803,15 +918,33 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             }
             Command::FileLineForward => {
-                // Equivalent to ScrollForward for now; differentiation comes with word-wrap.
-                self.screen.scroll_forward(count.unwrap_or(1), total);
-                self.repaint()?;
+                // ESC-j: scroll forward by N screen rows, like j.
+                // In GNU less, ESC-j and j have the same scroll behavior;
+                // the difference is that ESC-j displays the target line
+                // from its first segment when it would be a continuation.
+                let old_top = self.screen.top_line();
+                let old_offset = self.screen.sub_line_offset();
+                self.scroll_forward_screen_rows(count.unwrap_or(1), total);
+                if self.screen.top_line() != old_top || self.screen.sub_line_offset() != old_offset
+                {
+                    self.repaint()?;
+                }
                 self.check_eof_quit(total);
             }
             Command::FileLineBackward => {
-                // Equivalent to ScrollBackward for now; differentiation comes with word-wrap.
-                self.screen.scroll_backward(count.unwrap_or(1));
-                self.repaint()?;
+                // ESC-k: scroll backward by N screen rows, like k, but snap
+                // to the file line's first segment if landing mid-wrap.
+                let old_top = self.screen.top_line();
+                let old_offset = self.screen.sub_line_offset();
+                self.scroll_backward_screen_rows(count.unwrap_or(1), total);
+                // If we landed mid-wrap, snap to this file line's start.
+                if self.screen.sub_line_offset() > 0 {
+                    self.screen.set_sub_line_offset(0);
+                }
+                if self.screen.top_line() != old_top || self.screen.sub_line_offset() != old_offset
+                {
+                    self.repaint()?;
+                }
             }
             Command::ScrollForwardForce(n) => {
                 self.screen.scroll_forward_unclamped(count.unwrap_or(n));
