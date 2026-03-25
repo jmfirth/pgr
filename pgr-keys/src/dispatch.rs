@@ -736,9 +736,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 let target = if total == 0 {
                     0
                 } else {
-                    pct.saturating_mul(total) / 100
+                    let raw = pct.saturating_mul(total) / 100;
+                    raw.min(total.saturating_sub(1))
                 };
-                self.screen.goto_line(target, total);
+                self.screen.set_top_line(target);
                 self.repaint()?;
             }
             Command::GotoByteOffset => {
@@ -3179,10 +3180,11 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Negative window sizes are resolved against the current screen height.
     fn resolve_window_size(&self) -> usize {
         let content_rows = self.screen.content_rows();
+        let (rows, _) = self.screen.dimensions();
         match self.custom_window_size {
-            Some(ws) => ws.resolve(content_rows),
+            Some(ws) => ws.resolve(rows),
             None => match self.runtime_options.window_size {
-                Some(ws) => ws.resolve(content_rows),
+                Some(ws) => ws.resolve(rows),
                 None => content_rows,
             },
         }
@@ -3973,8 +3975,8 @@ mod tests {
     fn test_dispatch_goto_percent_100_goes_to_end() {
         let content = make_test_content(100);
         let pager = run_pager(b"100pq", &content);
-        // 100 * 100 / 100 = 100, clamped to total - content_rows = 100 - 23 = 77
-        assert_eq!(pager.screen().top_line(), 77);
+        // 100 * 100 / 100 = 100, clamped to total - 1 = 99 (last line at top, tildes below)
+        assert_eq!(pager.screen().top_line(), 99);
     }
 
     #[test]
