@@ -1547,6 +1547,14 @@ impl<R: Read, W: Write> Pager<R, W> {
         searcher.set_wrap(WrapMode::Wrap);
         searcher.set_inverted(self.last_modifiers.invert);
 
+        // Resolve the jump target to a 0-based screen row offset. With the
+        // default `-j1` this is 0 (match at top of screen). With `-j5` it is
+        // 4 (match on the 5th screen line).
+        let jump_offset = self
+            .runtime_options
+            .jump_target
+            .resolve(self.screen.content_rows());
+
         // Determine start line.
         //
         // GNU less search start positions:
@@ -1556,8 +1564,10 @@ impl<R: Read, W: Write> Pager<R, W> {
         //   Backward: top_line + content_rows - 1 (bottom of visible screen)
         //
         // Repeat search (is_repeat = true):
-        //   Forward: top_line + 1 (skip current match at top)
-        //   Backward: top_line - 1 (skip current match at top, search upward)
+        //   The current match sits at top_line + jump_offset. To avoid
+        //   re-finding the same match we start one line past it.
+        //   Forward: top_line + jump_offset + 1
+        //   Backward: (top_line + jump_offset) - 1
         //
         // The from_first modifier overrides to search from file boundaries.
         let start = if self.last_modifiers.from_first {
@@ -1569,9 +1579,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
             }
         } else if is_repeat {
+            let match_line = self.screen.top_line() + jump_offset;
             match direction {
-                SearchDirection::Forward => self.screen.top_line() + 1,
-                SearchDirection::Backward => self.screen.top_line().saturating_sub(1),
+                SearchDirection::Forward => match_line + 1,
+                SearchDirection::Backward => match_line.saturating_sub(1),
             }
         } else {
             match direction {
@@ -1592,9 +1603,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             } else {
                 self.save_last_position();
                 // Use set_top_line (unclamped) so the match appears at the
-                // top of the viewport even near EOF, matching GNU less which
-                // shows tilde lines below the last file line.
-                self.screen.set_top_line(line);
+                // jump target row, matching GNU less. Subtract jump_offset
+                // so the matched line lands at the target screen row (e.g.,
+                // with `-j5` the match appears on the 5th line, not the 1st).
+                self.screen.set_top_line(line.saturating_sub(jump_offset));
                 self.repaint()?;
             }
             Ok(true)
