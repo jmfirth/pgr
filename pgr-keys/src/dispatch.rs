@@ -1837,9 +1837,8 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn repeat_search(&mut self, reverse: bool, count: Option<usize>) -> Result<()> {
         if self.last_pattern.is_none() {
             self.status_message = Some("No previous search pattern".to_string());
-            // Don't repaint — the status message will be shown on the next
-            // repaint triggered by a different command. This preserves
-            // initial_render state (bottom-alignment) matching GNU less.
+            self.absorb_next_key = true;
+            self.repaint()?;
             return Ok(());
         }
 
@@ -5381,10 +5380,14 @@ mod tests {
     #[test]
     fn test_dispatch_n_no_previous_pattern_shows_message() {
         let content = make_search_content(&["alpha", "beta"]);
-        // n with no prior search sets status message but doesn't repaint
-        // (preserving initial_render state for bottom-alignment conformance).
-        // Verify the pager doesn't scroll — it should stay at initial position.
+        // n with no prior search shows error and absorbs the next key,
+        // matching GNU less behavior.
         let pager = run_pager(b"nq", &content);
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(
+            output.contains("No previous search pattern"),
+            "Expected 'No previous search pattern' in output: {output}"
+        );
         assert_eq!(pager.screen().top_line(), 0, "n with no pattern should not scroll");
     }
 
