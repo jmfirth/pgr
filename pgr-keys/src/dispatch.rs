@@ -630,13 +630,19 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         match *command {
             Command::ScrollForward(n) => {
+                let old_top = self.screen.top_line();
                 self.screen.scroll_forward(count.unwrap_or(n), total);
-                self.repaint()?;
+                if self.screen.top_line() != old_top {
+                    self.repaint()?;
+                }
                 self.check_eof_quit(total);
             }
             Command::ScrollBackward(n) => {
+                let old_top = self.screen.top_line();
                 self.screen.scroll_backward(count.unwrap_or(n));
-                self.repaint()?;
+                if self.screen.top_line() != old_top {
+                    self.repaint()?;
+                }
             }
             Command::PageForward => {
                 self.save_last_position();
@@ -879,7 +885,8 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.repaint()?;
             }
             Command::ClearSearchPattern => {
-                self.last_pattern = None;
+                // GNU less ESC-U clears highlighting but preserves the
+                // search pattern so `n`/`N` can still repeat the search.
                 self.highlight_state.set_enabled(true);
                 self.highlight_state.clear();
                 self.repaint()?;
@@ -905,7 +912,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.enter_search_mode(SearchDirection::Backward, count)?;
             }
             Command::NextTag => {
-                self.navigate_tag_next()?;
+                self.tag_prompt()?;
             }
             Command::PrevTag => {
                 self.navigate_tag_prev()?;
@@ -1193,8 +1200,19 @@ impl<R: Read, W: Write> Pager<R, W> {
             Err(e) => return Err(e.into()),
         };
 
-        let cmd = if first_key == Key::Char('!') || first_key == Key::Enter {
-            // `!!` or `!<Enter>` — repeat last shell command.
+        let cmd = if first_key == Key::Char('!') {
+            // `!!` — repeat last shell command. GNU less displays the previous
+            // command in the prompt and waits for Enter to confirm. Consume
+            // the confirmation key so the input stream stays synchronised.
+            match self.last_shell_command.clone() {
+                Some(prev) => {
+                    let _ = self.reader.read_key(); // consume confirmation Enter
+                    prev
+                }
+                None => return Ok(()),
+            }
+        } else if first_key == Key::Enter {
+            // `!<Enter>` — repeat last shell command (no confirmation needed).
             match self.last_shell_command.clone() {
                 Some(prev) => prev,
                 None => return Ok(()),
@@ -1232,13 +1250,15 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.writer.flush()?;
         let _ = self.reader.read_key();
 
-        // Re-enter alternate screen. GNU less relies on the terminal to
-        // restore the previous alt-screen content and does not explicitly
-        // repaint. We match that behavior.
+        // Re-enter alternate screen and repaint. The terminal may not
+        // preserve the previous alt-screen content (especially in PTY
+        // contexts), so an explicit repaint is required to restore the
+        // file display.
         self.writer.write_all(b"\x1b[?1049h")?;
         self.writer.flush()?;
         // Reset initial_render so the next repaint bottom-aligns short files.
         self.initial_render = true;
+        self.repaint()?;
         Ok(())
     }
 
@@ -1274,10 +1294,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.writer.flush()?;
         let _ = self.reader.read_key();
 
-        // Re-enter alternate screen — same behavior as handle_shell_command.
+        // Re-enter alternate screen and repaint — same as handle_shell_command.
         self.writer.write_all(b"\x1b[?1049h")?;
         self.writer.flush()?;
         self.initial_render = true;
+        self.repaint()?;
         Ok(())
     }
 
@@ -2361,8 +2382,14 @@ impl<R: Read, W: Write> Pager<R, W> {
     }
 
     /// Switch to the N-th file (0-based) in the file list.
+    ///
+    /// If the target index is the same as the current file, this is a no-op
+    /// (matching GNU less `:x` when already on the first file).
     fn switch_file_goto(&mut self, index: usize) -> Result<()> {
         let switched = if let Some(ref mut file_list) = self.file_list {
+            if file_list.current_index() == index {
+                return Ok(());
+            }
             file_list.save_viewport(self.screen.top_line(), self.screen.horizontal_offset());
             file_list.swap_buffer_and_index(&mut self.buffer, &mut self.index);
             let old_name = self.filename.clone();
@@ -2474,9 +2501,21 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Expand the filename and attempt to open it, adding to the file list.
     fn examine_file(&mut self, raw_input: &str) -> Result<()> {
+        // Strip leading/trailing whitespace — the user may type `:e  file`
+        // with extra spaces after the colon-command letter.
+        let trimmed = raw_input.trim();
+        if trimmed.is_empty() {
+            // Treat as a refresh (same as empty Confirm in examine_prompt).
+            self.buffer.refresh()?;
+            let new_len = self.buffer.len() as u64;
+            self.index = LineIndex::new(new_len);
+            self.initial_render = true;
+            self.repaint()?;
+            return Ok(());
+        }
         // Expand % and # substitutions.
         let expanded = match expand_filename(
-            raw_input,
+            trimmed,
             self.filename.as_deref(),
             self.previous_file.as_deref(),
         ) {
@@ -2516,22 +2555,21 @@ impl<R: Read, W: Write> Pager<R, W> {
                     let new_index = file_list.file_count() - 1;
                     let _ = file_list.goto(new_index);
                 } else {
-                    // No file list yet — create one with this file.
+                    // No file list yet — create one with this examined file.
                     self.file_list = Some(FileList::new(entry));
                 }
 
                 self.previous_file = old_name;
                 // Always swap: loads the new file's buffer into the pager.
                 self.apply_current_file_impl(true);
-                // Reset initial_render so short files get bottom-aligned.
-                self.initial_render = true;
+                // GNU less renders examined files top-aligned (no bottom-
+                // alignment), so leave initial_render as false.
+                self.initial_render = false;
                 self.repaint()?;
                 self.execute_every_file_commands()?;
             }
             Err(e) => {
                 self.status_message = Some(format!("{expanded}: {e}"));
-                // Reset initial_render so short files get bottom-aligned.
-                self.initial_render = true;
                 self.repaint()?;
             }
         }
@@ -3475,6 +3513,58 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Set the tag navigation state (populated from `-t` CLI flag).
     pub fn set_tag_state(&mut self, state: TagState) {
         self.tag_state = Some(state);
+    }
+
+    /// Open the tag prompt (matching GNU less `t` command).
+    ///
+    /// Shows a "Tag: " prompt, reads a tag name, and either navigates to the
+    /// tag or displays an error. This matches GNU less's prompt-based tag
+    /// command, where `t` opens a prompt rather than immediately navigating.
+    fn tag_prompt(&mut self) -> Result<()> {
+        let mut editor = LineEditor::new("Tag: ");
+        let (rows, cols) = self.screen.dimensions();
+        if rows > 0 {
+            let prompt_row = rows.saturating_sub(1);
+            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
+            let _ = self.writer.flush();
+        }
+
+        let tag_name = loop {
+            match self.reader.read_key() {
+                Ok(key) => match editor.process_key(&key) {
+                    LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
+                        if rows > 0 {
+                            let prompt_row = rows.saturating_sub(1);
+                            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
+                            let _ = self.writer.flush();
+                        }
+                    }
+                    LineEditResult::Confirm(input) => break input,
+                    LineEditResult::Cancel => {
+                        self.repaint()?;
+                        return Ok(());
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
+        };
+
+        if tag_name.is_empty() {
+            self.repaint()?;
+            return Ok(());
+        }
+
+        // With no tag state, show "No tags file".
+        if self.tag_state.is_none() {
+            self.status_message = Some(String::from("No tags file"));
+            self.repaint()?;
+            return Ok(());
+        }
+
+        // Try to navigate to the named tag.
+        self.navigate_tag_next()?;
+        Ok(())
     }
 
     /// Navigate to the next tag match (`t` command).
@@ -6392,20 +6482,20 @@ mod tests {
     // ── Task 247: ESC-U clears search pattern and re-enables highlighting ──
 
     #[test]
-    fn test_dispatch_esc_upper_u_clears_search_pattern() {
+    fn test_dispatch_esc_upper_u_clears_highlighting_but_keeps_pattern() {
         let content = make_search_content(&["alpha", "target", "beta", "target", "gamma"]);
         let mut keys: Vec<u8> = Vec::new();
         // First search for "target".
         keys.push(b'/');
         keys.extend_from_slice(b"target");
         keys.push(b'\n');
-        // Now ESC-U to clear search pattern.
+        // Now ESC-U to clear highlighting (pattern preserved per GNU less).
         keys.push(0x1B);
         keys.push(b'U');
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        // Pattern should be cleared.
-        assert!(pager.last_pattern().is_none());
+        // Pattern should be preserved so `n`/`N` still work.
+        assert!(pager.last_pattern().is_some());
         // Highlighting should be re-enabled (ready for next search).
         assert!(pager.highlight_state().is_enabled());
     }
@@ -6434,12 +6524,12 @@ mod tests {
         // Toggle highlight off with ESC-u.
         keys.push(0x1B);
         keys.push(b'u');
-        // Now clear with ESC-U — should re-enable highlighting.
+        // Now ESC-U — should re-enable highlighting, preserve pattern.
         keys.push(0x1B);
         keys.push(b'U');
         keys.push(b'q');
         let pager = run_pager(&keys, &content);
-        assert!(pager.last_pattern().is_none());
+        assert!(pager.last_pattern().is_some());
         assert!(pager.highlight_state().is_enabled());
     }
 
