@@ -150,32 +150,44 @@ pub fn paint_screen_with_options<W: Write>(
     let scrollable_rows = content_rows + header_count;
     let mut line_idx: usize = 0;
 
+    // Sub-line offset: when scrolling by screen rows, the first visible
+    // file line may start mid-wrap. This tracks how many screen rows of the
+    // first file line to skip.
+    let sub_line_off = screen.sub_line_offset();
+
     while screen_row <= scrollable_rows {
         if screen_row > 1 {
             move_cursor(writer, screen_row, 1)?;
         }
 
         if let Some(Some(line_text)) = lines.get(line_idx) {
-            if options.show_status_column {
-                let ch = options
-                    .status_column_chars
-                    .get(line_idx)
-                    .copied()
-                    .unwrap_or(' ');
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                writer.write_all(s.as_bytes())?;
-                writer.write_all(b" ")?;
-            }
+            // When sub_line_offset is active for the first line, we skip
+            // the margin and leading content rows.
+            let skip_rows = if line_idx == 0 { sub_line_off } else { 0 };
 
-            if options.show_line_numbers {
-                let line_num = screen.top_line() + line_idx + 1;
-                let formatted = line_numbers::format_line_number(line_num, ln_width);
-                writer.write_all(formatted.as_bytes())?;
+            if skip_rows == 0 {
+                if options.show_status_column {
+                    let ch = options
+                        .status_column_chars
+                        .get(line_idx)
+                        .copied()
+                        .unwrap_or(' ');
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    writer.write_all(s.as_bytes())?;
+                    writer.write_all(b" ")?;
+                }
+
+                if options.show_line_numbers {
+                    let line_num = screen.top_line() + line_idx + 1;
+                    let formatted = line_numbers::format_line_number(line_num, ln_width);
+                    writer.write_all(formatted.as_bytes())?;
+                }
             }
 
             if chop_mode {
                 // Chop mode: truncate at content_cols, apply markers
+                // Sub-line offset does not apply in chop mode (no wrapping).
                 let (rendered, width) =
                     render::render_line(line_text, h_offset, content_cols, config);
                 if content_cols > 0 {
@@ -197,10 +209,13 @@ pub fn paint_screen_with_options<W: Write>(
 
                 // First segment was already preceded by margin output above.
                 for (seg_idx, segment) in segments.iter().enumerate() {
+                    if seg_idx < skip_rows {
+                        continue;
+                    }
                     if seg_idx > 0 && screen_row > scrollable_rows {
                         break;
                     }
-                    if seg_idx > 0 {
+                    if seg_idx > skip_rows {
                         // Continuation row: move cursor and repeat margin.
                         move_cursor(writer, screen_row, 1)?;
                         if options.show_status_column {
@@ -219,27 +234,35 @@ pub fn paint_screen_with_options<W: Write>(
             } else {
                 // Wrap mode (default): render the full line and let the
                 // terminal auto-wrap at the terminal width boundary.
-                let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
-                let (rendered, width) =
-                    render::render_line(line_text, h_offset, render_width, config);
-                writer.write_all(rendered.as_bytes())?;
-                clear_to_eol(writer)?;
+                if skip_rows > 0 && cols > 0 {
+                    // Skip leading screen rows by advancing the horizontal
+                    // offset past the content that occupies those rows.
+                    // Row 0 has (cols - margin_width) content columns;
+                    // each subsequent row has `cols` content columns.
+                    let content_skip =
+                        cols.saturating_sub(margin_width) + skip_rows.saturating_sub(1) * cols;
+                    let render_width = usize::MAX / 2;
+                    let (rendered, width) = render::render_line(
+                        line_text,
+                        h_offset + content_skip,
+                        render_width,
+                        config,
+                    );
+                    writer.write_all(rendered.as_bytes())?;
+                    clear_to_eol(writer)?;
 
-                // Calculate how many screen rows this line consumed.
-                let rows_used = if cols == 0 {
-                    1
+                    let rows_used = compute_line_screen_rows(width, 0, cols);
+                    screen_row += rows_used;
                 } else {
-                    let total_display = margin_width + width;
-                    if total_display <= cols {
-                        1
-                    } else {
-                        // First row fills cols columns; each continuation
-                        // row also fills cols columns.
-                        let remaining = total_display.saturating_sub(cols);
-                        1 + remaining.div_ceil(cols)
-                    }
-                };
-                screen_row += rows_used;
+                    let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
+                    let (rendered, width) =
+                        render::render_line(line_text, h_offset, render_width, config);
+                    writer.write_all(rendered.as_bytes())?;
+                    clear_to_eol(writer)?;
+
+                    let rows_used = compute_line_screen_rows(width, margin_width, cols);
+                    screen_row += rows_used;
+                }
             }
         } else {
             if options.show_status_column {
@@ -541,6 +564,27 @@ pub fn paint_error_message<W: Write>(
 /// Returns an I/O error if writing to `writer` fails.
 fn clear_to_eol<W: Write>(writer: &mut W) -> std::io::Result<()> {
     writer.write_all(b"\x1b[K")
+}
+
+/// Compute how many terminal screen rows a rendered line occupies when wrapping.
+///
+/// Given the display `width` of the rendered content, the `margin_width` (status
+/// column + line numbers), and the terminal `cols`, returns the number of screen
+/// rows the line would consume due to terminal auto-wrapping.
+///
+/// When `cols` is 0, returns 1 (no wrapping possible).
+#[must_use]
+pub fn compute_line_screen_rows(width: usize, margin_width: usize, cols: usize) -> usize {
+    if cols == 0 {
+        return 1;
+    }
+    let total_display = margin_width + width;
+    if total_display <= cols {
+        1
+    } else {
+        let remaining = total_display.saturating_sub(cols);
+        1 + remaining.div_ceil(cols)
+    }
 }
 
 /// Split a rendered line into word-wrapped segments of at most `max_width` display columns.

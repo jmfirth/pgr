@@ -18,6 +18,13 @@ pub struct Screen {
     horizontal_offset: usize,
     chop_mode: bool,
     header_lines: usize,
+    /// Number of screen rows to skip in the first visible file line.
+    ///
+    /// When a file line wraps to multiple screen rows, this offset allows
+    /// sub-line scrolling (e.g., `j` scrolls by 1 screen row, which may
+    /// land mid-wrap). A value of 0 means the line is shown from its first
+    /// segment. Used by [`crate::terminal_output::paint_screen_with_options`].
+    sub_line_offset: usize,
 }
 
 impl Screen {
@@ -34,6 +41,7 @@ impl Screen {
             horizontal_offset: 0,
             chop_mode: false,
             header_lines: 0,
+            sub_line_offset: 0,
         }
     }
 
@@ -174,6 +182,22 @@ impl Screen {
         if self.top_line < n {
             self.top_line = n;
         }
+    }
+
+    /// Return the sub-line offset (number of screen rows to skip in the
+    /// first visible file line due to wrapping).
+    #[must_use]
+    pub fn sub_line_offset(&self) -> usize {
+        self.sub_line_offset
+    }
+
+    /// Set the sub-line offset for the top file line.
+    ///
+    /// When scrolling by screen rows through wrapped lines, this tracks
+    /// how many screen rows of the current `top_line` have been scrolled
+    /// past. A value of 0 shows the line from its first segment.
+    pub fn set_sub_line_offset(&mut self, offset: usize) {
+        self.sub_line_offset = offset;
     }
 }
 
