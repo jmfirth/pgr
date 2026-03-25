@@ -3723,19 +3723,23 @@ impl<R: Read, W: Write> Pager<R, W> {
 
     /// Navigate to the next tag match (`t` command).
     fn navigate_tag_next(&mut self) -> Result<()> {
-        let msg = if let Some(ref mut state) = self.tag_state {
+        let should_repaint = if let Some(ref mut state) = self.tag_state {
             if state.advance().is_some() {
                 let idx = state.current_index();
                 let total = state.count();
-                Some(format!("tag {} of {total}", idx + 1))
+                self.status_message = Some(format!("tag {} of {total}", idx + 1));
+                true
             } else {
-                Some(String::from("No next tag"))
+                self.status_message = Some(String::from("No next tag"));
+                true
             }
         } else {
-            Some(String::from("No tags"))
+            self.status_message = Some(String::from("No tags"));
+            false // Don't repaint — let the next keypress show the message
         };
-        self.status_message = msg;
-        self.repaint()?;
+        if should_repaint {
+            self.repaint()?;
+        }
         Ok(())
     }
 
