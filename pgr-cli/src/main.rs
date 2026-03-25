@@ -694,6 +694,12 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // GNU less rejects `-t tagname` when filename arguments are also provided.
+    if options.tag.is_some() && !options.files.is_empty() {
+        println!("No filenames allowed with -t option");
+        std::process::exit(1);
+    }
+
     let reason = if let Some(ref tag) = options.tag {
         run_tag_mode(&options, tag)?
     } else if is_stdin_mode(&options) {

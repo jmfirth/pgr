@@ -2555,8 +2555,29 @@ impl<R: Read, W: Write> Pager<R, W> {
                     let new_index = file_list.file_count() - 1;
                     let _ = file_list.goto(new_index);
                 } else {
-                    // No file list yet — create one with this examined file.
-                    self.file_list = Some(FileList::new(entry));
+                    // No file list yet — create one seeded with the current
+                    // file so `:p` can navigate back to it after examine.
+                    let placeholder: Box<dyn Buffer> =
+                        Box::new(pgr_input::PipeBuffer::new(std::io::empty()));
+                    let current_entry = FileEntry {
+                        path: self.filename.as_deref().map(std::path::PathBuf::from),
+                        display_name: self
+                            .filename
+                            .clone()
+                            .unwrap_or_else(|| String::from("(current)")),
+                        buffer: placeholder,
+                        index: LineIndex::new(0),
+                        marks: MarkStore::new(),
+                        saved_top_line: self.screen.top_line(),
+                        saved_horizontal_offset: self.screen.horizontal_offset(),
+                    };
+                    let mut fl = FileList::new(current_entry);
+                    // Swap the pager's real buffer/index into the original entry.
+                    fl.swap_buffer_and_index(&mut self.buffer, &mut self.index);
+                    fl.push(entry);
+                    let new_index = fl.file_count() - 1;
+                    let _ = fl.goto(new_index);
+                    self.file_list = Some(fl);
                 }
 
                 self.previous_file = old_name;
