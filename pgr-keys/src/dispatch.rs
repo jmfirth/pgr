@@ -213,6 +213,8 @@ pub struct Pager<R: Read, W: Write> {
     no_vbell: bool,
     /// Whether the next character typed in the search prompt should be inserted literally (^L).
     search_literal_next: bool,
+    /// Saved `top_line` before incremental search, for restoring on cancel.
+    incsearch_saved_top: Option<usize>,
     /// Whether to repaint the screen before exiting (`--redraw-on-quit`).
     redraw_on_quit: bool,
     /// Whether Ctrl-C should immediately quit (`-K` / `--quit-on-intr`).
@@ -289,6 +291,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             no_keypad: false,
             no_vbell: false,
             search_literal_next: false,
+            incsearch_saved_top: None,
             redraw_on_quit: false,
             quit_on_intr: false,
             exit_reason: ExitReason::Normal,
@@ -1044,6 +1047,10 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.line_editor = Some(LineEditor::new(prompt));
         self.editing_search = true;
         self.pending_count = count;
+        // Save position for incremental search restore on cancel.
+        if self.runtime_options.incsearch {
+            self.incsearch_saved_top = Some(self.screen.top_line());
+        }
         self.render_search_prompt()?;
         Ok(())
     }
@@ -1091,14 +1098,17 @@ impl<R: Read, W: Write> Pager<R, W> {
             return Ok(true);
         }
 
-        // Intercept search modifier keys (^N, ^R) and inject their raw
-        // control-character bytes into the line editor buffer so that
-        // `SearchModifiers::parse` can extract them later.
-        if matches!(key, Key::Ctrl('n' | 'r')) {
+        // Intercept search modifier keys and inject their raw control-character
+        // bytes into the line editor buffer so that `SearchModifiers::parse` can
+        // extract them later. ^N = invert, ^R = literal, ^F = from-first,
+        // ^K = keep-pos. (^E and ^W conflict with line-editor bindings.)
+        if matches!(key, Key::Ctrl('n' | 'r' | 'f' | 'k')) {
             if let Some(ref mut editor) = self.line_editor {
                 let ch = match key {
                     Key::Ctrl('n') => '\x0e',
                     Key::Ctrl('r') => '\x12',
+                    Key::Ctrl('f') => '\x06',
+                    Key::Ctrl('k') => '\x0b',
                     _ => unreachable!(),
                 };
                 editor.insert(ch);
@@ -1122,6 +1132,11 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn finish_search_key(&mut self, result: LineEditResult) -> Result<bool> {
         match result {
             LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
+                // Incremental search: on each keystroke, search for the
+                // current pattern and scroll to the first match.
+                if self.runtime_options.incsearch {
+                    self.do_incsearch()?;
+                }
                 self.render_search_prompt()?;
             }
             LineEditResult::Confirm(pattern_str) => {
@@ -1129,6 +1144,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 let count = self.pending_count.take();
                 self.line_editor = None;
                 self.search_literal_next = false;
+                self.incsearch_saved_top = None;
                 self.search_history.push(pattern_str.clone());
                 self.submit_search(&pattern_str, self.search_prompt_direction, count)?;
             }
@@ -1137,6 +1153,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.pending_count = None;
                 self.line_editor = None;
                 self.search_literal_next = false;
+                // Restore position saved before incremental search.
+                if let Some(saved) = self.incsearch_saved_top.take() {
+                    self.screen.set_top_line(saved);
+                }
                 self.repaint()?;
             }
         }
@@ -1616,6 +1636,47 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.repaint()?;
             Ok(false)
         }
+    }
+
+    /// Perform an incremental search using the current line-editor contents.
+    ///
+    /// Searches from the saved pre-search position (or file start) so that
+    /// every keystroke re-evaluates from a stable origin. Scrolls to the
+    /// first match without committing it as `last_pattern`.
+    fn do_incsearch(&mut self) -> Result<()> {
+        let pattern_text = match self.line_editor {
+            Some(ref editor) => editor.contents().to_string(),
+            None => return Ok(()),
+        };
+
+        let (_mods, raw_pattern) = SearchModifiers::parse(&pattern_text);
+        if raw_pattern.is_empty() {
+            // No pattern yet — restore original position.
+            if let Some(saved) = self.incsearch_saved_top {
+                self.screen.set_top_line(saved);
+                self.repaint()?;
+            }
+            return Ok(());
+        }
+
+        let case_mode = self.effective_case_mode();
+        let Ok(compiled) = SearchPattern::compile(raw_pattern, case_mode) else {
+            return Ok(());
+        };
+
+        let start = self.incsearch_saved_top.unwrap_or(0);
+        let mut searcher = Searcher::new(compiled, self.search_prompt_direction);
+        searcher.set_wrap(WrapMode::Wrap);
+
+        let result = searcher.search_nth(start, 1, &*self.buffer, &mut self.index)?;
+        if let Some(line) = result {
+            self.screen.set_top_line(line);
+            self.repaint()?;
+        } else if let Some(saved) = self.incsearch_saved_top {
+            self.screen.set_top_line(saved);
+            self.repaint()?;
+        }
+        Ok(())
     }
 
     /// Repeat the last search, optionally reversing direction.
@@ -2508,9 +2569,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             false, // TODO: pipe detection deferred to Phase 2
         );
 
-        // GNU less scrolls forward 1 line and replaces the last content
-        // row with the info text (the prompt row stays).
-        self.screen.scroll_forward(1, total_lines);
+        // GNU less scrolls forward 1 line (unclamped, allowing scroll
+        // past EOF) and replaces the last content row with the info text.
+        self.screen.scroll_forward_unclamped(1);
         self.repaint()?;
 
         let (rows, cols) = self.screen.dimensions();
