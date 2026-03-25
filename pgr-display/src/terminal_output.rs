@@ -23,6 +23,7 @@ pub struct ScreenLine {
 
 /// Options controlling how [`paint_screen`] renders content.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)] // Each bool maps to an independent less display flag
 pub struct PaintOptions {
     /// Whether to display line numbers in the left margin (`-N` flag).
     pub show_line_numbers: bool,
@@ -37,12 +38,11 @@ pub struct PaintOptions {
     /// Default 0 means start at row 1. Used to offset short files
     /// so content appears at the bottom of the screen (matching less).
     pub start_row: usize,
-    /// Whether to display a 2-column status column on the left (`-J` flag).
+    /// Whether to display a 1-character status column on the left (`-J` flag).
     ///
-    /// When active, two columns are reserved before line numbers (if both
-    /// are active): a status character plus a space separator. Each line
-    /// shows `*` for search matches, a mark letter for marked lines, or a
-    /// space otherwise, followed by a space.
+    /// When active, a single column is reserved before line numbers (if both
+    /// are active). Each line shows `*` for search matches, a mark letter for
+    /// marked lines, or a space otherwise.
     pub show_status_column: bool,
     /// Per-line status column characters, parallel to the lines slice.
     ///
@@ -55,6 +55,12 @@ pub struct PaintOptions {
     /// These are always taken from the beginning of the file and rendered
     /// with reverse video. Only used when `--header=N` is active.
     pub header_line_contents: Vec<Option<String>>,
+    /// Wrap long lines at word boundaries (`--wordwrap` flag).
+    ///
+    /// When true, lines that exceed the terminal width are broken at the
+    /// last space character that fits. If no space exists, the line falls
+    /// back to character-level wrapping (the default behavior).
+    pub wordwrap: bool,
 }
 
 /// Paint the full screen content to the terminal.
@@ -102,7 +108,7 @@ pub fn paint_screen_with_options<W: Write>(
     let h_offset = screen.horizontal_offset();
     let chop_mode = screen.chop_mode();
 
-    let status_col_width = if options.show_status_column { 2 } else { 0 };
+    let status_col_width = usize::from(options.show_status_column);
 
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
@@ -159,7 +165,6 @@ pub fn paint_screen_with_options<W: Write>(
                 let mut buf = [0u8; 4];
                 let s = ch.encode_utf8(&mut buf);
                 writer.write_all(s.as_bytes())?;
-                writer.write_all(b" ")?;
             }
 
             if options.show_line_numbers {
@@ -183,6 +188,33 @@ pub fn paint_screen_with_options<W: Write>(
                 }
                 clear_to_eol(writer)?;
                 screen_row += 1;
+            } else if options.wordwrap && content_cols > 0 {
+                // Word-wrap mode: break lines at word boundaries.
+                let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
+                let (rendered, _) = render::render_line(line_text, h_offset, render_width, config);
+                let segments = wordwrap_segments(&rendered, content_cols);
+
+                // First segment was already preceded by margin output above.
+                for (seg_idx, segment) in segments.iter().enumerate() {
+                    if seg_idx > 0 && screen_row > scrollable_rows {
+                        break;
+                    }
+                    if seg_idx > 0 {
+                        // Continuation row: move cursor and repeat margin.
+                        move_cursor(writer, screen_row, 1)?;
+                        if options.show_status_column {
+                            writer.write_all(b" ")?;
+                        }
+                        if options.show_line_numbers {
+                            let line_num = screen.top_line() + line_idx + 1;
+                            let formatted = line_numbers::format_line_number(line_num, ln_width);
+                            writer.write_all(formatted.as_bytes())?;
+                        }
+                    }
+                    writer.write_all(segment.as_bytes())?;
+                    clear_to_eol(writer)?;
+                    screen_row += 1;
+                }
             } else {
                 // Wrap mode (default): render the full line and let the
                 // terminal auto-wrap at the terminal width boundary.
@@ -210,7 +242,7 @@ pub fn paint_screen_with_options<W: Write>(
             }
         } else {
             if options.show_status_column {
-                writer.write_all(b"  ")?;
+                writer.write_all(b" ")?;
             }
             if !options.suppress_tildes {
                 writer.write_all(b"~")?;
@@ -254,7 +286,7 @@ fn paint_header_lines<W: Write>(
         writer.write_all(b"\x1b[7m")?;
         if let Some(text) = header_line {
             if options.show_status_column {
-                writer.write_all(b"  ")?;
+                writer.write_all(b" ")?;
             }
             if options.show_line_numbers {
                 let line_num = i + 1;
@@ -307,7 +339,7 @@ pub fn paint_screen_mapped<W: Write>(
     let h_offset = screen.horizontal_offset();
     let chop_mode = screen.chop_mode();
 
-    let status_col_width = if options.show_status_column { 2 } else { 0 };
+    let status_col_width = usize::from(options.show_status_column);
 
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
@@ -363,7 +395,6 @@ pub fn paint_screen_mapped<W: Write>(
                     let mut buf = [0u8; 4];
                     let s = ch.encode_utf8(&mut buf);
                     writer.write_all(s.as_bytes())?;
-                    writer.write_all(b" ")?;
                 }
 
                 if options.show_line_numbers {
@@ -407,7 +438,7 @@ pub fn paint_screen_mapped<W: Write>(
                 }
             } else {
                 if options.show_status_column {
-                    writer.write_all(b"  ")?;
+                    writer.write_all(b" ")?;
                 }
                 if !options.suppress_tildes {
                     writer.write_all(b"~")?;
@@ -417,7 +448,7 @@ pub fn paint_screen_mapped<W: Write>(
             }
         } else {
             if options.show_status_column {
-                writer.write_all(b"  ")?;
+                writer.write_all(b" ")?;
             }
             if !options.suppress_tildes {
                 writer.write_all(b"~")?;
@@ -508,6 +539,81 @@ pub fn paint_error_message<W: Write>(
 /// Returns an I/O error if writing to `writer` fails.
 fn clear_to_eol<W: Write>(writer: &mut W) -> std::io::Result<()> {
     writer.write_all(b"\x1b[K")
+}
+
+/// Split a rendered line into word-wrapped segments of at most `max_width` display columns.
+///
+/// Breaks at word boundaries matching GNU less `--wordwrap` behavior: if the
+/// character at position `max_width` is a space (or end of text), include the
+/// full `max_width` characters and skip the space. Otherwise, find the last
+/// space within the segment and break after it. If no space exists, fall back
+/// to breaking at exactly `max_width` characters (character-level wrapping).
+///
+/// Returns a vector of string segments to render on consecutive screen rows.
+#[must_use]
+pub fn wordwrap_segments(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut segments = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        let char_count = remaining.chars().count();
+        if char_count <= max_width {
+            segments.push(remaining.to_string());
+            break;
+        }
+
+        // Check the character at position max_width (the first char that
+        // wouldn't fit). If it's a space, the first max_width chars form a
+        // clean word boundary — take them and skip the space.
+        let boundary_char = remaining.chars().nth(max_width);
+        if boundary_char == Some(' ') {
+            // The word ends exactly at max_width; take the first max_width
+            // chars and skip the space after them.
+            let byte_end = remaining
+                .char_indices()
+                .nth(max_width)
+                .map_or(remaining.len(), |(i, _)| i);
+            segments.push(remaining[..byte_end].to_string());
+            // Skip the space character
+            let byte_past_space = remaining
+                .char_indices()
+                .nth(max_width + 1)
+                .map_or(remaining.len(), |(i, _)| i);
+            remaining = &remaining[byte_past_space..];
+            continue;
+        }
+
+        // The character at max_width is not a space (mid-word). Find the last
+        // space within the first max_width characters.
+        let prefix: String = remaining.chars().take(max_width).collect();
+        if let Some(last_space) = prefix.rfind(' ') {
+            // Break after the space (include the space on this row)
+            let byte_end = remaining
+                .char_indices()
+                .nth(last_space + 1)
+                .map_or(remaining.len(), |(i, _)| i);
+            segments.push(remaining[..byte_end].to_string());
+            remaining = &remaining[byte_end..];
+        } else {
+            // No space found: fall back to character-level break at max_width
+            let byte_end = remaining
+                .char_indices()
+                .nth(max_width)
+                .map_or(remaining.len(), |(i, _)| i);
+            segments.push(remaining[..byte_end].to_string());
+            remaining = &remaining[byte_end..];
+        }
+    }
+
+    if segments.is_empty() {
+        segments.push(String::new());
+    }
+
+    segments
 }
 
 #[cfg(test)]
@@ -1043,18 +1149,18 @@ mod tests {
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
         let output_str = String::from_utf8_lossy(&output);
 
-        // The status chars should appear before each line's content (2-col: char + space)
+        // The status chars should appear before each line's content
         assert!(
-            output_str.contains("* alpha"),
-            "expected '* ' before 'alpha': {output_str}"
+            output_str.contains("*alpha"),
+            "expected '*' before 'alpha': {output_str}"
         );
         assert!(
-            output_str.contains("a beta"),
-            "expected 'a ' before 'beta': {output_str}"
+            output_str.contains("abeta"),
+            "expected 'a' before 'beta': {output_str}"
         );
         assert!(
-            output_str.contains("  gamma"),
-            "expected two spaces before 'gamma': {output_str}"
+            output_str.contains(" gamma"),
+            "expected space before 'gamma': {output_str}"
         );
     }
 
@@ -1075,12 +1181,12 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
 
         assert!(
-            output_str.contains("* match line"),
-            "expected '* ' before match line: {output_str}"
+            output_str.contains("*match line"),
+            "expected '*' before match line: {output_str}"
         );
         assert!(
-            output_str.contains("  no match"),
-            "expected two spaces before non-match line: {output_str}"
+            output_str.contains(" no match"),
+            "expected space before non-match line: {output_str}"
         );
     }
 
@@ -1101,20 +1207,20 @@ mod tests {
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
         let output_str = String::from_utf8_lossy(&output);
 
-        // Status column char + space comes before line number
+        // Status column char comes before line number
         assert!(
-            output_str.contains("*       1 hello"),
-            "expected status char + space before line number: {output_str}"
+            output_str.contains("*      1 hello"),
+            "expected status char before line number: {output_str}"
         );
         assert!(
-            output_str.contains("b       2 world"),
-            "expected mark 'b' + space before line number: {output_str}"
+            output_str.contains("b      2 world"),
+            "expected mark 'b' before line number: {output_str}"
         );
     }
 
     #[test]
     fn test_paint_screen_status_column_reduces_content_width() {
-        // 20 columns total. Status column takes 2 -> 18 for content.
+        // 20 columns total. Status column takes 1 -> 19 for content.
         let mut screen = Screen::new(2, 20); // 1 content row
         screen.set_chop_mode(true);
         let lines: Vec<Option<String>> = vec![Some(
@@ -1127,7 +1233,7 @@ mod tests {
         let output_no_status = capture_output(|w| paint_screen(w, &screen, &lines, &config));
         let str_no_status = String::from_utf8_lossy(&output_no_status);
 
-        // With status column: 18 cols of content (20 - 2)
+        // With status column: 19 cols of content
         let options = PaintOptions {
             show_status_column: true,
             status_column_chars: vec![' '],
@@ -1142,14 +1248,14 @@ mod tests {
             str_no_status.contains("this is a longer li>"),
             "expected chopped line without status: {str_no_status}"
         );
-        // With status: "  this is a longer >" (2 spaces + 17 chars + ">")
+        // With status: " this is a longer l>" (space + 18 chars + ">")
         assert!(
-            str_status.contains("this is a longer >"),
+            str_status.contains("this is a longer l>"),
             "expected chopped line with status: {str_status}"
         );
         // The status version should not contain the longer substring
         assert!(
-            !str_status.contains("this is a longer l>"),
+            !str_status.contains("this is a longer li>"),
             "status column should reduce content width: {str_status}"
         );
     }
@@ -1169,15 +1275,15 @@ mod tests {
             capture_output(|w| paint_screen_with_options(w, &screen, &lines, &config, &options));
         let output_str = String::from_utf8_lossy(&output);
 
-        // First line has status char + space
+        // First line has status char
         assert!(
-            output_str.contains("* only line"),
-            "expected '* ' before content: {output_str}"
+            output_str.contains("*only line"),
+            "expected '*' before content: {output_str}"
         );
-        // Beyond-EOF lines should have 2 spaces before tilde
+        // Beyond-EOF lines should have space before tilde
         assert!(
-            output_str.contains("  ~"),
-            "expected two spaces before tilde for beyond-EOF lines: {output_str}"
+            output_str.contains(" ~"),
+            "expected space before tilde for beyond-EOF lines: {output_str}"
         );
     }
 
@@ -1210,12 +1316,12 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
 
         assert!(
-            output_str.contains("* first"),
-            "expected '* ' before 'first': {output_str}"
+            output_str.contains("*first"),
+            "expected '*' before 'first': {output_str}"
         );
         assert!(
-            output_str.contains("a second"),
-            "expected 'a ' before 'second': {output_str}"
+            output_str.contains("asecond"),
+            "expected 'a' before 'second': {output_str}"
         );
     }
 

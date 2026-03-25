@@ -193,10 +193,11 @@ fn eval_recursive(
                 }
                 // Trailing `?` at end of string: silently ignore
             }
-            ':' if depth > 0 => {
-                // Else separator within a conditional. When the true branch
-                // was evaluated and we hit `:`, skip the false branch and
-                // consume the closing `.`.
+            ':' => {
+                // Else separator. When the true branch was evaluated and we
+                // hit `:`, skip the false branch and consume the closing `.`.
+                // GNU less treats `:` as structural at all depths — even at
+                // the top level, `:` skips to the next `.` (or end of string).
                 *pos += 1;
                 skip_to_dot(chars, pos);
                 return result;
@@ -1057,7 +1058,9 @@ mod tests {
     #[test]
     fn test_render_prompt_custom_style_uses_eval_prompt() {
         let ctx = eval_ctx(Some("data.txt"), 10, 50, Some(200), 1000, 4000);
-        let style = PromptStyle::Custom(String::from("File: %f Line: %l"));
+        // Colons must be escaped with `\:` in prompt templates; an unescaped
+        // `:` is structural (else separator) at any depth in GNU less.
+        let style = PromptStyle::Custom(String::from("File\\: %f Line\\: %l"));
         assert_eq!(render_prompt(&style, &ctx), "File: data.txt Line: 10");
     }
 

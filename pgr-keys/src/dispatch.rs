@@ -2713,6 +2713,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     show_status_column: self.runtime_options.status_column,
                     status_column_chars,
                     header_line_contents,
+                    wordwrap: self.runtime_options.wordwrap,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -2783,6 +2784,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             show_status_column: self.runtime_options.status_column,
             status_column_chars,
             header_line_contents,
+            wordwrap: self.runtime_options.wordwrap,
         };
         paint_screen_with_options(
             &mut self.writer,
@@ -2874,6 +2876,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             show_status_column: self.runtime_options.status_column,
             status_column_chars,
             header_line_contents,
+            wordwrap: self.runtime_options.wordwrap,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -5225,7 +5228,7 @@ mod tests {
 
         let mut pager = Pager::new(reader, writer, buffer, index, Some("myfile.txt".into()));
         let mut opts = RuntimeOptions::default();
-        opts.prompt_string_short = Some(String::from("Viewing: %f"));
+        opts.prompt_string_short = Some(String::from("Viewing\\: %f"));
         pager.set_runtime_options(opts);
         let _ = pager.run();
 

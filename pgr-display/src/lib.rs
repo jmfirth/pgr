@@ -36,5 +36,5 @@ pub use squeeze::{is_blank_line, squeeze_visible_lines};
 pub use termcap::TermcapOverrides;
 pub use terminal_output::{
     clear_screen, paint_error_message, paint_screen, paint_screen_mapped,
-    paint_screen_with_options, PaintOptions, ScreenLine,
+    paint_screen_with_options, wordwrap_segments, PaintOptions, ScreenLine,
 };
