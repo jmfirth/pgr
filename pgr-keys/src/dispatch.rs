@@ -1045,7 +1045,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.enter_search_mode(SearchDirection::Backward, count)?;
             }
             Command::NextTag => {
-                self.tag_prompt()?;
+                self.navigate_tag_next()?;
             }
             Command::PrevTag => {
                 self.navigate_tag_prev()?;

@@ -134,6 +134,9 @@ impl PagerSession {
         cmd.env_remove("LESSCLOSE");
         cmd.env_remove("LESSSECURE");
         cmd.env_remove("LESSKEY");
+        // Disable history file so less doesn't remember patterns across test runs.
+        cmd.env("LESSHISTFILE", "-");
+        cmd.env("LESSHISTSIZE", "0");
 
         let mut session =
             expectrl::Session::spawn(cmd).unwrap_or_else(|e| panic!("failed to spawn {name}: {e}"));
