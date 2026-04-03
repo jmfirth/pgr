@@ -155,6 +155,9 @@ pub struct EnvConfig {
 
     /// `PGR_THEME`: syntax highlighting theme name.
     pub pgr_theme: Option<String>,
+
+    /// `PGR_CLIPBOARD`: clipboard backend override (auto, osc52, pbcopy, xclip, xsel, wl-copy, off).
+    pub pgr_clipboard: Option<String>,
 }
 
 impl EnvConfig {
@@ -239,6 +242,7 @@ impl EnvConfig {
             .map(|v| v.trim() == "0")
             .unwrap_or(false);
         let pgr_theme = env_nonempty("PGR_THEME");
+        let pgr_clipboard = env_nonempty("PGR_CLIPBOARD");
 
         Self {
             less_options,
@@ -281,6 +285,7 @@ impl EnvConfig {
             posixly_correct,
             pgr_syntax_disabled,
             pgr_theme,
+            pgr_clipboard,
         }
     }
 
@@ -1837,5 +1842,25 @@ mod tests {
         assert!(cfg.unsupport.is_none());
         assert!(!cfg.no_config);
         assert!(!cfg.posixly_correct);
+    }
+
+    // ── Task 330: PGR_CLIPBOARD env var ──
+
+    #[test]
+    fn test_env_config_pgr_clipboard_default_is_none() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&["PGR_CLIPBOARD"]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.pgr_clipboard.is_none());
+    }
+
+    #[test]
+    fn test_env_config_pgr_clipboard_set() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("PGR_CLIPBOARD", "osc52")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert_eq!(cfg.pgr_clipboard.as_deref(), Some("osc52"));
     }
 }

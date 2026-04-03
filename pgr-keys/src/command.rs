@@ -147,6 +147,10 @@ pub enum Command {
     PrevUrl,
     /// Open the currently highlighted URL in a browser. `o` (when URL is highlighted).
     OpenUrl,
+    /// Yank (copy) the current top-of-screen line to the clipboard. `y`.
+    YankLine,
+    /// Yank (copy) all visible lines to the clipboard. `Y`.
+    YankScreen,
 }
 
 #[cfg(test)]
@@ -337,5 +341,27 @@ mod tests {
     #[test]
     fn test_command_open_url_differs_from_noop() {
         assert_ne!(Command::OpenUrl, Command::Noop);
+    }
+
+    // ── Task 330: Clipboard yank commands ──
+
+    #[test]
+    fn test_command_yank_line_equality() {
+        assert_eq!(Command::YankLine, Command::YankLine);
+    }
+
+    #[test]
+    fn test_command_yank_screen_equality() {
+        assert_eq!(Command::YankScreen, Command::YankScreen);
+    }
+
+    #[test]
+    fn test_command_yank_line_differs_from_yank_screen() {
+        assert_ne!(Command::YankLine, Command::YankScreen);
+    }
+
+    #[test]
+    fn test_command_yank_line_differs_from_noop() {
+        assert_ne!(Command::YankLine, Command::Noop);
     }
 }

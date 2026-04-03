@@ -395,6 +395,10 @@ fn build_action_map() -> HashMap<&'static str, Command> {
     m.insert("prev-url", Command::PrevUrl);
     m.insert("open-url", Command::OpenUrl);
 
+    // Clipboard yank (pgr extension)
+    m.insert("yank-line", Command::YankLine);
+    m.insert("yank-screen", Command::YankScreen);
+
     m
 }
 

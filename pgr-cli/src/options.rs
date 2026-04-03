@@ -389,6 +389,11 @@ pub struct Options {
     #[arg(long = "theme")]
     pub theme: Option<String>,
 
+    // ── Clipboard flags ─────────────────────────────────────────────
+    /// Select clipboard backend: auto, osc52, pbcopy, xclip, xsel, wl-copy, off.
+    #[arg(long = "clipboard")]
+    pub clipboard: Option<String>,
+
     // ── Meta flags ────────────────────────────────────────────────────
     /// Print version information and exit.
     #[arg(short = 'V', long = "version")]
@@ -1730,5 +1735,25 @@ mod tests {
         // -M overrides -m to long prompt
         assert!(opts.long_prompt);
         assert_eq!(opts.prompt_style(), PromptStyle::Long);
+    }
+
+    // ── Task 330: Clipboard flag tests ───────────────────────────────
+
+    #[test]
+    fn test_options_clipboard_default_is_none() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(opts.clipboard.is_none());
+    }
+
+    #[test]
+    fn test_options_clipboard_flag_accepted() {
+        let opts = Options::parse_from(["pgr", "--clipboard", "osc52", "file.txt"]);
+        assert_eq!(opts.clipboard.as_deref(), Some("osc52"));
+    }
+
+    #[test]
+    fn test_options_clipboard_off() {
+        let opts = Options::parse_from(["pgr", "--clipboard", "off", "file.txt"]);
+        assert_eq!(opts.clipboard.as_deref(), Some("off"));
     }
 }
