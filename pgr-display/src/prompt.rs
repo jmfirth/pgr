@@ -21,15 +21,17 @@ pub const DEFAULT_SHORT_PROMPT: &str = "?e(END):?f%f:\\:.";
 /// Medium prompt template (`-m`): filename and percent, `(END)` at EOF.
 ///
 /// Matches less's default medium prompt: filename (if known), then `(END)` at
-/// EOF or byte-based percentage otherwise.
-pub const DEFAULT_MEDIUM_PROMPT: &str = "?f%f .?e(END) :?pB%pB\\%..";
+/// EOF or byte-based percentage otherwise. Appends match count when a search
+/// with match info is active.
+pub const DEFAULT_MEDIUM_PROMPT: &str = "?f%f .?e(END) :?pB%pB\\%..?r (%r).";
 
 /// Long prompt template (`-M`): filename, line numbers, byte offset, percent.
 ///
 /// Matches less's default long prompt: filename, multi-file indicator, line
-/// range, byte offset and size, then `(END)` at EOF or percentage.
+/// range, byte offset and size, then `(END)` at EOF or percentage. Appends
+/// match count when a search with match info is active.
 pub const DEFAULT_LONG_PROMPT: &str =
-    "?f%f .?n?m(file %i of %m) ..?ltlines %lt-%lb?L/%L. :byte %bB?s/%s. .?e(END) :?pB%pB\\%..";
+    "?f%f .?n?m(file %i of %m) ..?ltlines %lt-%lb?L/%L. :byte %bB?s/%s. .?e(END) :?pB%pB\\%..?r (%r).";
 
 /// Prompt style, matching less's `-m` / `-M` flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,11 @@ pub struct PromptContext<'a> {
     pub current_tag: Option<&'a str>,
     /// Whether we are waiting for data from a slow pipe (for `%W`).
     pub waiting_for_data: bool,
+    /// Search match info: `(current_match_1based, total_matches)`.
+    ///
+    /// Present when a search is active and match counting has been performed.
+    /// Used by `%r` escape ("match N of M") and `?r` conditional.
+    pub match_info: Option<(usize, usize)>,
 }
 
 /// Render the prompt string for the given style and context.
@@ -278,6 +285,7 @@ fn evaluate_condition(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>) 
         'C' => ctx.horizontal_shift > 0,
         'T' => ctx.current_tag.is_some(),
         'W' => ctx.waiting_for_data,
+        'r' => ctx.match_info.is_some(),
         _ => false,
     }
 }
@@ -528,6 +536,11 @@ fn expand_escape(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>, out: 
                 out.push('W');
             }
         }
+        'r' => {
+            if let Some((current, total)) = ctx.match_info {
+                let _ = write!(out, "match {current} of {total}");
+            }
+        }
         't' | 'x' => {
             // Stubs: tab stops and next-file are deferred to later phases
         }
@@ -662,6 +675,7 @@ mod tests {
             horizontal_shift: 0,
             current_tag: None,
             waiting_for_data: false,
+            match_info: None,
         }
     }
 
@@ -693,6 +707,7 @@ mod tests {
             horizontal_shift: 0,
             current_tag: None,
             waiting_for_data: false,
+            match_info: None,
         }
     }
 
@@ -731,6 +746,7 @@ mod tests {
             horizontal_shift: 0,
             current_tag: None,
             waiting_for_data: false,
+            match_info: None,
         }
     }
 
@@ -1494,5 +1510,63 @@ mod tests {
             !output.contains("\u{516d}"),
             "should not contain rightmost CJK char: {output}"
         );
+    }
+
+    // ===== %r escape and ?r condition tests (Task 320) =====
+
+    #[test]
+    fn test_eval_prompt_percent_r_with_match_info_shows_match_n_of_m() {
+        let mut ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
+        ctx.match_info = Some((3, 47));
+        assert_eq!(eval_prompt("%r", &ctx), "match 3 of 47");
+    }
+
+    #[test]
+    fn test_eval_prompt_percent_r_without_match_info_shows_nothing() {
+        let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%r", &ctx), "");
+    }
+
+    #[test]
+    fn test_eval_prompt_condition_r_true_when_match_info_present() {
+        let mut ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
+        ctx.match_info = Some((1, 10));
+        assert_eq!(eval_prompt("?rYES:NO.", &ctx), "YES");
+    }
+
+    #[test]
+    fn test_eval_prompt_condition_r_false_when_match_info_absent() {
+        let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?rYES:NO.", &ctx), "NO");
+    }
+
+    #[test]
+    fn test_medium_prompt_shows_match_info_when_available() {
+        let mut ctx = file_ctx("test.txt", false, 1, 24, Some(100), 2100, 5000);
+        ctx.match_info = Some((3, 47));
+        let result = render_prompt(&PromptStyle::Medium, &ctx);
+        assert_eq!(result, "test.txt 42% (match 3 of 47)");
+    }
+
+    #[test]
+    fn test_medium_prompt_omits_match_info_when_absent() {
+        let ctx = file_ctx("test.txt", false, 1, 24, Some(100), 2100, 5000);
+        let result = render_prompt(&PromptStyle::Medium, &ctx);
+        assert_eq!(result, "test.txt 42%");
+    }
+
+    #[test]
+    fn test_long_prompt_shows_match_info_when_available() {
+        let mut ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
+        ctx.match_info = Some((5, 12));
+        let result = render_prompt(&PromptStyle::Long, &ctx);
+        assert_eq!(result, "data.log lines 10-33/200 15% (match 5 of 12)");
+    }
+
+    #[test]
+    fn test_long_prompt_omits_match_info_when_absent() {
+        let ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
+        let result = render_prompt(&PromptStyle::Long, &ctx);
+        assert_eq!(result, "data.log lines 10-33/200 15%");
     }
 }

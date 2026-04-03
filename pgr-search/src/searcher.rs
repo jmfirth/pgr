@@ -232,6 +232,61 @@ impl Searcher {
     }
 }
 
+/// Count the total number of lines matching a pattern across the entire buffer.
+///
+/// Scans every indexed line and returns the count of lines where the pattern
+/// matches. This is an O(n) operation over all lines in the buffer.
+///
+/// # Errors
+///
+/// Returns an error if indexing or reading lines from the buffer fails.
+pub fn count_matches(
+    pattern: &crate::SearchPattern,
+    buffer: &dyn Buffer,
+    index: &mut LineIndex,
+) -> Result<usize> {
+    index.index_all(buffer)?;
+    let total = index.lines_indexed();
+    let mut count = 0;
+    for line in 0..total {
+        let content = index.get_line(line, buffer)?;
+        if content.is_some_and(|text| pattern.is_match(&text)) {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Find the 1-based index of the current match among all matches in the buffer.
+///
+/// Given the line number where the current match sits, scans all lines from
+/// the beginning and returns which match number (1-based) the current line is.
+/// Returns `None` if `current_line` does not match the pattern.
+///
+/// # Errors
+///
+/// Returns an error if indexing or reading lines from the buffer fails.
+pub fn find_match_index(
+    pattern: &crate::SearchPattern,
+    current_line: usize,
+    buffer: &dyn Buffer,
+    index: &mut LineIndex,
+) -> Result<Option<usize>> {
+    index.index_all(buffer)?;
+    let total = index.lines_indexed();
+    let mut match_number = 0;
+    for line in 0..total {
+        let content = index.get_line(line, buffer)?;
+        if content.is_some_and(|text| pattern.is_match(&text)) {
+            match_number += 1;
+            if line == current_line {
+                return Ok(Some(match_number));
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +567,83 @@ mod tests {
         let mut searcher = Searcher::new(pattern("x"), SearchDirection::Forward);
         searcher.set_inverted(true);
         assert!(searcher.is_inverted());
+    }
+
+    // ── count_matches tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_count_matches_multiple_hits_returns_correct_count() {
+        let (buf, mut idx) = make_buffer(&["alpha", "beta", "alpha", "gamma", "alpha"]);
+        let pat = pattern("alpha");
+        let count = count_matches(&pat, &buf, &mut idx).unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_count_matches_no_hits_returns_zero() {
+        let (buf, mut idx) = make_buffer(&["alpha", "beta", "gamma"]);
+        let pat = pattern("delta");
+        let count = count_matches(&pat, &buf, &mut idx).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_count_matches_empty_buffer_returns_zero() {
+        let buf = TestBuffer::new(b"");
+        let mut idx = LineIndex::new(0);
+        let pat = pattern("anything");
+        let count = count_matches(&pat, &buf, &mut idx).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_count_matches_all_lines_match_returns_total() {
+        let (buf, mut idx) = make_buffer(&["match1", "match2", "match3"]);
+        let pat = pattern("match");
+        let count = count_matches(&pat, &buf, &mut idx).unwrap();
+        assert_eq!(count, 3);
+    }
+
+    // ── find_match_index tests ───────────────────────────────────────
+
+    #[test]
+    fn test_find_match_index_first_match_returns_one() {
+        let (buf, mut idx) = make_buffer(&["match", "other", "match", "other", "match"]);
+        let pat = pattern("match");
+        let index = find_match_index(&pat, 0, &buf, &mut idx).unwrap();
+        assert_eq!(index, Some(1));
+    }
+
+    #[test]
+    fn test_find_match_index_second_match_returns_two() {
+        let (buf, mut idx) = make_buffer(&["match", "other", "match", "other", "match"]);
+        let pat = pattern("match");
+        let index = find_match_index(&pat, 2, &buf, &mut idx).unwrap();
+        assert_eq!(index, Some(2));
+    }
+
+    #[test]
+    fn test_find_match_index_last_match_returns_total() {
+        let (buf, mut idx) = make_buffer(&["match", "other", "match", "other", "match"]);
+        let pat = pattern("match");
+        let index = find_match_index(&pat, 4, &buf, &mut idx).unwrap();
+        assert_eq!(index, Some(3));
+    }
+
+    #[test]
+    fn test_find_match_index_non_matching_line_returns_none() {
+        let (buf, mut idx) = make_buffer(&["match", "other", "match"]);
+        let pat = pattern("match");
+        let index = find_match_index(&pat, 1, &buf, &mut idx).unwrap();
+        assert_eq!(index, None);
+    }
+
+    #[test]
+    fn test_find_match_index_empty_buffer_returns_none() {
+        let buf = TestBuffer::new(b"");
+        let mut idx = LineIndex::new(0);
+        let pat = pattern("anything");
+        let index = find_match_index(&pat, 0, &buf, &mut idx).unwrap();
+        assert_eq!(index, None);
     }
 }

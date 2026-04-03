@@ -16,8 +16,8 @@ use pgr_display::{
     ScreenLine, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
-    CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
-    SearchPattern, Searcher, WrapMode,
+    count_matches, find_match_index, CaseMode, FilterState, FilteredLines, HighlightState,
+    SearchDirection, SearchModifiers, SearchPattern, Searcher, WrapMode,
 };
 
 use pgr_input::{FileWatcher, FollowEvent};
@@ -74,6 +74,21 @@ impl Buffer for HelpBuffer {
     fn refresh(&mut self) -> pgr_core::Result<usize> {
         Ok(self.data.len())
     }
+}
+
+/// Cached match count info for the current search pattern.
+///
+/// Invalidated when the search pattern changes. Avoids re-scanning the
+/// entire buffer on every repaint when the pattern hasn't changed.
+#[derive(Debug, Clone)]
+struct MatchCountCache {
+    /// The pattern string this cache was computed for.
+    pattern: String,
+    /// Total number of matching lines in the buffer.
+    total_matches: usize,
+    /// 1-based index of the current match, or `None` if the current line
+    /// is not on a match.
+    current_match: Option<usize>,
 }
 
 /// The reason the pager exited.
@@ -178,6 +193,8 @@ pub struct Pager<R: Read, W: Write> {
     search_prompt_direction: SearchDirection,
     /// The modifiers from the last search, used for repeat-search commands.
     last_modifiers: SearchModifiers,
+    /// Cached match count info, invalidated on pattern change.
+    match_count_cache: Option<MatchCountCache>,
     /// Filter state for the `&` command (show only matching/non-matching lines).
     filter: FilterState,
     /// Pre-computed mapping from filtered line indices to actual buffer lines.
@@ -280,6 +297,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             search_history: History::new(),
             search_prompt_direction: SearchDirection::Forward,
             last_modifiers: SearchModifiers::new(),
+            match_count_cache: None,
             filter: FilterState::new(),
             filtered_lines: None,
             editing_filter: false,
@@ -1796,6 +1814,9 @@ impl<R: Read, W: Write> Pager<R, W> {
         let result = searcher.search_nth(start, n, &*self.buffer, &mut self.index)?;
 
         if let Some(line) = result {
+            // Update match count cache for prompt display.
+            self.update_match_count_cache(searcher.pattern(), line)?;
+
             // If keep_position is set, update highlights but don't scroll.
             if self.last_modifiers.keep_position {
                 self.repaint()?;
@@ -1810,6 +1831,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Ok(true)
         } else {
+            self.match_count_cache = None;
             self.status_message = Some("Pattern not found".to_string());
             self.repaint()?;
             Ok(false)
@@ -1848,12 +1870,55 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         let result = searcher.search_nth(start, 1, &*self.buffer, &mut self.index)?;
         if let Some(line) = result {
+            // Show live match count for files under 100k lines.
+            let total_lines = self.index.lines_indexed();
+            if total_lines <= 100_000 {
+                self.update_match_count_cache(searcher.pattern(), line)?;
+            } else {
+                self.match_count_cache = None;
+            }
             self.screen.set_top_line(line);
             self.repaint()?;
-        } else if let Some(saved) = self.incsearch_saved_top {
-            self.screen.set_top_line(saved);
-            self.repaint()?;
+        } else {
+            self.match_count_cache = None;
+            if let Some(saved) = self.incsearch_saved_top {
+                self.screen.set_top_line(saved);
+                self.repaint()?;
+            }
         }
+        Ok(())
+    }
+
+    /// Update the match count cache for the given pattern and current match line.
+    ///
+    /// Reuses the cached total if the pattern string hasn't changed (avoids
+    /// re-scanning the buffer). Always recomputes the current match index
+    /// since the viewport position may have changed.
+    fn update_match_count_cache(
+        &mut self,
+        pattern: &SearchPattern,
+        match_line: usize,
+    ) -> Result<()> {
+        let pat_str = pattern.pattern().to_string();
+
+        let total = if let Some(ref cache) = self.match_count_cache {
+            if cache.pattern == pat_str {
+                cache.total_matches
+            } else {
+                count_matches(pattern, &*self.buffer, &mut self.index)?
+            }
+        } else {
+            count_matches(pattern, &*self.buffer, &mut self.index)?
+        };
+
+        let current = find_match_index(pattern, match_line, &*self.buffer, &mut self.index)?;
+
+        self.match_count_cache = Some(MatchCountCache {
+            pattern: pat_str,
+            total_matches: total,
+            current_match: current,
+        });
+
         Ok(())
     }
 
@@ -2911,6 +2976,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.screen.goto_line(top_line, usize::MAX);
             self.screen.set_horizontal_offset(h_offset);
         }
+        // Invalidate match count cache when switching files since the buffer changed.
+        self.match_count_cache = None;
     }
 
     /// Load the current file's display name and viewport into the pager state.
@@ -3364,6 +3431,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             horizontal_shift: self.screen.horizontal_offset(),
             current_tag: None,
             waiting_for_data: false,
+            match_info: self
+                .match_count_cache
+                .as_ref()
+                .and_then(|cache| cache.current_match.map(|cur| (cur, cache.total_matches))),
         }
     }
 

@@ -15,4 +15,4 @@ pub use filtered_index::FilteredLines;
 pub use highlight::{find_matches_in_line, HighlightState};
 pub use modifiers::SearchModifiers;
 pub use pattern::{CaseMode, MatchRange, SearchPattern};
-pub use searcher::{SearchDirection, Searcher, WrapMode};
+pub use searcher::{count_matches, find_match_index, SearchDirection, Searcher, WrapMode};
