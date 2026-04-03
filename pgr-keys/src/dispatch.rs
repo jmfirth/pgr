@@ -267,6 +267,10 @@ pub struct Pager<R: Read, W: Write> {
     clipboard: Box<dyn crate::clipboard::Clipboard>,
     /// Whether clipboard is disabled (--clipboard=off).
     clipboard_disabled: bool,
+    /// Cached git gutter state for the current file.
+    gutter_state: Option<crate::git_gutter::GutterState>,
+    /// Whether git gutter display is enabled (can be toggled with ESC-G).
+    git_gutter_enabled: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -353,6 +357,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             current_url_index: None,
             clipboard: crate::clipboard::detect_clipboard(),
             clipboard_disabled: false,
+            gutter_state: None,
+            git_gutter_enabled: false,
         }
     }
 
@@ -1048,6 +1054,9 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.buffer.refresh()?;
                 let new_len = self.buffer.len() as u64;
                 self.index = LineIndex::new(new_len);
+                if self.git_gutter_enabled {
+                    self.load_gutter_state();
+                }
                 self.repaint()?;
             }
             Command::FileLineForward => {
@@ -1215,6 +1224,20 @@ impl<R: Read, W: Write> Pager<R, W> {
                 #[cfg(not(feature = "syntax"))]
                 {
                     self.status_message = Some("syntax highlighting not compiled in".to_string());
+                    self.repaint()?;
+                }
+            }
+            Command::ToggleGitGutter => {
+                if self.secure_mode {
+                    self.status_message = Some("git gutter disabled in secure mode".to_string());
+                    self.repaint()?;
+                } else {
+                    self.git_gutter_enabled = !self.git_gutter_enabled;
+                    if self.git_gutter_enabled && self.gutter_state.is_none() {
+                        self.load_gutter_state();
+                    }
+                    let state = if self.git_gutter_enabled { "on" } else { "off" };
+                    self.status_message = Some(format!("Git gutter {state}"));
                     self.repaint()?;
                 }
             }
@@ -3356,6 +3379,10 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.match_count_cache = None;
         // Reset content mode so it is re-detected on next first paint.
         self.content_mode = ContentMode::Plain;
+        // Reload git gutter state for the new file.
+        if self.git_gutter_enabled {
+            self.load_gutter_state();
+        }
     }
 
     /// Load the current file's display name and viewport into the pager state.
@@ -3428,6 +3455,25 @@ impl<R: Read, W: Write> Pager<R, W> {
                 };
 
                 let line_highlights = self.build_line_highlights();
+                let gutter_marks = if self.git_gutter_enabled {
+                    if let (Some(ref gutter), Some(ref fl_ref)) =
+                        (&self.gutter_state, &self.filtered_lines)
+                    {
+                        (start..end)
+                            .map(|filtered_idx| {
+                                fl_ref.actual_line(filtered_idx).and_then(|actual| {
+                                    gutter
+                                        .mark_for_line(actual + 1)
+                                        .map(|m| (m.symbol(), m.ansi_color()))
+                                })
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
                 let paint_opts = PaintOptions {
                     show_line_numbers: self.runtime_options.line_numbers,
                     total_lines: visible_total,
@@ -3439,6 +3485,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     header_line_contents,
                     wordwrap: self.runtime_options.wordwrap,
                     line_highlights,
+                    gutter_marks,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -3541,6 +3588,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         };
 
         let line_highlights = self.build_line_highlights();
+        let gutter_marks = self.build_gutter_marks(start, lines.len());
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
@@ -3552,6 +3600,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             header_line_contents,
             wordwrap: self.runtime_options.wordwrap,
             line_highlights,
+            gutter_marks,
         };
         // When syntax highlighting injected SGR codes, ensure the render
         // pipeline uses at least AnsiOnly mode so those codes are preserved.
@@ -3651,6 +3700,26 @@ impl<R: Read, W: Write> Pager<R, W> {
             0
         };
         let line_highlights = self.build_line_highlights();
+        let gutter_marks = if self.git_gutter_enabled {
+            if let Some(ref gutter) = self.gutter_state {
+                padded
+                    .iter()
+                    .map(|sl| {
+                        if sl.line_number > 0 {
+                            gutter
+                                .mark_for_line(sl.line_number)
+                                .map(|m| (m.symbol(), m.ansi_color()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
@@ -3662,6 +3731,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             header_line_contents,
             wordwrap: self.runtime_options.wordwrap,
             line_highlights,
+            gutter_marks,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -4530,6 +4600,56 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         self.repaint()?;
         Ok(())
+    }
+
+    // ── Git gutter ──────────────────────────────────────────────────
+
+    /// Enable or disable git gutter display.
+    ///
+    /// When enabling, immediately loads the gutter state for the current file.
+    pub fn set_git_gutter_enabled(&mut self, enabled: bool) {
+        self.git_gutter_enabled = enabled;
+        if enabled {
+            self.load_gutter_state();
+        }
+    }
+
+    /// Load git gutter state from the current file.
+    ///
+    /// Runs `git diff` against the current filename (if any). In secure
+    /// mode, this is a no-op since spawning external processes is forbidden.
+    fn load_gutter_state(&mut self) {
+        if self.secure_mode {
+            self.gutter_state = None;
+            return;
+        }
+        if let Some(ref name) = self.filename {
+            let path = std::path::Path::new(name);
+            self.gutter_state = crate::git_gutter::GutterState::from_file(path);
+        } else {
+            self.gutter_state = None;
+        }
+    }
+
+    /// Build gutter marks for the currently visible lines.
+    ///
+    /// Returns a vec parallel to the visible lines slice, with each entry
+    /// containing the gutter symbol and color for that line (or `None`).
+    fn build_gutter_marks(&self, start: usize, count: usize) -> Vec<Option<(char, &'static str)>> {
+        if !self.git_gutter_enabled {
+            return Vec::new();
+        }
+        let Some(ref gutter) = self.gutter_state else {
+            return Vec::new();
+        };
+        (0..count)
+            .map(|i| {
+                let line_number = start + i + 1; // 1-based
+                gutter
+                    .mark_for_line(line_number)
+                    .map(|m| (m.symbol(), m.ansi_color()))
+            })
+            .collect()
     }
 }
 

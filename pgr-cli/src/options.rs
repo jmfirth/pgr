@@ -389,6 +389,15 @@ pub struct Options {
     #[arg(long = "theme")]
     pub theme: Option<String>,
 
+    // ── Git gutter flags ──────────────────────────────────────────────
+    /// Show git gutter marks (+/-/~) in the left margin for uncommitted changes.
+    #[arg(long = "git-gutter", overrides_with = "no_git_gutter")]
+    pub git_gutter: bool,
+
+    /// Disable git gutter display.
+    #[arg(long = "no-git-gutter")]
+    pub no_git_gutter: bool,
+
     // ── Clipboard flags ─────────────────────────────────────────────
     /// Select clipboard backend: auto, osc52, pbcopy, xclip, xsel, wl-copy, off.
     #[arg(long = "clipboard")]
@@ -1755,5 +1764,34 @@ mod tests {
     fn test_options_clipboard_off() {
         let opts = Options::parse_from(["pgr", "--clipboard", "off", "file.txt"]);
         assert_eq!(opts.clipboard.as_deref(), Some("off"));
+    }
+
+    // ── Task 356: Git gutter flag tests ──────────────────────────────
+
+    #[test]
+    fn test_options_git_gutter_default_is_false() {
+        let opts = Options::parse_from(["pgr", "file.txt"]);
+        assert!(!opts.git_gutter);
+        assert!(!opts.no_git_gutter);
+    }
+
+    #[test]
+    fn test_options_git_gutter_flag_enables() {
+        let opts = Options::parse_from(["pgr", "--git-gutter", "file.txt"]);
+        assert!(opts.git_gutter);
+    }
+
+    #[test]
+    fn test_options_no_git_gutter_flag_disables() {
+        let opts = Options::parse_from(["pgr", "--no-git-gutter", "file.txt"]);
+        assert!(opts.no_git_gutter);
+    }
+
+    #[test]
+    fn test_options_git_gutter_overrides_with_no_git_gutter() {
+        let opts = Options::parse_from(["pgr", "--git-gutter", "--no-git-gutter", "file.txt"]);
+        // --no-git-gutter comes last and sets its own flag; --git-gutter is overridden
+        assert!(!opts.git_gutter);
+        assert!(opts.no_git_gutter);
     }
 }
