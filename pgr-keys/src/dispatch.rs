@@ -5171,19 +5171,39 @@ impl<R: Read, W: Write> Pager<R, W> {
     ///
     /// Returns `true` when the `syntax` feature is compiled in, highlighting
     /// is enabled at runtime, a highlighter is loaded, and the current file
-    /// has a recognized syntax.
+    /// has a recognized syntax (either by filename extension or forced by
+    /// content mode for pipe input).
     #[cfg(feature = "syntax")]
     fn is_syntax_active(&self) -> bool {
         if !self.syntax_enabled {
             return false;
         }
-        let Some(ref highlighter) = self.highlighter else {
+        if self.highlighter.is_none() {
             return false;
-        };
-        let Some(filename) = self.filename.as_deref() else {
-            return false;
-        };
-        highlighter.detect_syntax(filename).is_some()
+        }
+        // Filename-extension-based detection.
+        if let Some(filename) = self.filename.as_deref() {
+            if let Some(ref highlighter) = self.highlighter {
+                if highlighter.detect_syntax(filename).is_some() {
+                    return true;
+                }
+            }
+        }
+        // Content-mode-forced detection (e.g. JSON piped without a filename).
+        self.force_syntax_for_content_mode().is_some()
+    }
+
+    /// Return the syntax name forced by the current content mode, if any.
+    ///
+    /// Used when pipe input has no filename/extension: if the content was
+    /// detected as a known type (e.g. JSON), we force the matching syntax so
+    /// that highlighting still activates.
+    #[cfg(feature = "syntax")]
+    fn force_syntax_for_content_mode(&self) -> Option<&'static str> {
+        match self.content_mode {
+            ContentMode::Json => Some("JSON"),
+            _ => None,
+        }
     }
 
     /// Set the syntax highlighter for syntax-highlighted rendering.
@@ -5314,10 +5334,18 @@ impl<R: Read, W: Write> Pager<R, W> {
         let Some(ref highlighter) = self.highlighter else {
             return lines.to_vec();
         };
-        let Some(filename) = self.filename.as_deref() else {
-            return lines.to_vec();
+        // Resolve syntax: prefer filename-extension detection, then fall back
+        // to content-mode-forced detection for pipe input with no extension.
+        let syntax = if let Some(filename) = self.filename.as_deref() {
+            highlighter.detect_syntax(filename).or_else(|| {
+                self.force_syntax_for_content_mode()
+                    .and_then(|name| highlighter.syntax_set().find_syntax_by_name(name))
+            })
+        } else {
+            self.force_syntax_for_content_mode()
+                .and_then(|name| highlighter.syntax_set().find_syntax_by_name(name))
         };
-        let Some(syntax) = highlighter.detect_syntax(filename) else {
+        let Some(syntax) = syntax else {
             return lines.to_vec();
         };
 
@@ -8652,5 +8680,79 @@ mod tests {
         // Both patterns should be active.
         assert!(pager.last_pattern().is_some());
         assert_eq!(pager.highlight_state().extra_pattern_count(), 1);
+    }
+
+    // --- Task 363: JSON content mode syntax forcing ---
+
+    #[cfg(feature = "syntax")]
+    fn make_pager_for_syntax_tests() -> Pager<Cursor<Vec<u8>>, Vec<u8>> {
+        let content = b"{ \"key\": \"value\" }\n";
+        let reader = KeyReader::new(Cursor::new(b"q".to_vec()));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(content));
+        let buf_len = content.len() as u64;
+        let index = LineIndex::new(buf_len);
+        Pager::new(reader, writer, buffer, index, None)
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_force_syntax_for_content_mode_json_returns_json() {
+        let mut pager = make_pager_for_syntax_tests();
+        pager.content_mode = ContentMode::Json;
+        assert_eq!(pager.force_syntax_for_content_mode(), Some("JSON"));
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_force_syntax_for_content_mode_plain_returns_none() {
+        let mut pager = make_pager_for_syntax_tests();
+        pager.content_mode = ContentMode::Plain;
+        assert_eq!(pager.force_syntax_for_content_mode(), None);
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_force_syntax_for_content_mode_diff_returns_none() {
+        let mut pager = make_pager_for_syntax_tests();
+        pager.content_mode = ContentMode::Diff;
+        assert_eq!(pager.force_syntax_for_content_mode(), None);
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_is_syntax_active_json_pipe_no_filename_returns_true() {
+        // JSON content mode with no filename (pipe input) should activate syntax.
+        let mut pager = make_pager_for_syntax_tests();
+        pager.content_mode = ContentMode::Json;
+        pager.syntax_enabled = true;
+        pager.highlighter = Some(pgr_display::syntax::highlighting::Highlighter::new());
+        // No filename set — simulates pipe input.
+        assert!(pager.filename.is_none());
+        assert!(pager.is_syntax_active());
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_is_syntax_active_json_file_with_extension_returns_true() {
+        // JSON file with .json extension: normal filename-based detection.
+        let mut pager = make_pager_for_syntax_tests();
+        pager.content_mode = ContentMode::Json;
+        pager.syntax_enabled = true;
+        pager.highlighter = Some(pgr_display::syntax::highlighting::Highlighter::new());
+        pager.filename = Some("data.json".to_string());
+        assert!(pager.is_syntax_active());
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_is_syntax_active_plain_content_no_filename_returns_false() {
+        // Non-JSON content mode with no filename: no forced syntax, no active highlighting.
+        let mut pager = make_pager_for_syntax_tests();
+        pager.content_mode = ContentMode::Plain;
+        pager.syntax_enabled = true;
+        pager.highlighter = Some(pgr_display::syntax::highlighting::Highlighter::new());
+        assert!(pager.filename.is_none());
+        assert!(!pager.is_syntax_active());
     }
 }
