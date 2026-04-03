@@ -40,6 +40,24 @@ use crate::shell;
 use crate::tags::TagState;
 use crate::Command;
 
+/// Approximate the current calendar year from `SystemTime`.
+///
+/// Uses the Julian calendar approximation (365.25 days/year) to convert
+/// UNIX seconds to a year. Accurate to within a year for dates in the
+/// range 1970–2500.  Returns 2000 as a safe fallback if the system clock
+/// is unavailable.
+fn current_year_approx() -> u32 {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // 1970 + floor(secs / 31_557_600) where 31_557_600 ≈ 365.25 * 24 * 3600
+    #[allow(clippy::cast_possible_truncation)] // year fits in u32 for centuries to come
+    let year = 1970u32 + (secs / 31_557_600) as u32;
+    year
+}
+
 /// A read-only buffer backed by a static byte slice, used for the help screen.
 struct HelpBuffer {
     data: Vec<u8>,
@@ -3682,9 +3700,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             lines = self.colorize_diff_lines(&lines);
         }
 
+        let blame_colored = self.content_mode == ContentMode::GitBlame;
+        if blame_colored {
+            lines = self.colorize_blame_lines(&lines);
+        }
+
         #[cfg(feature = "syntax")]
-        let syntax_active = if diff_colored {
-            false // Diff mode uses its own per-hunk syntax highlighting
+        let syntax_active = if diff_colored || blame_colored {
+            false // Diff and blame modes use their own syntax highlighting
         } else {
             self.is_syntax_active()
         };
@@ -3767,7 +3790,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         // When syntax highlighting or diff coloring injected SGR codes,
         // ensure the render pipeline uses at least AnsiOnly mode so those
         // codes are preserved.
-        let effective_config = if (syntax_active || diff_colored)
+        let effective_config = if (syntax_active || diff_colored || blame_colored)
             && self.render_config.raw_mode == RawControlMode::Off
         {
             let mut cfg = self.render_config.clone();
@@ -4806,6 +4829,43 @@ impl<R: Read, W: Write> Pager<R, W> {
         let top = self.screen.top_line();
         let info = pgr_core::compute_diff_prompt_info(files, top)?;
         info.current_file
+    }
+
+    /// Apply git-blame coloring to visible lines when in git blame mode.
+    ///
+    /// Parses each line's hash/author/date gutter and colorizes it by commit
+    /// recency. When the `syntax` feature is active and the current file has a
+    /// recognized syntax extension, the code column is also syntax-highlighted.
+    #[allow(clippy::unused_self)] // self is used only when the `syntax` feature is enabled
+    fn colorize_blame_lines(&self, lines: &[Option<String>]) -> Vec<Option<String>> {
+        let current_year = current_year_approx();
+
+        #[cfg(feature = "syntax")]
+        let filename = self.filename.as_deref();
+
+        lines
+            .iter()
+            .map(|opt| {
+                opt.as_ref().map(|text| {
+                    #[cfg(feature = "syntax")]
+                    {
+                        if self.syntax_enabled {
+                            if let Some(ref highlighter) = self.highlighter {
+                                if let Some(fname) = filename {
+                                    return pgr_display::colorize_blame_line_syntax(
+                                        text,
+                                        current_year,
+                                        highlighter,
+                                        fname,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    pgr_display::colorize_blame_line(text, current_year)
+                })
+            })
+            .collect()
     }
 
     /// Apply syntax highlighting to a set of lines if highlighting is active.

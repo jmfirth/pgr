@@ -1,6 +1,7 @@
 #![warn(clippy::pedantic)]
 //! Buffer management, line indexing, marks, and filtering.
 
+pub mod blame;
 pub mod buffer;
 pub mod content_mode;
 pub mod diff;
@@ -10,6 +11,7 @@ pub mod line_index;
 pub mod marks;
 pub mod word_diff;
 
+pub use blame::{parse_blame_line, year_from_date, BlameLine};
 pub use buffer::Buffer;
 pub use content_mode::{detect_content_mode, ContentMode};
 pub use diff::{
