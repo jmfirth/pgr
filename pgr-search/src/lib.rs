@@ -12,7 +12,10 @@ pub mod searcher;
 pub use error::{Result, SearchError};
 pub use filter::FilterState;
 pub use filtered_index::FilteredLines;
-pub use highlight::{find_matches_in_line, HighlightState};
+pub use highlight::{
+    find_matches_in_line, ColoredHighlight, HighlightState, HIGHLIGHT_COLORS,
+    MAX_HIGHLIGHT_PATTERNS,
+};
 pub use modifiers::SearchModifiers;
 pub use pattern::{CaseMode, MatchRange, SearchPattern};
 pub use searcher::{count_matches, find_match_index, SearchDirection, Searcher, WrapMode};

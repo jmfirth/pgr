@@ -135,6 +135,12 @@ pub enum Command {
     HyperlinkOpen,
     /// Toggle syntax highlighting on/off. `ESC-S`.
     ToggleSyntax,
+    /// Add an extra highlight pattern with a distinct color. `&+`.
+    AddHighlight,
+    /// Remove an extra highlight pattern by name. `&-`.
+    RemoveHighlight,
+    /// List all active highlight patterns. `&l`.
+    ListHighlights,
 }
 
 #[cfg(test)]
@@ -271,5 +277,32 @@ mod tests {
     #[test]
     fn test_command_hyperlink_next_differs_from_noop() {
         assert_ne!(Command::HyperlinkNext, Command::Noop);
+    }
+
+    // ── Task 321: Multi-pattern highlighting commands ──
+
+    #[test]
+    fn test_command_add_highlight_equality() {
+        assert_eq!(Command::AddHighlight, Command::AddHighlight);
+    }
+
+    #[test]
+    fn test_command_remove_highlight_equality() {
+        assert_eq!(Command::RemoveHighlight, Command::RemoveHighlight);
+    }
+
+    #[test]
+    fn test_command_list_highlights_equality() {
+        assert_eq!(Command::ListHighlights, Command::ListHighlights);
+    }
+
+    #[test]
+    fn test_command_add_highlight_differs_from_remove() {
+        assert_ne!(Command::AddHighlight, Command::RemoveHighlight);
+    }
+
+    #[test]
+    fn test_command_list_highlights_differs_from_filter() {
+        assert_ne!(Command::ListHighlights, Command::Filter);
     }
 }

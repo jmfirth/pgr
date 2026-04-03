@@ -872,11 +872,96 @@ pub fn render_line_marked(
     }
 }
 
+/// A highlight range with an associated SGR color sequence.
+///
+/// Used by [`render_line_multi_highlighted`] to apply per-pattern colors
+/// to different match ranges on the same line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColoredRange<'a> {
+    /// Start byte offset (inclusive).
+    pub start: usize,
+    /// End byte offset (exclusive).
+    pub end: usize,
+    /// SGR escape sequence to activate this highlight color.
+    pub sgr: &'a str,
+}
+
+/// Render a single line with multiple colored highlight ranges.
+///
+/// Like [`render_line_highlighted`] but each range can have a different
+/// SGR color. `colored_ranges` must be sorted by `start` and non-overlapping.
+///
+/// Returns `(rendered_string, display_width)`.
+#[must_use]
+pub fn render_line_multi_highlighted(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    config: &RenderConfig,
+    colored_ranges: &[ColoredRange<'_>],
+) -> (String, usize) {
+    if colored_ranges.is_empty() {
+        return render_line(line, horizontal_offset, max_width, config);
+    }
+
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
+
+    // Pre-process overstrikes
+    let processed;
+    let effective_line = if config.overstrike_mode == OverstrikeMode::Interpret {
+        processed = ansi::process_overstrikes(line, OverstrikeMode::Interpret);
+        &processed
+    } else if config.overstrike_mode == OverstrikeMode::Show {
+        processed = ansi::process_overstrikes(line, OverstrikeMode::Show);
+        &processed
+    } else {
+        line
+    };
+
+    let hl_off = STANDOUT_OFF;
+    let bin_fmt = config.bin_fmt.as_ref();
+
+    match config.raw_mode {
+        RawControlMode::Off => render_off_multi_highlighted(
+            effective_line,
+            horizontal_offset,
+            max_width,
+            &config.tab_stops,
+            colored_ranges,
+            hl_off,
+            bin_fmt,
+        ),
+        RawControlMode::AnsiOnly => render_ansi_only_multi_highlighted(
+            effective_line,
+            horizontal_offset,
+            max_width,
+            &config.tab_stops,
+            colored_ranges,
+            hl_off,
+            bin_fmt,
+        ),
+        RawControlMode::All => render_all(effective_line, horizontal_offset, max_width),
+    }
+}
+
 /// Check if a byte offset is inside any of the highlight ranges.
 fn is_highlighted(byte_offset: usize, highlights: &[(usize, usize)]) -> bool {
     highlights
         .iter()
         .any(|&(start, end)| byte_offset >= start && byte_offset < end)
+}
+
+/// Find the SGR for a byte offset in sorted, non-overlapping colored ranges.
+fn find_colored_highlight<'a>(
+    byte_offset: usize,
+    colored_ranges: &[ColoredRange<'a>],
+) -> Option<&'a str> {
+    colored_ranges
+        .iter()
+        .find(|r| byte_offset >= r.start && byte_offset < r.end)
+        .map(|r| r.sgr)
 }
 
 /// Render with ANSI stripping and search highlighting.
@@ -1043,6 +1128,173 @@ fn render_chars_highlighted(
     }
 
     if in_standout {
+        output.push_str(hl_off);
+    }
+
+    (output, visible_width)
+}
+
+/// Render with ANSI stripping and multi-colored search highlighting.
+#[allow(clippy::too_many_arguments)] // Internal fn; 7th arg is bin_fmt for LESSBINFMT support
+fn render_off_multi_highlighted(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    tab_stops: &TabStops,
+    colored_ranges: &[ColoredRange<'_>],
+    hl_off: &str,
+    bin_fmt: Option<&BinFmt>,
+) -> (String, usize) {
+    render_chars_multi_highlighted(
+        line,
+        horizontal_offset,
+        max_width,
+        tab_stops,
+        colored_ranges,
+        hl_off,
+        bin_fmt,
+    )
+}
+
+/// Render with ANSI passthrough and multi-colored search highlighting.
+#[allow(clippy::too_many_arguments)] // Internal fn; 7th arg is bin_fmt for LESSBINFMT support
+fn render_ansi_only_multi_highlighted(
+    line: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    tab_stops: &TabStops,
+    colored_ranges: &[ColoredRange<'_>],
+    hl_off: &str,
+    bin_fmt: Option<&BinFmt>,
+) -> (String, usize) {
+    let segments = ansi::parse_ansi(line);
+    let mut output = String::with_capacity(line.len());
+    let mut col: usize = 0;
+    let mut skipped: usize = 0;
+    let mut visible_width: usize = 0;
+    let mut byte_offset: usize = 0;
+    let mut current_sgr: Option<&str> = None;
+
+    for segment in segments {
+        match segment {
+            Segment::Escape(esc) => {
+                if ansi::is_sgr_sequence(esc) && skipped >= horizontal_offset {
+                    output.push_str(esc);
+                }
+                byte_offset += esc.len();
+            }
+            Segment::Text(text) => {
+                for c in text.chars() {
+                    if visible_width >= max_width {
+                        break;
+                    }
+
+                    let char_w = expanded_width(c, col, tab_stops, bin_fmt);
+
+                    if skipped < horizontal_offset {
+                        let remaining_to_skip = horizontal_offset - skipped;
+                        if char_w <= remaining_to_skip {
+                            skipped += char_w;
+                            col += char_w;
+                            byte_offset += c.len_utf8();
+                            continue;
+                        }
+                        skipped += char_w;
+                        col += char_w;
+                        byte_offset += c.len_utf8();
+                        continue;
+                    }
+
+                    if visible_width + char_w > max_width {
+                        break;
+                    }
+
+                    let new_sgr = find_colored_highlight(byte_offset, colored_ranges);
+                    if new_sgr != current_sgr {
+                        if current_sgr.is_some() {
+                            output.push_str(hl_off);
+                        }
+                        if let Some(sgr) = new_sgr {
+                            output.push_str(sgr);
+                        }
+                        current_sgr = new_sgr;
+                    }
+
+                    let expansion = expand_char(c, col, tab_stops, bin_fmt);
+                    output.push_str(&expansion);
+                    visible_width += char_w;
+                    col += char_w;
+                    byte_offset += c.len_utf8();
+                }
+            }
+        }
+    }
+
+    if current_sgr.is_some() {
+        output.push_str(hl_off);
+    }
+
+    (output, visible_width)
+}
+
+/// Render characters with multi-colored highlight tracking.
+#[allow(clippy::too_many_arguments)] // Internal fn; 7th arg is bin_fmt for LESSBINFMT support
+fn render_chars_multi_highlighted(
+    text: &str,
+    horizontal_offset: usize,
+    max_width: usize,
+    tab_stops: &TabStops,
+    colored_ranges: &[ColoredRange<'_>],
+    hl_off: &str,
+    bin_fmt: Option<&BinFmt>,
+) -> (String, usize) {
+    let mut output = String::with_capacity(text.len());
+    let mut col: usize = 0;
+    let mut skipped: usize = 0;
+    let mut visible_width: usize = 0;
+    let mut current_sgr: Option<&str> = None;
+
+    for (byte_offset, c) in text.char_indices() {
+        if visible_width >= max_width {
+            break;
+        }
+
+        let char_w = expanded_width(c, col, tab_stops, bin_fmt);
+
+        if skipped < horizontal_offset {
+            let remaining = horizontal_offset - skipped;
+            if char_w <= remaining {
+                skipped += char_w;
+                col += char_w;
+                continue;
+            }
+            skipped += char_w;
+            col += char_w;
+            continue;
+        }
+
+        if visible_width + char_w > max_width {
+            break;
+        }
+
+        let new_sgr = find_colored_highlight(byte_offset, colored_ranges);
+        if new_sgr != current_sgr {
+            if current_sgr.is_some() {
+                output.push_str(hl_off);
+            }
+            if let Some(sgr) = new_sgr {
+                output.push_str(sgr);
+            }
+            current_sgr = new_sgr;
+        }
+
+        let expansion = expand_char(c, col, tab_stops, bin_fmt);
+        output.push_str(&expansion);
+        visible_width += char_w;
+        col += char_w;
+    }
+
+    if current_sgr.is_some() {
         output.push_str(hl_off);
     }
 
@@ -1981,5 +2233,85 @@ mod tests {
         let (_, width) = render_line(input, 0, 80, &config);
         // "orange" is 6 characters, all ASCII (width 1 each)
         assert_eq!(width, 6, "width should equal visible text width only");
+    }
+
+    // ── Multi-highlight render tests ──
+
+    #[test]
+    fn test_render_line_multi_highlighted_no_ranges_matches_render_line() {
+        let config = RenderConfig::default();
+        let line = "hello world";
+        let (plain, plain_w) = render_line(line, 0, 80, &config);
+        let (multi, multi_w) = render_line_multi_highlighted(line, 0, 80, &config, &[]);
+        assert_eq!(plain, multi);
+        assert_eq!(plain_w, multi_w);
+    }
+
+    #[test]
+    fn test_render_line_multi_highlighted_single_range_uses_its_sgr() {
+        let config = RenderConfig::default();
+        let ranges = [ColoredRange {
+            start: 6,
+            end: 11,
+            sgr: "\x1b[30;43m",
+        }];
+        let (rendered, _) = render_line_multi_highlighted("hello world", 0, 80, &config, &ranges);
+        assert_eq!(rendered, format!("hello \x1b[30;43mworld{STANDOUT_OFF}"));
+    }
+
+    #[test]
+    fn test_render_line_multi_highlighted_two_ranges_different_colors() {
+        let config = RenderConfig::default();
+        let ranges = [
+            ColoredRange {
+                start: 0,
+                end: 5,
+                sgr: "\x1b[7m",
+            },
+            ColoredRange {
+                start: 6,
+                end: 11,
+                sgr: "\x1b[30;43m",
+            },
+        ];
+        let (rendered, _) = render_line_multi_highlighted("hello world", 0, 80, &config, &ranges);
+        assert_eq!(
+            rendered,
+            format!("\x1b[7mhello{STANDOUT_OFF} \x1b[30;43mworld{STANDOUT_OFF}")
+        );
+    }
+
+    #[test]
+    fn test_render_line_multi_highlighted_clips_at_horizontal_offset() {
+        let config = RenderConfig::default();
+        let ranges = [ColoredRange {
+            start: 6,
+            end: 11,
+            sgr: "\x1b[7m",
+        }];
+        let (rendered, _) = render_line_multi_highlighted("hello world", 8, 80, &config, &ranges);
+        // Offset 8 means we start at "rld", which is still in the highlight range
+        assert_eq!(rendered, format!("\x1b[7mrld{STANDOUT_OFF}"));
+    }
+
+    #[test]
+    fn test_render_line_multi_highlighted_reset_between_adjacent_colors() {
+        let config = RenderConfig::default();
+        // Two adjacent ranges with different colors
+        let ranges = [
+            ColoredRange {
+                start: 0,
+                end: 5,
+                sgr: "\x1b[7m",
+            },
+            ColoredRange {
+                start: 5,
+                end: 10,
+                sgr: "\x1b[30;43m",
+            },
+        ];
+        let (rendered, _) = render_line_multi_highlighted("helloworld!", 0, 80, &config, &ranges);
+        // Should reset between them
+        assert!(rendered.contains(&format!("{STANDOUT_OFF}\x1b[30;43m")));
     }
 }
