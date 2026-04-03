@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use pgr_core::{detect_content_mode, Buffer, ContentMode, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    compute_line_screen_rows, eval_prompt, find_urls, line_number_width, paint_info_line,
-    paint_prompt, paint_screen_mapped, paint_screen_with_options, parse_table_layout,
-    snap_to_next_column, snap_to_prev_column, squeeze_visible_lines, wordwrap_segments,
-    ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle, RawControlMode,
-    RenderConfig, Screen, ScreenLine, SqlTableLayout, TabStops, DEFAULT_LONG_PROMPT,
-    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    compute_line_screen_rows, eval_prompt, find_urls, line_number_width, linkify_compiler_output,
+    paint_info_line, paint_prompt, paint_screen_mapped, paint_screen_with_options,
+    parse_table_layout, snap_to_next_column, snap_to_prev_column, squeeze_visible_lines,
+    wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, ScreenLine, SqlTableLayout, TabStops,
+    DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     count_matches, find_match_index, CaseMode, FilterState, FilteredLines, HighlightState,
@@ -3951,9 +3951,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             lines = self.colorize_blame_lines(&lines);
         }
 
+        let compiler_linked = self.content_mode == ContentMode::CompilerError;
+        if compiler_linked {
+            lines = self.linkify_compiler_lines(&lines);
+        }
+
         #[cfg(feature = "syntax")]
-        let syntax_active = if diff_colored || blame_colored {
-            false // Diff and blame modes use their own syntax highlighting
+        let syntax_active = if diff_colored || blame_colored || compiler_linked {
+            false // Diff, blame, and compiler modes handle their own rendering
         } else {
             self.is_syntax_active()
         };
@@ -4037,18 +4042,19 @@ impl<R: Read, W: Write> Pager<R, W> {
             line_highlights,
             gutter_marks,
         };
-        // When syntax highlighting or diff coloring injected SGR codes,
-        // ensure the render pipeline uses at least AnsiOnly mode so those
-        // codes are preserved.
-        let effective_config = if (syntax_active || diff_colored || blame_colored)
-            && self.render_config.raw_mode == RawControlMode::Off
-        {
-            let mut cfg = self.render_config.clone();
-            cfg.raw_mode = RawControlMode::AnsiOnly;
-            cfg
-        } else {
-            self.render_config.clone()
-        };
+        // When syntax highlighting, diff coloring, or compiler links injected
+        // escape sequences, ensure the render pipeline uses at least AnsiOnly
+        // mode so those codes are preserved.
+        let effective_config =
+            if (syntax_active || diff_colored || blame_colored || compiler_linked)
+                && self.render_config.raw_mode == RawControlMode::Off
+            {
+                let mut cfg = self.render_config.clone();
+                cfg.raw_mode = RawControlMode::AnsiOnly;
+                cfg
+            } else {
+                self.render_config.clone()
+            };
 
         // When frozen column mode is active, temporarily set h_offset to 0
         // for the paint call since the line content already includes the
@@ -5294,6 +5300,21 @@ impl<R: Read, W: Write> Pager<R, W> {
                     }
                     pgr_display::colorize_blame_line(text, current_year)
                 })
+            })
+            .collect()
+    }
+
+    /// Apply OSC 8 hyperlinks to compiler error output lines.
+    ///
+    /// Each line is scanned for `file:line:col` and `file(line,col)` patterns;
+    /// matching references are wrapped in terminal hyperlinks.
+    #[allow(clippy::unused_self)] // mirrors colorize_diff_lines / colorize_blame_lines pattern; may use self for config in future
+    fn linkify_compiler_lines(&self, lines: &[Option<String>]) -> Vec<Option<String>> {
+        lines
+            .iter()
+            .map(|opt| {
+                opt.as_ref()
+                    .map(|text| linkify_compiler_output(text.as_str()))
             })
             .collect()
     }
