@@ -4227,10 +4227,6 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
-        // Apply diff coloring (and syntax highlighting if available) before
-        // building the side-by-side layout so both panels show colored code.
-        all_lines = self.colorize_diff_lines(&all_lines);
-
         let (_, cols) = self.screen.dimensions();
 
         // Build the side-by-side rendered lines.
