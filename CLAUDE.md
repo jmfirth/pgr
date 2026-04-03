@@ -68,6 +68,32 @@ Both profiles must compile and pass tests. Use `just test-profiles` to verify.
 | `just start` | Run pgr (pass-through args) |
 | `just doc` | Build and open docs |
 
+## Code Intelligence (cq MCP tools)
+
+Tree-sitter and LSP-powered code intelligence is available via `cq-mcp`. These tools are available to both the orchestrator and subagents. **Prefer these over grep/read for code navigation.**
+
+| Tool | Use when |
+|------|----------|
+| `cq_body` | Need a function/struct body — replaces read-file-find-offset |
+| `cq_outline` | Need to see all symbols in a file at a glance |
+| `cq_callers` | Before modifying a function — who calls it? |
+| `cq_callchain` | Need full call graph (depth N) — blast radius analysis |
+| `cq_refs` | Find all references to a symbol across the project |
+| `cq_dead` | After refactoring — find orphaned/unreferenced code |
+| `cq_context` | Debugging: "what function contains this line?" |
+| `cq_hover` | Quick type info and signature at a location |
+| `cq_search` | Structural search via tree-sitter queries (e.g., find all `unwrap()` calls) |
+| `cq_rename` | LSP-driven rename across the project — semantic, not text |
+| `cq_diagnostics` | Check for syntax errors and LSP warnings |
+| `cq_deps` | See crate/module dependency graph |
+
+**Workflow guidance:**
+- **Before modifying a function**: `cq_callers` or `cq_callchain` to understand impact
+- **After refactoring**: `cq_dead` to catch orphaned code
+- **Reading code**: `cq_body` for specific symbols, `cq_outline` for file overview
+- **Debugging**: `cq_context` with file:line from error messages
+- **Renaming**: `cq_rename` with `dry_run: true` first, then `apply: true`
+
 ## Conventions
 
 - Branch naming: `task/[id]-[short-name]`
