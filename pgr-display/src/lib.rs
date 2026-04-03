@@ -4,6 +4,7 @@
 pub mod ansi;
 pub mod charset;
 pub mod color;
+pub mod diff_render;
 pub mod error;
 pub mod hyperlink;
 pub mod line_numbers;
@@ -21,6 +22,9 @@ pub mod url;
 pub use ansi::{AnsiState, OverstrikeMode};
 pub use charset::{CharType, Charset};
 pub use color::{Color, ColorAutoDetect, ColorConfig, ColorSelector, ColorSpec};
+pub use diff_render::colorize_diff_line;
+#[cfg(feature = "syntax")]
+pub use diff_render::highlight_diff_hunk;
 pub use error::{DisplayError, Result};
 pub use hyperlink::{parse_osc8, strip_osc8, HyperlinkSpan};
 pub use line_numbers::{

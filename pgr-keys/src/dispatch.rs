@@ -3655,11 +3655,20 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
-        // Apply syntax highlighting before search highlights (SGR injection).
-        // When highlighting is active, the render config must be at least
-        // AnsiOnly so the injected SGR codes are preserved.
+        // Apply content-aware coloring before search highlights (SGR injection).
+        // When coloring is active, the render config must be at least AnsiOnly
+        // so the injected SGR codes are preserved.
+        let diff_colored = self.content_mode == ContentMode::Diff;
+        if diff_colored {
+            lines = self.colorize_diff_lines(&lines);
+        }
+
         #[cfg(feature = "syntax")]
-        let syntax_active = self.is_syntax_active();
+        let syntax_active = if diff_colored {
+            false // Diff mode uses its own per-hunk syntax highlighting
+        } else {
+            self.is_syntax_active()
+        };
         #[cfg(not(feature = "syntax"))]
         let syntax_active = false;
 
@@ -3736,16 +3745,18 @@ impl<R: Read, W: Write> Pager<R, W> {
             line_highlights,
             gutter_marks,
         };
-        // When syntax highlighting injected SGR codes, ensure the render
-        // pipeline uses at least AnsiOnly mode so those codes are preserved.
-        let effective_config =
-            if syntax_active && self.render_config.raw_mode == RawControlMode::Off {
-                let mut cfg = self.render_config.clone();
-                cfg.raw_mode = RawControlMode::AnsiOnly;
-                cfg
-            } else {
-                self.render_config.clone()
-            };
+        // When syntax highlighting or diff coloring injected SGR codes,
+        // ensure the render pipeline uses at least AnsiOnly mode so those
+        // codes are preserved.
+        let effective_config = if (syntax_active || diff_colored)
+            && self.render_config.raw_mode == RawControlMode::Off
+        {
+            let mut cfg = self.render_config.clone();
+            cfg.raw_mode = RawControlMode::AnsiOnly;
+            cfg
+        } else {
+            self.render_config.clone()
+        };
 
         paint_screen_with_options(
             &mut self.writer,
@@ -4625,6 +4636,66 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[cfg(feature = "syntax")]
     pub fn set_syntax_enabled(&mut self, enabled: bool) {
         self.syntax_enabled = enabled;
+    }
+
+    /// Apply diff-aware coloring to visible lines when in diff mode.
+    ///
+    /// For each line, classifies it (added, removed, context, header, etc.)
+    /// and applies background tinting plus optional per-hunk syntax highlighting.
+    /// When the `syntax` feature is active and a diff filename has a recognized
+    /// syntax, per-hunk syntax highlighting is layered on top of the diff tinting.
+    #[allow(clippy::unused_self)] // self is used only when the `syntax` feature is enabled
+    fn colorize_diff_lines(&self, lines: &[Option<String>]) -> Vec<Option<String>> {
+        // Determine the current diff filename for syntax detection.
+        #[cfg(feature = "syntax")]
+        let diff_filename = self.current_diff_filename();
+
+        lines
+            .iter()
+            .map(|opt| {
+                opt.as_ref().map(|text| {
+                    let line_type = pgr_core::classify_diff_line(text);
+
+                    // Try per-hunk syntax highlighting when the syntax feature is
+                    // available and a diff filename was detected.
+                    #[cfg(feature = "syntax")]
+                    {
+                        if self.syntax_enabled {
+                            if let Some(ref highlighter) = self.highlighter {
+                                if let Some(ref fname) = diff_filename {
+                                    let line_slice: &[&str] = &[text.as_str()];
+                                    let type_slice: &[pgr_core::DiffLineType] = &[line_type];
+                                    let result = pgr_display::highlight_diff_hunk(
+                                        line_slice,
+                                        type_slice,
+                                        highlighter,
+                                        fname,
+                                    );
+                                    if let Some(colored) = result.into_iter().next() {
+                                        return colored;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback: diff coloring without syntax highlighting.
+                    pgr_display::colorize_diff_line(text, line_type)
+                })
+            })
+            .collect()
+    }
+
+    /// Extract the current diff filename from the parsed diff state.
+    ///
+    /// Uses the viewport's top line to find which diff file the user is
+    /// viewing, and returns its filename for syntax detection.
+    #[cfg(feature = "syntax")]
+    fn current_diff_filename(&self) -> Option<String> {
+        let files = self.diff_state.as_ref()?;
+        let top = self.screen.top_line();
+        let info = pgr_core::compute_diff_prompt_info(files, top)?;
+        info.current_file
     }
 
     /// Apply syntax highlighting to a set of lines if highlighting is active.
