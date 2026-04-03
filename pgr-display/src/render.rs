@@ -999,7 +999,7 @@ fn render_ansi_only_highlighted(
     tab_stops: &TabStops,
     highlights: &[(usize, usize)],
     hl_on: &str,
-    hl_off: &str,
+    _hl_off: &str,
     bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let segments = ansi::parse_ansi(line);
@@ -1009,13 +1009,26 @@ fn render_ansi_only_highlighted(
     let mut visible_width: usize = 0;
     let mut byte_offset: usize = 0;
     let mut in_standout = false;
+    // Track the last SGR sequence from the input so we can restore it
+    // after a search highlight ends, instead of hard-resetting with \x1b[0m
+    // which would kill syntax/diff coloring.
+    let mut last_sgr = String::new();
 
     for segment in segments {
         match segment {
             Segment::Escape(esc) => {
                 // Only pass through SGR sequences; strip non-SGR (matches -R behavior).
-                if ansi::is_sgr_sequence(esc) && skipped >= horizontal_offset {
-                    output.push_str(esc);
+                if ansi::is_sgr_sequence(esc) {
+                    if skipped >= horizontal_offset {
+                        // Don't emit input SGR while inside a highlight — we'll
+                        // restore it when the highlight ends.
+                        if !in_standout {
+                            output.push_str(esc);
+                        }
+                    }
+                    // Always track the latest SGR so we can restore after highlights.
+                    last_sgr.clear();
+                    last_sgr.push_str(esc);
                 }
                 byte_offset += esc.len();
             }
@@ -1050,7 +1063,12 @@ fn render_ansi_only_highlighted(
                         output.push_str(hl_on);
                         in_standout = true;
                     } else if !should_highlight && in_standout {
-                        output.push_str(hl_off);
+                        // Restore the previous SGR state instead of hard-resetting.
+                        // This preserves syntax/diff coloring around search matches.
+                        output.push_str(STANDOUT_OFF);
+                        if !last_sgr.is_empty() {
+                            output.push_str(&last_sgr);
+                        }
                         in_standout = false;
                     }
 
@@ -1065,7 +1083,7 @@ fn render_ansi_only_highlighted(
     }
 
     if in_standout {
-        output.push_str(hl_off);
+        output.push_str(STANDOUT_OFF);
     }
 
     (output, visible_width)
@@ -1164,7 +1182,7 @@ fn render_ansi_only_multi_highlighted(
     max_width: usize,
     tab_stops: &TabStops,
     colored_ranges: &[ColoredRange<'_>],
-    hl_off: &str,
+    _hl_off: &str,
     bin_fmt: Option<&BinFmt>,
 ) -> (String, usize) {
     let segments = ansi::parse_ansi(line);
@@ -1174,12 +1192,18 @@ fn render_ansi_only_multi_highlighted(
     let mut visible_width: usize = 0;
     let mut byte_offset: usize = 0;
     let mut current_sgr: Option<&str> = None;
+    // Track the last input SGR to restore after highlight ends.
+    let mut last_input_sgr = String::new();
 
     for segment in segments {
         match segment {
             Segment::Escape(esc) => {
-                if ansi::is_sgr_sequence(esc) && skipped >= horizontal_offset {
-                    output.push_str(esc);
+                if ansi::is_sgr_sequence(esc) {
+                    if skipped >= horizontal_offset && current_sgr.is_none() {
+                        output.push_str(esc);
+                    }
+                    last_input_sgr.clear();
+                    last_input_sgr.push_str(esc);
                 }
                 byte_offset += esc.len();
             }
@@ -1212,7 +1236,11 @@ fn render_ansi_only_multi_highlighted(
                     let new_sgr = find_colored_highlight(byte_offset, colored_ranges);
                     if new_sgr != current_sgr {
                         if current_sgr.is_some() {
-                            output.push_str(hl_off);
+                            // Restore input SGR instead of hard reset.
+                            output.push_str(STANDOUT_OFF);
+                            if !last_input_sgr.is_empty() {
+                                output.push_str(&last_input_sgr);
+                            }
                         }
                         if let Some(sgr) = new_sgr {
                             output.push_str(sgr);
@@ -1231,7 +1259,7 @@ fn render_ansi_only_multi_highlighted(
     }
 
     if current_sgr.is_some() {
-        output.push_str(hl_off);
+        output.push_str(STANDOUT_OFF);
     }
 
     (output, visible_width)
