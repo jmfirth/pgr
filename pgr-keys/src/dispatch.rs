@@ -3807,6 +3807,12 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Fetch visible lines from the buffer/index and repaint the screen.
     #[allow(clippy::too_many_lines)] // Rendering paths for filter, squeeze, and normal modes with header support
     fn repaint(&mut self) -> Result<()> {
+        // For growable buffers (pipe input), read available data and update
+        // the index's knowledge of the buffer size before indexing.
+        if self.buffer.is_growable() {
+            let new_len = self.buffer.refresh()?;
+            self.index.update_buffer_len(new_len as u64);
+        }
         self.index.index_all(&*self.buffer)?;
 
         let header_line_contents = self.fetch_header_lines()?;
