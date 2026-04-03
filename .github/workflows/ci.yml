@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  check:
+    name: Check (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile:
+          - full
+          - thin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (full)
+        if: matrix.profile == 'full'
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Clippy (thin)
+        if: matrix.profile == 'thin'
+        run: cargo clippy --workspace --no-default-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      matrix:
+        profile:
+          - full
+          - thin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Unit + doc tests (full)
+        if: matrix.profile == 'full'
+        run: cargo test --workspace --lib --bins && cargo test --workspace --doc
+
+      - name: Unit + doc tests (thin)
+        if: matrix.profile == 'thin'
+        run: cargo test --workspace --lib --bins --no-default-features
+
+  conformance:
+    name: Conformance (212 tests)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install GNU less
+        run: sudo apt-get update && sudo apt-get install -y less
+
+      - name: Run conformance suite
+        run: LESS_BIN=less cargo test -p pgr-cli --test conformance -- --include-ignored
+        timeout-minutes: 10
+
+  visual:
+    name: Visual smoke tests
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run visual tests
+        run: cargo test -p pgr-cli --test visual -- --include-ignored
+        timeout-minutes: 5
+
+  binary-size:
+    name: Binary size check
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release (full)
+        run: cargo build --release
+
+      - name: Build release (thin)
+        run: cargo build --release --no-default-features
+
+      - name: Check binary sizes
+        run: |
+          FULL_SIZE=$(stat -c%s target/release/pgr-cli 2>/dev/null || stat -f%z target/release/pgr-cli)
+          echo "Full binary: $FULL_SIZE bytes ($(( FULL_SIZE / 1024 / 1024 ))MB)"
+
+          # Rebuild thin to get its size (overwrites the binary)
+          cargo build --release --no-default-features
+          THIN_SIZE=$(stat -c%s target/release/pgr-cli 2>/dev/null || stat -f%z target/release/pgr-cli)
+          echo "Thin binary: $THIN_SIZE bytes ($(( THIN_SIZE / 1024 / 1024 ))MB)"
+
+          # Assert size limits (fail if exceeded)
+          MAX_FULL=4194304   # 4MB
+          MAX_THIN=2621440   # 2.5MB
+
+          if [ "$FULL_SIZE" -gt "$MAX_FULL" ]; then
+            echo "FAIL: Full binary ($FULL_SIZE) exceeds limit ($MAX_FULL)"
+            exit 1
+          fi
+          if [ "$THIN_SIZE" -gt "$MAX_THIN" ]; then
+            echo "FAIL: Thin binary ($THIN_SIZE) exceeds limit ($MAX_THIN)"
+            exit 1
+          fi
+          echo "Binary sizes within limits"
