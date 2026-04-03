@@ -1,13 +1,11 @@
 #!/bin/bash
 # Scripted demo: syntax highlighting in pgr
-# Run via: asciinema rec --command ./demos/record-syntax.sh demos/syntax-highlight.cast
-
-export TERM=xterm-256color
-export COLUMNS=100
-export LINES=30
+# Uses tmux to send keystrokes with real timing.
+# Run: asciinema rec --command "./demos/record-syntax.sh" --cols 100 --rows 30 demos/syntax-highlight.cast
 
 PGR="$(pwd)/target/release/pgr-cli"
 FILE="/tmp/pgr_demo.rs"
+SESSION="pgr-demo-$$"
 
 # Create demo file
 cat > "$FILE" << 'RUST'
@@ -53,26 +51,55 @@ fn main() {
 }
 RUST
 
-# Feed keystrokes with delays
+# Kill any leftover session
+tmux kill-session -t "$SESSION" 2>/dev/null
+
+# Start pgr in a detached tmux session
+tmux new-session -d -s "$SESSION" -x 100 -y 30 "$PGR $FILE"
+
+# Background: send keystrokes with real timing
 {
-    sleep 2
-    # Scroll down slowly
-    for i in 1 2 3 4 5 6 7 8; do
-        printf 'j'
-        sleep 0.3
-    done
     sleep 1.5
+
     # Jump to top
-    printf 'g'
+    tmux send-keys -t "$SESSION" g
     sleep 1.5
+
+    # Scroll down slowly
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    tmux send-keys -t "$SESSION" j; sleep 0.8
+    sleep 1.5
+
+    # Jump to top
+    tmux send-keys -t "$SESSION" g
+    sleep 1.5
+
     # Search for "fn"
-    printf '/fn\n'
+    tmux send-keys -t "$SESSION" /fn Enter
     sleep 1.5
+
     # Next match
-    printf 'n'
-    sleep 1
-    printf 'n'
+    tmux send-keys -t "$SESSION" n
     sleep 1.5
+    tmux send-keys -t "$SESSION" n
+    sleep 1.5
+    tmux send-keys -t "$SESSION" n
+    sleep 1.5
+
     # Quit
-    printf 'q'
-} | "$PGR" "$FILE"
+    tmux send-keys -t "$SESSION" q
+} &
+KEYS_PID=$!
+
+# Attach — this is what asciinema captures
+tmux attach -t "$SESSION"
+
+# Cleanup
+wait $KEYS_PID 2>/dev/null
+tmux kill-session -t "$SESSION" 2>/dev/null
