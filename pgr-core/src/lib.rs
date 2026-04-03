@@ -8,6 +8,7 @@ pub mod error;
 pub mod file_buffer;
 pub mod line_index;
 pub mod marks;
+pub mod word_diff;
 
 pub use buffer::Buffer;
 pub use content_mode::{detect_content_mode, ContentMode};
@@ -19,6 +20,7 @@ pub use error::{CoreError, Result};
 pub use file_buffer::FileBuffer;
 pub use line_index::LineIndex;
 pub use marks::{Mark, MarkStore};
+pub use word_diff::{compute_word_diff, pair_changed_lines, WordChange};
 
 #[cfg(test)]
 pub(crate) mod test_helpers;
