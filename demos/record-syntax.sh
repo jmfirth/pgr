@@ -120,42 +120,57 @@ tmux kill-session -t "$SESSION" 2>/dev/null
 # Start pgr in a detached tmux session
 tmux new-session -d -s "$SESSION" -x 100 -y 30 "$PGR $FILE"
 
+# Configure tmux status bar for keystroke display
+tmux set -t "$SESSION" status on
+tmux set -t "$SESSION" status-style "fg=white,bg=#333333"
+tmux set -t "$SESSION" status-left ""
+tmux set -t "$SESSION" status-right ""
+tmux set -t "$SESSION" status-justify centre
+
+# Helper: show a keystroke label in the tmux status bar
+show_key() {
+    tmux set -t "$SESSION" status-left "  $1"
+}
+clear_key() {
+    tmux set -t "$SESSION" status-left ""
+}
+
 # Background: send keystrokes with real timing
 {
-    sleep 1.5
-
-    # Jump to top
-    tmux send-keys -t "$SESSION" g
-    sleep 1.5
+    sleep 2
 
     # Scroll down slowly
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
-    tmux send-keys -t "$SESSION" j; sleep 0.8
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        show_key "j  (scroll down)"
+        tmux send-keys -t "$SESSION" j
+        sleep 0.5
+    done
+    clear_key
     sleep 1.5
 
     # Jump to top
+    show_key "g  (go to top)"
     tmux send-keys -t "$SESSION" g
-    sleep 1.5
+    sleep 2
+    clear_key
 
     # Search for "fn"
+    show_key "/fn  (search)"
     tmux send-keys -t "$SESSION" /fn Enter
-    sleep 1.5
+    sleep 2
 
     # Next match
+    show_key "n  (next match)"
     tmux send-keys -t "$SESSION" n
     sleep 1.5
     tmux send-keys -t "$SESSION" n
     sleep 1.5
     tmux send-keys -t "$SESSION" n
-    sleep 1.5
+    sleep 2
+    clear_key
 
     # Quit
+    show_key "q  (quit)"
     tmux send-keys -t "$SESSION" q
 } &
 KEYS_PID=$!
