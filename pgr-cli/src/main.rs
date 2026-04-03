@@ -308,6 +308,7 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
     configure_syntax(&mut pager, options, &env_config);
 
     configure_clipboard(&mut pager, options, &env_config);
+    configure_git_gutter(&mut pager, options, &env_config);
 
     if env_config.secure_mode {
         pager.set_secure_mode(true);
@@ -417,6 +418,7 @@ fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
     configure_syntax(&mut pager, options, &env_config);
 
     configure_clipboard(&mut pager, options, &env_config);
+    configure_git_gutter(&mut pager, options, &env_config);
 
     if env_config.secure_mode {
         pager.set_secure_mode(true);
@@ -603,6 +605,24 @@ fn configure_clipboard<R: std::io::Read, W: std::io::Write>(
     pager.set_clipboard(create_clipboard(backend));
 }
 
+/// Configure git gutter on the pager based on CLI flags and env vars.
+///
+/// Enabled when `--git-gutter` is passed or `PGR_GIT_GUTTER=1` is set,
+/// unless `--no-git-gutter` explicitly disables it. Does not load gutter
+/// state for pipe input (no filename).
+fn configure_git_gutter<R: std::io::Read, W: std::io::Write>(
+    pager: &mut Pager<R, W>,
+    options: &Options,
+    env_config: &EnvConfig,
+) {
+    if options.no_git_gutter {
+        return;
+    }
+    if options.git_gutter || env_config.pgr_git_gutter {
+        pager.set_git_gutter_enabled(true);
+    }
+}
+
 /// Discover and load a lesskey source file.
 ///
 /// Checks the following locations in priority order:
@@ -726,6 +746,7 @@ fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<ExitReason> {
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
     configure_clipboard(&mut pager, options, &env_config);
+    configure_git_gutter(&mut pager, options, &env_config);
     pager.set_tag_state(tag_state);
 
     if env_config.secure_mode {

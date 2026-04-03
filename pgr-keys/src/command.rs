@@ -151,6 +151,8 @@ pub enum Command {
     YankLine,
     /// Yank (copy) all visible lines to the clipboard. `Y`.
     YankScreen,
+    /// Toggle git gutter display on/off. `ESC-G`.
+    ToggleGitGutter,
 }
 
 #[cfg(test)]
@@ -363,5 +365,17 @@ mod tests {
     #[test]
     fn test_command_yank_line_differs_from_noop() {
         assert_ne!(Command::YankLine, Command::Noop);
+    }
+
+    // ── Task 356: Git gutter toggle command ──
+
+    #[test]
+    fn test_command_toggle_git_gutter_equality() {
+        assert_eq!(Command::ToggleGitGutter, Command::ToggleGitGutter);
+    }
+
+    #[test]
+    fn test_command_toggle_git_gutter_differs_from_noop() {
+        assert_ne!(Command::ToggleGitGutter, Command::Noop);
     }
 }

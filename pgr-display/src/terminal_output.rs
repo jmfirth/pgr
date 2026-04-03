@@ -71,6 +71,12 @@ pub struct PaintOptions {
     /// ranges should be highlighted and what SGR color to use.
     /// When empty (the default), no search highlighting is applied.
     pub line_highlights: Vec<Vec<ColoredRange<'static>>>,
+    /// Per-line git gutter marks, parallel to the lines slice.
+    ///
+    /// Each entry is an `Option<(char, &str)>` where the char is the gutter
+    /// symbol (+, -, ~) and the string is the ANSI color escape sequence.
+    /// When the outer vec is empty, no gutter column is displayed.
+    pub gutter_marks: Vec<Option<(char, &'static str)>>,
 }
 
 /// Paint the full screen content to the terminal.
@@ -119,6 +125,11 @@ pub fn paint_screen_with_options<W: Write>(
     let chop_mode = screen.chop_mode();
 
     let status_col_width = if options.show_status_column { 2 } else { 0 };
+    let gutter_col_width = if options.gutter_marks.is_empty() {
+        0
+    } else {
+        2
+    };
 
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
@@ -130,7 +141,7 @@ pub fn paint_screen_with_options<W: Write>(
         0
     };
 
-    let margin_width = status_col_width + ln_width;
+    let margin_width = status_col_width + gutter_col_width + ln_width;
     let content_cols = cols.saturating_sub(margin_width);
 
     // Move cursor to starting row (may be offset for short files).
@@ -186,6 +197,13 @@ pub fn paint_screen_with_options<W: Write>(
                     let s = ch.encode_utf8(&mut buf);
                     writer.write_all(s.as_bytes())?;
                     writer.write_all(b" ")?;
+                }
+
+                if gutter_col_width > 0 {
+                    write_gutter_mark(
+                        writer,
+                        options.gutter_marks.get(line_idx).copied().flatten(),
+                    )?;
                 }
 
                 if options.show_line_numbers {
@@ -256,6 +274,9 @@ pub fn paint_screen_with_options<W: Write>(
                         if options.show_status_column {
                             writer.write_all(b"  ")?;
                         }
+                        if gutter_col_width > 0 {
+                            writer.write_all(b"  ")?;
+                        }
                         if options.show_line_numbers {
                             let line_num = screen.top_line() + line_idx + 1;
                             let formatted = line_numbers::format_line_number(line_num, ln_width);
@@ -322,6 +343,9 @@ pub fn paint_screen_with_options<W: Write>(
             if options.show_status_column {
                 writer.write_all(b"  ")?;
             }
+            if gutter_col_width > 0 {
+                writer.write_all(b"  ")?;
+            }
             if !options.suppress_tildes {
                 writer.write_all(b"~")?;
             }
@@ -364,6 +388,9 @@ fn paint_header_lines<W: Write>(
         writer.write_all(b"\x1b[7m")?;
         if let Some(text) = header_line {
             if options.show_status_column {
+                writer.write_all(b"  ")?;
+            }
+            if !options.gutter_marks.is_empty() {
                 writer.write_all(b"  ")?;
             }
             if options.show_line_numbers {
@@ -418,6 +445,11 @@ pub fn paint_screen_mapped<W: Write>(
     let chop_mode = screen.chop_mode();
 
     let status_col_width = if options.show_status_column { 2 } else { 0 };
+    let gutter_col_width = if options.gutter_marks.is_empty() {
+        0
+    } else {
+        2
+    };
 
     let ln_width = if options.show_line_numbers {
         if let Some(custom) = options.line_num_width {
@@ -429,7 +461,7 @@ pub fn paint_screen_mapped<W: Write>(
         0
     };
 
-    let margin_width = status_col_width + ln_width;
+    let margin_width = status_col_width + gutter_col_width + ln_width;
     let content_cols = cols.saturating_sub(margin_width);
 
     // Move cursor to starting row (may be offset for short files).
@@ -474,6 +506,13 @@ pub fn paint_screen_mapped<W: Write>(
                     let s = ch.encode_utf8(&mut buf);
                     writer.write_all(s.as_bytes())?;
                     writer.write_all(b" ")?;
+                }
+
+                if gutter_col_width > 0 {
+                    write_gutter_mark(
+                        writer,
+                        options.gutter_marks.get(line_idx).copied().flatten(),
+                    )?;
                 }
 
                 if options.show_line_numbers {
@@ -542,6 +581,9 @@ pub fn paint_screen_mapped<W: Write>(
                 if options.show_status_column {
                     writer.write_all(b"  ")?;
                 }
+                if gutter_col_width > 0 {
+                    writer.write_all(b"  ")?;
+                }
                 if !options.suppress_tildes {
                     writer.write_all(b"~")?;
                 }
@@ -550,6 +592,9 @@ pub fn paint_screen_mapped<W: Write>(
             }
         } else {
             if options.show_status_column {
+                writer.write_all(b"  ")?;
+            }
+            if gutter_col_width > 0 {
                 writer.write_all(b"  ")?;
             }
             if !options.suppress_tildes {
@@ -641,6 +686,27 @@ pub fn paint_error_message<W: Write>(
 /// Returns an I/O error if writing to `writer` fails.
 fn clear_to_eol<W: Write>(writer: &mut W) -> std::io::Result<()> {
     writer.write_all(b"\x1b[K")
+}
+
+/// Write a git gutter mark (colored symbol + space) or blank space if no mark.
+///
+/// The mark is rendered as `{color}{symbol}\x1b[0m ` (2 columns total).
+/// When `mark` is `None`, writes two spaces to maintain alignment.
+///
+/// # Errors
+///
+/// Returns an I/O error if writing to `writer` fails.
+fn write_gutter_mark<W: Write>(writer: &mut W, mark: Option<(char, &str)>) -> std::io::Result<()> {
+    if let Some((symbol, color)) = mark {
+        writer.write_all(color.as_bytes())?;
+        let mut buf = [0u8; 4];
+        let s = symbol.encode_utf8(&mut buf);
+        writer.write_all(s.as_bytes())?;
+        writer.write_all(b"\x1b[0m ")?;
+    } else {
+        writer.write_all(b"  ")?;
+    }
+    Ok(())
 }
 
 /// Compute how many terminal screen rows a rendered line occupies when wrapping.

@@ -158,6 +158,9 @@ pub struct EnvConfig {
 
     /// `PGR_CLIPBOARD`: clipboard backend override (auto, osc52, pbcopy, xclip, xsel, wl-copy, off).
     pub pgr_clipboard: Option<String>,
+
+    /// `PGR_GIT_GUTTER`: set to "1" to enable git gutter by default.
+    pub pgr_git_gutter: bool,
 }
 
 impl EnvConfig {
@@ -243,6 +246,9 @@ impl EnvConfig {
             .unwrap_or(false);
         let pgr_theme = env_nonempty("PGR_THEME");
         let pgr_clipboard = env_nonempty("PGR_CLIPBOARD");
+        let pgr_git_gutter = std::env::var("PGR_GIT_GUTTER")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
 
         Self {
             less_options,
@@ -286,6 +292,7 @@ impl EnvConfig {
             pgr_syntax_disabled,
             pgr_theme,
             pgr_clipboard,
+            pgr_git_gutter,
         }
     }
 
@@ -1862,5 +1869,34 @@ mod tests {
         let cfg = EnvConfig::from_env();
         restore_vars(&saved);
         assert_eq!(cfg.pgr_clipboard.as_deref(), Some("osc52"));
+    }
+
+    // ── Task 356: PGR_GIT_GUTTER env var ──
+
+    #[test]
+    fn test_env_config_pgr_git_gutter_default_is_false() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = unset_vars(&["PGR_GIT_GUTTER"]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(!cfg.pgr_git_gutter);
+    }
+
+    #[test]
+    fn test_env_config_pgr_git_gutter_set_to_1() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("PGR_GIT_GUTTER", "1")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(cfg.pgr_git_gutter);
+    }
+
+    #[test]
+    fn test_env_config_pgr_git_gutter_set_to_0() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let saved = set_vars(&[("PGR_GIT_GUTTER", "0")]);
+        let cfg = EnvConfig::from_env();
+        restore_vars(&saved);
+        assert!(!cfg.pgr_git_gutter);
     }
 }

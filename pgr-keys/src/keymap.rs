@@ -143,6 +143,8 @@ impl Keymap {
             (Key::Char('Y'), Command::YankScreen),
             // Syntax highlighting toggle
             (Key::EscSeq('S'), Command::ToggleSyntax),
+            // Git gutter toggle
+            (Key::EscSeq('G'), Command::ToggleGitGutter),
             // Mouse scroll (default 3 lines per wheel tick)
             (Key::ScrollUp, Command::ScrollBackward(3)),
             (Key::ScrollDown, Command::ScrollForward(3)),
@@ -729,5 +731,13 @@ mod tests {
     fn test_keymap_esc_s_maps_to_toggle_syntax() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::EscSeq('S')), Command::ToggleSyntax);
+    }
+
+    // ── Task 356: Git gutter toggle ──
+
+    #[test]
+    fn test_keymap_esc_g_maps_to_toggle_git_gutter() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('G')), Command::ToggleGitGutter);
     }
 }
