@@ -267,6 +267,8 @@ pub struct Pager<R: Read, W: Write> {
     content_mode: ContentMode,
     /// Parsed diff structure for hunk/file navigation (populated on first paint when Diff mode).
     diff_state: Option<Vec<pgr_core::DiffFile>>,
+    /// Parsed git log commit list for `]g`/`[g` navigation (populated on first paint when `GitLog` mode).
+    git_log_commits: Option<Vec<pgr_core::GitCommit>>,
     /// Syntax highlighter instance (compiled-in only with `syntax` feature).
     #[cfg(feature = "syntax")]
     highlighter: Option<pgr_display::syntax::highlighting::Highlighter>,
@@ -367,6 +369,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             exit_reason: ExitReason::Normal,
             content_mode: ContentMode::Plain,
             diff_state: None,
+            git_log_commits: None,
             #[cfg(feature = "syntax")]
             highlighter: None,
             #[cfg(feature = "syntax")]
@@ -678,6 +681,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('u') => self.execute(&Command::PrevUrl, count)?,
                     Key::Char('c') => self.execute(&Command::PrevHunk, count)?,
                     Key::Char('f') => self.execute(&Command::PrevDiffFile, count)?,
+                    Key::Char('g') => self.execute(&Command::PrevCommit, count)?,
                     _ => {
                         // Default: bracket matching (FindCloseBracket for `[`).
                         self.execute(&Command::FindCloseBracket('[', ']'), count)?;
@@ -691,6 +695,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('u') => self.execute(&Command::NextUrl, count)?,
                     Key::Char('c') => self.execute(&Command::NextHunk, count)?,
                     Key::Char('f') => self.execute(&Command::NextDiffFile, count)?,
+                    Key::Char('g') => self.execute(&Command::NextCommit, count)?,
                     _ => {
                         // Default: bracket matching (FindOpenBracket for `]`).
                         self.execute(&Command::FindOpenBracket('[', ']'), count)?;
@@ -1308,6 +1313,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
                 self.repaint()?;
             }
+            Command::NextCommit => {
+                self.navigate_next_commit(total)?;
+            }
+            Command::PrevCommit => {
+                self.navigate_prev_commit(total)?;
+            }
         }
 
         Ok(())
@@ -1539,6 +1550,73 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn navigate_prev_diff_file(&mut self, total: usize) -> Result<()> {
         let result = self.diff_nav_file(|files, cur| pgr_core::prev_file_line(files, cur, true));
         self.apply_diff_nav(result, total, "No diff files found")
+    }
+
+    /// Navigate to the next commit in a git log.
+    fn navigate_next_commit(&mut self, total: usize) -> Result<()> {
+        let result =
+            self.git_log_nav(|commits, cur| pgr_core::next_commit_line(commits, cur, true));
+        self.apply_git_log_nav(result, total, "No commits found")
+    }
+
+    /// Navigate to the previous commit in a git log.
+    fn navigate_prev_commit(&mut self, total: usize) -> Result<()> {
+        let result =
+            self.git_log_nav(|commits, cur| pgr_core::prev_commit_line(commits, cur, true));
+        self.apply_git_log_nav(result, total, "No commits found")
+    }
+
+    /// Compute a git log navigation target (line + status message) without mutating self.
+    ///
+    /// Separates the read-only computation from the mutable state update,
+    /// avoiding a borrow conflict between `self.git_log_commits` and `self`.
+    fn git_log_nav(
+        &self,
+        find_fn: impl FnOnce(&[pgr_core::GitCommit], usize) -> Option<usize>,
+    ) -> DiffNavResult {
+        let Some(ref commits) = self.git_log_commits else {
+            return DiffNavResult::NotDiffMode;
+        };
+        let current = self.screen.top_line();
+        match find_fn(commits, current) {
+            Some(target) => {
+                // Compute 1-based index of the target commit within the list.
+                let total = commits.len();
+                let idx = commits
+                    .iter()
+                    .position(|c| c.start_line == target)
+                    .map_or(0, |i| i + 1);
+                let status = format!("Commit {idx} of {total}");
+                DiffNavResult::Found(target, status)
+            }
+            None => DiffNavResult::NoTarget,
+        }
+    }
+
+    /// Apply the result of a git log navigation computation.
+    fn apply_git_log_nav(
+        &mut self,
+        result: DiffNavResult,
+        total: usize,
+        no_target_msg: &str,
+    ) -> Result<()> {
+        match result {
+            DiffNavResult::NotDiffMode => {
+                self.status_message = Some("Not in git log mode".to_string());
+                self.repaint()?;
+            }
+            DiffNavResult::NoTarget => {
+                self.status_message = Some(no_target_msg.to_string());
+                self.repaint()?;
+            }
+            DiffNavResult::Found(line, status) => {
+                self.save_last_position();
+                self.screen.goto_line(line, total);
+                self.status_message = Some(status);
+                self.repaint()?;
+            }
+        }
+        Ok(())
     }
 
     /// Compute a hunk navigation target (line + status message) without mutating self.
@@ -3524,9 +3602,10 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         // Invalidate match count cache when switching files since the buffer changed.
         self.match_count_cache = None;
-        // Reset content mode and diff state so they are re-detected on next first paint.
+        // Reset content mode and diff/git-log state so they are re-detected on next first paint.
         self.content_mode = ContentMode::Plain;
         self.diff_state = None;
+        self.git_log_commits = None;
         // Reload git gutter state for the new file.
         if self.git_gutter_enabled {
             self.load_gutter_state();
@@ -4678,6 +4757,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         if self.content_mode == ContentMode::Diff {
             self.parse_diff_state();
         }
+
+        // Parse git log commit positions when git log mode is detected.
+        if self.content_mode == ContentMode::GitLog {
+            self.parse_git_log_state();
+        }
     }
 
     /// Parse the entire buffer into diff structure for hunk/file navigation.
@@ -4698,6 +4782,29 @@ impl<R: Read, W: Write> Pager<R, W> {
         let borrowed: Vec<&str> = all_lines.iter().map(String::as_str).collect();
         let files = pgr_core::parse_diff(&borrowed);
         self.diff_state = if files.is_empty() { None } else { Some(files) };
+    }
+
+    /// Parse the entire buffer into a git log commit list for `]g`/`[g` navigation.
+    ///
+    /// Called once when git log mode is detected. Reads all lines from the buffer
+    /// and stores the parsed commit positions in `git_log_commits`.
+    fn parse_git_log_state(&mut self) {
+        let total = self.index.total_lines(&*self.buffer).unwrap_or(0);
+        let mut all_lines: Vec<String> = Vec::with_capacity(total);
+        for i in 0..total {
+            if let Ok(Some(line)) = self.index.get_line(i, &*self.buffer) {
+                all_lines.push(line);
+            } else {
+                all_lines.push(String::new());
+            }
+        }
+        let borrowed: Vec<&str> = all_lines.iter().map(String::as_str).collect();
+        let commits = pgr_core::parse_git_log(&borrowed);
+        self.git_log_commits = if commits.is_empty() {
+            None
+        } else {
+            Some(commits)
+        };
     }
 
     /// Immediately index all lines in the buffer (`--file-size`).

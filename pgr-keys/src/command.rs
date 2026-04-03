@@ -163,6 +163,10 @@ pub enum Command {
     PrevDiffFile,
     /// Toggle side-by-side diff rendering. `ESC-V`.
     ToggleSideBySide,
+    /// Jump to the next commit in a git log. `]g`.
+    NextCommit,
+    /// Jump to the previous commit in a git log. `[g`.
+    PrevCommit,
 }
 
 #[cfg(test)]

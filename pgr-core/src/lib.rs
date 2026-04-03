@@ -6,6 +6,7 @@ pub mod content_mode;
 pub mod diff;
 pub mod error;
 pub mod file_buffer;
+pub mod git_log;
 pub mod line_index;
 pub mod marks;
 pub mod word_diff;
@@ -18,6 +19,7 @@ pub use diff::{
 };
 pub use error::{CoreError, Result};
 pub use file_buffer::FileBuffer;
+pub use git_log::{next_commit_line, parse_git_log, prev_commit_line, GitCommit};
 pub use line_index::LineIndex;
 pub use marks::{Mark, MarkStore};
 pub use word_diff::{compute_word_diff, pair_changed_lines, WordChange};
