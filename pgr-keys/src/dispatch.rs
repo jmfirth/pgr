@@ -4227,10 +4227,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
-        // Apply diff coloring + syntax highlighting before side-by-side layout.
-        // The side-by-side renderer uses ANSI-aware truncation so SGR codes
-        // don't consume panel width.
-        all_lines = self.colorize_diff_lines(&all_lines);
+        // Strip git's ANSI coloring from raw lines before pairing.
+        // The side-by-side renderer applies its own background colors via
+        // color_for_type. Syntax highlighting within panels requires
+        // ANSI-aware prefix stripping (future enhancement).
+        let all_lines: Vec<Option<String>> = all_lines
+            .iter()
+            .map(|opt| opt.as_ref().map(|s| pgr_display::ansi::strip_ansi(s)))
+            .collect();
 
         let (_, cols) = self.screen.dimensions();
 
