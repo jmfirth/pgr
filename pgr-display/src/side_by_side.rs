@@ -68,6 +68,7 @@ pub struct SideBySideLine {
 /// added lines sequentially. Context lines appear on both sides. Excess
 /// removed or added lines are displayed with a blank opposite panel.
 #[must_use]
+#[allow(clippy::too_many_lines)] // Diff pairing has many match arms; splitting would hurt readability
 pub fn pair_hunk_lines(lines: &[&str], line_types: &[DiffLineType]) -> Vec<SideBySideLine> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -149,14 +150,43 @@ pub fn pair_hunk_lines(lines: &[&str], line_types: &[DiffLineType]) -> Vec<SideB
                 });
                 i += 1;
             }
-            DiffLineType::Header | DiffLineType::HunkHeader | DiffLineType::Other => {
-                // Headers and hunk headers span the full width (shown on both sides)
+            DiffLineType::HunkHeader => {
+                // Hunk headers span as a centered divider
+                let text = lines[i];
+                // Show the hunk range on both sides as a visual separator
+                let half = text.to_string();
                 result.push(SideBySideLine {
-                    left: Some(lines[i].to_string()),
-                    right: Some(String::new()),
-                    left_type: line_types[i],
-                    right_type: line_types[i],
+                    left: Some(half.clone()),
+                    right: Some(half),
+                    left_type: DiffLineType::HunkHeader,
+                    right_type: DiffLineType::HunkHeader,
                 });
+                i += 1;
+            }
+            DiffLineType::Header => {
+                // File headers: map --- to left panel title, +++ to right panel title
+                let text = lines[i];
+                if text.starts_with("--- ")
+                    && i + 1 < lines.len()
+                    && lines[i + 1].starts_with("+++ ")
+                {
+                    let old_name = text.strip_prefix("--- ").unwrap_or(text);
+                    let new_name = lines[i + 1].strip_prefix("+++ ").unwrap_or(lines[i + 1]);
+                    result.push(SideBySideLine {
+                        left: Some(old_name.to_string()),
+                        right: Some(new_name.to_string()),
+                        left_type: DiffLineType::Header,
+                        right_type: DiffLineType::Header,
+                    });
+                    i += 2; // consume both --- and +++
+                } else {
+                    // Other headers (diff --git, index, etc.) — skip in side-by-side
+                    // to reduce noise. The file names from ---/+++ are more useful.
+                    i += 1;
+                }
+            }
+            DiffLineType::Other => {
+                // Skip non-diff lines (binary notices, etc.)
                 i += 1;
             }
         }
@@ -477,16 +507,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pair_header_lines_span_full_width() {
+    fn test_pair_header_lines_shows_filenames() {
+        // ---/+++ headers become left=old, right=new panel titles
+        let lines = vec!["--- a/foo.rs", "+++ b/foo.rs"];
+        let types = vec![DiffLineType::Header, DiffLineType::Header];
+        let paired = pair_hunk_lines(&lines, &types);
+        assert_eq!(paired.len(), 1);
+        assert_eq!(paired[0].left.as_deref(), Some("a/foo.rs"));
+        assert_eq!(paired[0].right.as_deref(), Some("b/foo.rs"));
+    }
+
+    #[test]
+    fn test_pair_header_diff_git_skipped() {
+        // diff --git lines are skipped in side-by-side (noise reduction)
         let lines = vec!["diff --git a/foo.rs b/foo.rs"];
         let types = vec![DiffLineType::Header];
         let paired = pair_hunk_lines(&lines, &types);
-        assert_eq!(paired.len(), 1);
-        assert_eq!(
-            paired[0].left.as_deref(),
-            Some("diff --git a/foo.rs b/foo.rs")
-        );
-        assert_eq!(paired[0].right.as_deref(), Some(""));
+        assert_eq!(paired.len(), 0);
     }
 
     #[test]
