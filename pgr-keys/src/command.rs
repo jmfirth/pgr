@@ -153,6 +153,14 @@ pub enum Command {
     YankScreen,
     /// Toggle git gutter display on/off. `ESC-G`.
     ToggleGitGutter,
+    /// Jump to the next hunk header in a diff. `]c`.
+    NextHunk,
+    /// Jump to the previous hunk header in a diff. `[c`.
+    PrevHunk,
+    /// Jump to the next file in a multi-file diff. `]f`.
+    NextDiffFile,
+    /// Jump to the previous file in a multi-file diff. `[f`.
+    PrevDiffFile,
 }
 
 #[cfg(test)]
@@ -377,5 +385,42 @@ mod tests {
     #[test]
     fn test_command_toggle_git_gutter_differs_from_noop() {
         assert_ne!(Command::ToggleGitGutter, Command::Noop);
+    }
+
+    // ── Task 350: Diff navigation commands ──
+
+    #[test]
+    fn test_command_next_hunk_equality() {
+        assert_eq!(Command::NextHunk, Command::NextHunk);
+    }
+
+    #[test]
+    fn test_command_prev_hunk_equality() {
+        assert_eq!(Command::PrevHunk, Command::PrevHunk);
+    }
+
+    #[test]
+    fn test_command_next_diff_file_equality() {
+        assert_eq!(Command::NextDiffFile, Command::NextDiffFile);
+    }
+
+    #[test]
+    fn test_command_prev_diff_file_equality() {
+        assert_eq!(Command::PrevDiffFile, Command::PrevDiffFile);
+    }
+
+    #[test]
+    fn test_command_next_hunk_differs_from_prev_hunk() {
+        assert_ne!(Command::NextHunk, Command::PrevHunk);
+    }
+
+    #[test]
+    fn test_command_next_diff_file_differs_from_prev_diff_file() {
+        assert_ne!(Command::NextDiffFile, Command::PrevDiffFile);
+    }
+
+    #[test]
+    fn test_command_next_hunk_differs_from_noop() {
+        assert_ne!(Command::NextHunk, Command::Noop);
     }
 }

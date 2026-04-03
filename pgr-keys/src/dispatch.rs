@@ -133,6 +133,19 @@ pub enum PendingCommand {
     CloseBracketPrefix,
 }
 
+/// Result of computing a diff navigation target (hunk or file).
+///
+/// Separates the read-only computation from the mutable state update,
+/// avoiding a borrow conflict between `self.diff_state` and `self`.
+enum DiffNavResult {
+    /// Not in diff mode — `diff_state` is `None`.
+    NotDiffMode,
+    /// In diff mode but no target found (e.g., no hunks exist).
+    NoTarget,
+    /// Found a target: `(line_number, status_message)`.
+    Found(usize, String),
+}
+
 /// The main pager state, tying together all subsystems.
 #[allow(clippy::struct_excessive_bools)] // Pager legitimately tracks multiple independent on/off modes
 pub struct Pager<R: Read, W: Write> {
@@ -252,6 +265,8 @@ pub struct Pager<R: Read, W: Write> {
     exit_reason: ExitReason,
     /// Detected content type (diff, man page, etc.) — set on first paint.
     content_mode: ContentMode,
+    /// Parsed diff structure for hunk/file navigation (populated on first paint when Diff mode).
+    diff_state: Option<Vec<pgr_core::DiffFile>>,
     /// Syntax highlighter instance (compiled-in only with `syntax` feature).
     #[cfg(feature = "syntax")]
     highlighter: Option<pgr_display::syntax::highlighting::Highlighter>,
@@ -349,6 +364,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             quit_on_intr: false,
             exit_reason: ExitReason::Normal,
             content_mode: ContentMode::Plain,
+            diff_state: None,
             #[cfg(feature = "syntax")]
             highlighter: None,
             #[cfg(feature = "syntax")]
@@ -657,6 +673,8 @@ impl<R: Read, W: Write> Pager<R, W> {
                 let count = self.pending_count.take();
                 match *key {
                     Key::Char('u') => self.execute(&Command::PrevUrl, count)?,
+                    Key::Char('c') => self.execute(&Command::PrevHunk, count)?,
+                    Key::Char('f') => self.execute(&Command::PrevDiffFile, count)?,
                     _ => {
                         // Default: bracket matching (FindCloseBracket for `[`).
                         self.execute(&Command::FindCloseBracket('[', ']'), count)?;
@@ -668,6 +686,8 @@ impl<R: Read, W: Write> Pager<R, W> {
                 let count = self.pending_count.take();
                 match *key {
                     Key::Char('u') => self.execute(&Command::NextUrl, count)?,
+                    Key::Char('c') => self.execute(&Command::NextHunk, count)?,
+                    Key::Char('f') => self.execute(&Command::NextDiffFile, count)?,
                     _ => {
                         // Default: bracket matching (FindOpenBracket for `]`).
                         self.execute(&Command::FindOpenBracket('[', ']'), count)?;
@@ -858,7 +878,13 @@ impl<R: Read, W: Write> Pager<R, W> {
         // highlight disappears when the user scrolls or does something else.
         if !matches!(
             command,
-            Command::NextUrl | Command::PrevUrl | Command::OpenUrl
+            Command::NextUrl
+                | Command::PrevUrl
+                | Command::OpenUrl
+                | Command::NextHunk
+                | Command::PrevHunk
+                | Command::NextDiffFile
+                | Command::PrevDiffFile
         ) {
             self.current_url_index = None;
         }
@@ -1256,6 +1282,18 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::YankScreen => {
                 self.yank_screen(total)?;
             }
+            Command::NextHunk => {
+                self.navigate_next_hunk(total)?;
+            }
+            Command::PrevHunk => {
+                self.navigate_prev_hunk(total)?;
+            }
+            Command::NextDiffFile => {
+                self.navigate_next_diff_file(total)?;
+            }
+            Command::PrevDiffFile => {
+                self.navigate_prev_diff_file(total)?;
+            }
         }
 
         Ok(())
@@ -1462,6 +1500,101 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.status_message = Some("No URL selected".to_string());
         self.repaint()?;
+        Ok(())
+    }
+
+    /// Navigate to the next hunk header in a diff.
+    fn navigate_next_hunk(&mut self, total: usize) -> Result<()> {
+        let result = self.diff_nav_hunk(|files, cur| pgr_core::next_hunk_line(files, cur, true));
+        self.apply_diff_nav(result, total, "No hunks found")
+    }
+
+    /// Navigate to the previous hunk header in a diff.
+    fn navigate_prev_hunk(&mut self, total: usize) -> Result<()> {
+        let result = self.diff_nav_hunk(|files, cur| pgr_core::prev_hunk_line(files, cur, true));
+        self.apply_diff_nav(result, total, "No hunks found")
+    }
+
+    /// Navigate to the next file in a multi-file diff.
+    fn navigate_next_diff_file(&mut self, total: usize) -> Result<()> {
+        let result = self.diff_nav_file(|files, cur| pgr_core::next_file_line(files, cur, true));
+        self.apply_diff_nav(result, total, "No diff files found")
+    }
+
+    /// Navigate to the previous file in a multi-file diff.
+    fn navigate_prev_diff_file(&mut self, total: usize) -> Result<()> {
+        let result = self.diff_nav_file(|files, cur| pgr_core::prev_file_line(files, cur, true));
+        self.apply_diff_nav(result, total, "No diff files found")
+    }
+
+    /// Compute a hunk navigation target (line + status message) without mutating self.
+    fn diff_nav_hunk(
+        &self,
+        find_fn: impl FnOnce(&[pgr_core::DiffFile], usize) -> Option<usize>,
+    ) -> DiffNavResult {
+        let Some(ref files) = self.diff_state else {
+            return DiffNavResult::NotDiffMode;
+        };
+        let current = self.screen.top_line();
+        match find_fn(files, current) {
+            Some(target) => {
+                let status = pgr_core::compute_diff_prompt_info(files, target)
+                    .and_then(|info| info.hunk_index)
+                    .map_or_else(String::new, |(cur, tot)| format!("Hunk {cur} of {tot}"));
+                DiffNavResult::Found(target, status)
+            }
+            None => DiffNavResult::NoTarget,
+        }
+    }
+
+    /// Compute a file navigation target (line + status message) without mutating self.
+    fn diff_nav_file(
+        &self,
+        find_fn: impl FnOnce(&[pgr_core::DiffFile], usize) -> Option<usize>,
+    ) -> DiffNavResult {
+        let Some(ref files) = self.diff_state else {
+            return DiffNavResult::NotDiffMode;
+        };
+        let current = self.screen.top_line();
+        match find_fn(files, current) {
+            Some(target) => {
+                let status = pgr_core::compute_diff_prompt_info(files, target)
+                    .map(|info| {
+                        let file_label = info.current_file.as_deref().unwrap_or("(unknown)");
+                        info.file_index.map_or_else(String::new, |(cur, tot)| {
+                            format!("File {cur} of {tot}: {file_label}")
+                        })
+                    })
+                    .unwrap_or_default();
+                DiffNavResult::Found(target, status)
+            }
+            None => DiffNavResult::NoTarget,
+        }
+    }
+
+    /// Apply the result of a diff navigation computation.
+    fn apply_diff_nav(
+        &mut self,
+        result: DiffNavResult,
+        total: usize,
+        no_target_msg: &str,
+    ) -> Result<()> {
+        match result {
+            DiffNavResult::NotDiffMode => {
+                self.status_message = Some("Not in diff mode".to_string());
+                self.repaint()?;
+            }
+            DiffNavResult::NoTarget => {
+                self.status_message = Some(no_target_msg.to_string());
+                self.repaint()?;
+            }
+            DiffNavResult::Found(line, status) => {
+                self.save_last_position();
+                self.screen.goto_line(line, total);
+                self.status_message = Some(status);
+                self.repaint()?;
+            }
+        }
         Ok(())
     }
 
@@ -3377,8 +3510,9 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         // Invalidate match count cache when switching files since the buffer changed.
         self.match_count_cache = None;
-        // Reset content mode so it is re-detected on next first paint.
+        // Reset content mode and diff state so they are re-detected on next first paint.
         self.content_mode = ContentMode::Plain;
+        self.diff_state = None;
         // Reload git gutter state for the new file.
         if self.git_gutter_enabled {
             self.load_gutter_state();
@@ -3933,6 +4067,10 @@ impl<R: Read, W: Write> Pager<R, W> {
                 .match_count_cache
                 .as_ref()
                 .and_then(|cache| cache.current_match.map(|cur| (cur, cache.total_matches))),
+            diff_info: self
+                .diff_state
+                .as_ref()
+                .and_then(|files| pgr_core::compute_diff_prompt_info(files, top_line_0)),
         }
     }
 
@@ -4414,6 +4552,31 @@ impl<R: Read, W: Write> Pager<R, W> {
         if let Some(label) = self.content_mode.status_label() {
             self.status_message = Some(label);
         }
+
+        // Parse diff structure when diff mode is detected.
+        if self.content_mode == ContentMode::Diff {
+            self.parse_diff_state();
+        }
+    }
+
+    /// Parse the entire buffer into diff structure for hunk/file navigation.
+    ///
+    /// Called once when diff mode is detected. Reads all lines from the buffer
+    /// and stores the parsed structure in `diff_state`.
+    fn parse_diff_state(&mut self) {
+        // Collect all buffer lines for diff parsing.
+        let total = self.index.total_lines(&*self.buffer).unwrap_or(0);
+        let mut all_lines: Vec<String> = Vec::with_capacity(total);
+        for i in 0..total {
+            if let Ok(Some(line)) = self.index.get_line(i, &*self.buffer) {
+                all_lines.push(line);
+            } else {
+                all_lines.push(String::new());
+            }
+        }
+        let borrowed: Vec<&str> = all_lines.iter().map(String::as_str).collect();
+        let files = pgr_core::parse_diff(&borrowed);
+        self.diff_state = if files.is_empty() { None } else { Some(files) };
     }
 
     /// Immediately index all lines in the buffer (`--file-size`).
