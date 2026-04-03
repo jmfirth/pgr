@@ -163,6 +163,10 @@ pub enum Command {
     PrevDiffFile,
     /// Toggle side-by-side diff rendering. `ESC-V`.
     ToggleSideBySide,
+    /// Jump to the next section header in a man page. `]s`.
+    NextManSection,
+    /// Jump to the previous section header in a man page. `[s`.
+    PrevManSection,
 }
 
 #[cfg(test)]
@@ -436,5 +440,27 @@ mod tests {
     #[test]
     fn test_command_toggle_side_by_side_differs_from_noop() {
         assert_ne!(Command::ToggleSideBySide, Command::Noop);
+    }
+
+    // ── Task 360: Man page section navigation commands ──
+
+    #[test]
+    fn test_command_next_man_section_equality() {
+        assert_eq!(Command::NextManSection, Command::NextManSection);
+    }
+
+    #[test]
+    fn test_command_prev_man_section_equality() {
+        assert_eq!(Command::PrevManSection, Command::PrevManSection);
+    }
+
+    #[test]
+    fn test_command_next_man_section_differs_from_prev() {
+        assert_ne!(Command::NextManSection, Command::PrevManSection);
+    }
+
+    #[test]
+    fn test_command_next_man_section_differs_from_noop() {
+        assert_ne!(Command::NextManSection, Command::Noop);
     }
 }

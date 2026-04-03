@@ -7,6 +7,7 @@ pub mod diff;
 pub mod error;
 pub mod file_buffer;
 pub mod line_index;
+pub mod man_sections;
 pub mod marks;
 pub mod word_diff;
 
@@ -19,6 +20,9 @@ pub use diff::{
 pub use error::{CoreError, Result};
 pub use file_buffer::FileBuffer;
 pub use line_index::LineIndex;
+pub use man_sections::{
+    find_sections, next_section_line, prev_section_line, section_status, ManSection,
+};
 pub use marks::{Mark, MarkStore};
 pub use word_diff::{compute_word_diff, pair_changed_lines, WordChange};
 

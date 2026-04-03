@@ -146,6 +146,19 @@ enum DiffNavResult {
     Found(usize, String),
 }
 
+/// Result of computing a man page section navigation target.
+///
+/// Separates the read-only computation from the mutable state update,
+/// avoiding a borrow conflict between `self.man_sections` and `self`.
+enum ManSectionNavResult {
+    /// Not in man page mode — `man_sections` is `None`.
+    NotManMode,
+    /// In man page mode but no section found (e.g., no sections detected).
+    NoTarget,
+    /// Found a target: `(line_number, status_message)`.
+    Found(usize, String),
+}
+
 /// The main pager state, tying together all subsystems.
 #[allow(clippy::struct_excessive_bools)] // Pager legitimately tracks multiple independent on/off modes
 pub struct Pager<R: Read, W: Write> {
@@ -267,6 +280,8 @@ pub struct Pager<R: Read, W: Write> {
     content_mode: ContentMode,
     /// Parsed diff structure for hunk/file navigation (populated on first paint when Diff mode).
     diff_state: Option<Vec<pgr_core::DiffFile>>,
+    /// Parsed man page section list for ]s/[s navigation (populated on first paint when `ManPage` mode).
+    man_sections: Option<Vec<pgr_core::ManSection>>,
     /// Syntax highlighter instance (compiled-in only with `syntax` feature).
     #[cfg(feature = "syntax")]
     highlighter: Option<pgr_display::syntax::highlighting::Highlighter>,
@@ -367,6 +382,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             exit_reason: ExitReason::Normal,
             content_mode: ContentMode::Plain,
             diff_state: None,
+            man_sections: None,
             #[cfg(feature = "syntax")]
             highlighter: None,
             #[cfg(feature = "syntax")]
@@ -678,6 +694,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('u') => self.execute(&Command::PrevUrl, count)?,
                     Key::Char('c') => self.execute(&Command::PrevHunk, count)?,
                     Key::Char('f') => self.execute(&Command::PrevDiffFile, count)?,
+                    Key::Char('s') => self.execute(&Command::PrevManSection, count)?,
                     _ => {
                         // Default: bracket matching (FindCloseBracket for `[`).
                         self.execute(&Command::FindCloseBracket('[', ']'), count)?;
@@ -691,6 +708,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Char('u') => self.execute(&Command::NextUrl, count)?,
                     Key::Char('c') => self.execute(&Command::NextHunk, count)?,
                     Key::Char('f') => self.execute(&Command::NextDiffFile, count)?,
+                    Key::Char('s') => self.execute(&Command::NextManSection, count)?,
                     _ => {
                         // Default: bracket matching (FindOpenBracket for `]`).
                         self.execute(&Command::FindOpenBracket('[', ']'), count)?;
@@ -1308,6 +1326,12 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
                 self.repaint()?;
             }
+            Command::NextManSection => {
+                self.navigate_next_man_section(total)?;
+            }
+            Command::PrevManSection => {
+                self.navigate_prev_man_section(total)?;
+            }
         }
 
         Ok(())
@@ -1539,6 +1563,62 @@ impl<R: Read, W: Write> Pager<R, W> {
     fn navigate_prev_diff_file(&mut self, total: usize) -> Result<()> {
         let result = self.diff_nav_file(|files, cur| pgr_core::prev_file_line(files, cur, true));
         self.apply_diff_nav(result, total, "No diff files found")
+    }
+
+    /// Navigate to the next man page section.
+    fn navigate_next_man_section(&mut self, total: usize) -> Result<()> {
+        let result = self.man_section_nav(|secs, cur| pgr_core::next_section_line(secs, cur, true));
+        self.apply_man_section_nav(result, total, "No sections found")
+    }
+
+    /// Navigate to the previous man page section.
+    fn navigate_prev_man_section(&mut self, total: usize) -> Result<()> {
+        let result = self.man_section_nav(|secs, cur| pgr_core::prev_section_line(secs, cur, true));
+        self.apply_man_section_nav(result, total, "No sections found")
+    }
+
+    /// Compute a man section navigation target without mutating self.
+    fn man_section_nav(
+        &self,
+        find_fn: impl FnOnce(&[pgr_core::ManSection], usize) -> Option<usize>,
+    ) -> ManSectionNavResult {
+        let Some(ref sections) = self.man_sections else {
+            return ManSectionNavResult::NotManMode;
+        };
+        let current = self.screen.top_line();
+        match find_fn(sections, current) {
+            Some(target) => {
+                let status = pgr_core::section_status(sections, target);
+                ManSectionNavResult::Found(target, status)
+            }
+            None => ManSectionNavResult::NoTarget,
+        }
+    }
+
+    /// Apply the result of a man section navigation computation.
+    fn apply_man_section_nav(
+        &mut self,
+        result: ManSectionNavResult,
+        total: usize,
+        no_target_msg: &str,
+    ) -> Result<()> {
+        match result {
+            ManSectionNavResult::NotManMode => {
+                self.status_message = Some("Not in man page mode".to_string());
+                self.repaint()?;
+            }
+            ManSectionNavResult::NoTarget => {
+                self.status_message = Some(no_target_msg.to_string());
+                self.repaint()?;
+            }
+            ManSectionNavResult::Found(line, status) => {
+                self.save_last_position();
+                self.screen.goto_line(line, total);
+                self.status_message = Some(status);
+                self.repaint()?;
+            }
+        }
+        Ok(())
     }
 
     /// Compute a hunk navigation target (line + status message) without mutating self.
@@ -3524,9 +3604,10 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         // Invalidate match count cache when switching files since the buffer changed.
         self.match_count_cache = None;
-        // Reset content mode and diff state so they are re-detected on next first paint.
+        // Reset content mode and diff/section state so they are re-detected on next first paint.
         self.content_mode = ContentMode::Plain;
         self.diff_state = None;
+        self.man_sections = None;
         // Reload git gutter state for the new file.
         if self.git_gutter_enabled {
             self.load_gutter_state();
@@ -4678,6 +4759,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         if self.content_mode == ContentMode::Diff {
             self.parse_diff_state();
         }
+
+        // Parse man page section structure when man page mode is detected.
+        if self.content_mode == ContentMode::ManPage {
+            self.parse_man_sections();
+        }
     }
 
     /// Parse the entire buffer into diff structure for hunk/file navigation.
@@ -4698,6 +4784,29 @@ impl<R: Read, W: Write> Pager<R, W> {
         let borrowed: Vec<&str> = all_lines.iter().map(String::as_str).collect();
         let files = pgr_core::parse_diff(&borrowed);
         self.diff_state = if files.is_empty() { None } else { Some(files) };
+    }
+
+    /// Parse the entire buffer into man page section structure for ]s/[s navigation.
+    ///
+    /// Called once when man page mode is detected. Reads all lines from the buffer
+    /// and stores the parsed sections in `man_sections`.
+    fn parse_man_sections(&mut self) {
+        let total = self.index.total_lines(&*self.buffer).unwrap_or(0);
+        let mut all_lines: Vec<String> = Vec::with_capacity(total);
+        for i in 0..total {
+            if let Ok(Some(line)) = self.index.get_line(i, &*self.buffer) {
+                all_lines.push(line);
+            } else {
+                all_lines.push(String::new());
+            }
+        }
+        let borrowed: Vec<&str> = all_lines.iter().map(String::as_str).collect();
+        let sections = pgr_core::find_sections(&borrowed);
+        self.man_sections = if sections.is_empty() {
+            None
+        } else {
+            Some(sections)
+        };
     }
 
     /// Immediately index all lines in the buffer (`--file-size`).
