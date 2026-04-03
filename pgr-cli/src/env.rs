@@ -148,6 +148,13 @@ pub struct EnvConfig {
     /// `POSIXLY_CORRECT`: when set (non-empty), enforces strict POSIX option ordering
     /// (options must precede operands).
     pub posixly_correct: bool,
+
+    // --- pgr-specific environment variables ---
+    /// `PGR_SYNTAX`: set to "0" to disable syntax highlighting by default.
+    pub pgr_syntax_disabled: bool,
+
+    /// `PGR_THEME`: syntax highlighting theme name.
+    pub pgr_theme: Option<String>,
 }
 
 impl EnvConfig {
@@ -227,6 +234,12 @@ impl EnvConfig {
         let unsupport = env_nonempty("LESS_UNSUPPORT");
         let posixly_correct = env_is_set("POSIXLY_CORRECT");
 
+        // pgr-specific env vars
+        let pgr_syntax_disabled = std::env::var("PGR_SYNTAX")
+            .map(|v| v.trim() == "0")
+            .unwrap_or(false);
+        let pgr_theme = env_nonempty("PGR_THEME");
+
         Self {
             less_options,
             charset,
@@ -266,6 +279,8 @@ impl EnvConfig {
             unsupport,
             no_config,
             posixly_correct,
+            pgr_syntax_disabled,
+            pgr_theme,
         }
     }
 

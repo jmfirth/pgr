@@ -221,6 +221,12 @@ pub struct Pager<R: Read, W: Write> {
     quit_on_intr: bool,
     /// The reason the pager exited.
     exit_reason: ExitReason,
+    /// Syntax highlighter instance (compiled-in only with `syntax` feature).
+    #[cfg(feature = "syntax")]
+    highlighter: Option<pgr_display::syntax::highlighting::Highlighter>,
+    /// Whether syntax highlighting is enabled at runtime (can be toggled).
+    #[cfg(feature = "syntax")]
+    syntax_enabled: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -295,6 +301,10 @@ impl<R: Read, W: Write> Pager<R, W> {
             redraw_on_quit: false,
             quit_on_intr: false,
             exit_reason: ExitReason::Normal,
+            #[cfg(feature = "syntax")]
+            highlighter: None,
+            #[cfg(feature = "syntax")]
+            syntax_enabled: true,
         }
     }
 
@@ -1061,6 +1071,20 @@ impl<R: Read, W: Write> Pager<R, W> {
                 // platform opener once hyperlink selection is tracked.
                 self.status_message = Some("hyperlink open not yet implemented".to_string());
                 self.repaint()?;
+            }
+            Command::ToggleSyntax => {
+                #[cfg(feature = "syntax")]
+                {
+                    self.syntax_enabled = !self.syntax_enabled;
+                    let state = if self.syntax_enabled { "on" } else { "off" };
+                    self.status_message = Some(format!("Syntax highlighting {state}"));
+                    self.repaint()?;
+                }
+                #[cfg(not(feature = "syntax"))]
+                {
+                    self.status_message = Some("syntax highlighting not compiled in".to_string());
+                    self.repaint()?;
+                }
             }
         }
 
@@ -3000,6 +3024,19 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        // Apply syntax highlighting before search highlights (SGR injection).
+        // When highlighting is active, the render config must be at least
+        // AnsiOnly so the injected SGR codes are preserved.
+        #[cfg(feature = "syntax")]
+        let syntax_active = self.is_syntax_active();
+        #[cfg(not(feature = "syntax"))]
+        let syntax_active = false;
+
+        #[cfg(feature = "syntax")]
+        if syntax_active {
+            lines = self.highlight_lines(&lines, start);
+        }
+
         // Compute highlights for the visible lines.
         self.highlight_state
             .compute_highlights(&lines, self.last_pattern.as_ref());
@@ -3064,11 +3101,22 @@ impl<R: Read, W: Write> Pager<R, W> {
             header_line_contents,
             wordwrap: self.runtime_options.wordwrap,
         };
+        // When syntax highlighting injected SGR codes, ensure the render
+        // pipeline uses at least AnsiOnly mode so those codes are preserved.
+        let effective_config =
+            if syntax_active && self.render_config.raw_mode == RawControlMode::Off {
+                let mut cfg = self.render_config.clone();
+                cfg.raw_mode = RawControlMode::AnsiOnly;
+                cfg
+            } else {
+                self.render_config.clone()
+            };
+
         paint_screen_with_options(
             &mut self.writer,
             &self.screen,
             &lines,
-            &self.render_config,
+            &effective_config,
             &paint_opts,
         )?;
 
@@ -3793,6 +3841,116 @@ impl<R: Read, W: Write> Pager<R, W> {
     pub fn index_all_immediate(&mut self) -> Result<()> {
         self.index.index_all(&*self.buffer)?;
         Ok(())
+    }
+
+    /// Check whether syntax highlighting is active for the current file.
+    ///
+    /// Returns `true` when the `syntax` feature is compiled in, highlighting
+    /// is enabled at runtime, a highlighter is loaded, and the current file
+    /// has a recognized syntax.
+    #[cfg(feature = "syntax")]
+    fn is_syntax_active(&self) -> bool {
+        if !self.syntax_enabled {
+            return false;
+        }
+        let Some(ref highlighter) = self.highlighter else {
+            return false;
+        };
+        let Some(filename) = self.filename.as_deref() else {
+            return false;
+        };
+        highlighter.detect_syntax(filename).is_some()
+    }
+
+    /// Set the syntax highlighter for syntax-highlighted rendering.
+    ///
+    /// When set (and the file has a recognized extension), lines are
+    /// highlighted with ANSI SGR color codes before rendering.
+    #[cfg(feature = "syntax")]
+    pub fn set_highlighter(&mut self, highlighter: pgr_display::syntax::highlighting::Highlighter) {
+        self.highlighter = Some(highlighter);
+    }
+
+    /// Enable or disable syntax highlighting at runtime.
+    #[cfg(feature = "syntax")]
+    pub fn set_syntax_enabled(&mut self, enabled: bool) {
+        self.syntax_enabled = enabled;
+    }
+
+    /// Apply syntax highlighting to a set of lines if highlighting is active.
+    ///
+    /// Returns the lines with SGR color codes injected, or the original lines
+    /// if highlighting is not active for the current file.
+    #[cfg(feature = "syntax")]
+    fn highlight_lines(
+        &mut self,
+        lines: &[Option<String>],
+        start_line: usize,
+    ) -> Vec<Option<String>> {
+        if !self.syntax_enabled {
+            return lines.to_vec();
+        }
+        let Some(ref highlighter) = self.highlighter else {
+            return lines.to_vec();
+        };
+        let Some(filename) = self.filename.as_deref() else {
+            return lines.to_vec();
+        };
+        let Some(syntax) = highlighter.detect_syntax(filename) else {
+            return lines.to_vec();
+        };
+
+        // Use HighlightLines for proper stateful highlighting.
+        // For the visible window, we need to parse from the beginning (or a
+        // cached state) up to the start line, then highlight the visible lines.
+        let mut hl = highlighter.highlight_lines(syntax);
+
+        // Parse (but don't render) lines before the visible window to build
+        // correct syntax state. For large files this could be slow, but for
+        // typical use (sequential scrolling) it's bounded by the visible window.
+        // We cap the pre-parse to avoid freezing on very large jumps.
+        let max_preparse = 5000;
+        let preparse_start = start_line.saturating_sub(max_preparse);
+
+        // Skip lines before preparse_start (approximate — we lose state accuracy
+        // but avoid O(n) startup for huge files).
+        if preparse_start > 0 {
+            // Re-create from start for simplicity; in a future iteration,
+            // SyntaxState caching would make this efficient.
+            hl = highlighter.highlight_lines(syntax);
+        }
+
+        // Pre-parse lines before the visible window.
+        for line_num in preparse_start..start_line {
+            if let Ok(Some(text)) = self.index.get_line(line_num, &*self.buffer) {
+                // Add newline if missing — syntect expects newline-terminated lines.
+                let text_nl = if text.ends_with('\n') {
+                    text
+                } else {
+                    format!("{text}\n")
+                };
+                let _ = hl.highlight_line(&text_nl, highlighter.syntax_set());
+            }
+        }
+
+        // Now highlight the visible lines.
+        lines
+            .iter()
+            .map(|opt| {
+                opt.as_ref().and_then(|text| {
+                    let text_nl = if text.ends_with('\n') {
+                        text.clone()
+                    } else {
+                        format!("{text}\n")
+                    };
+                    let ranges = hl.highlight_line(&text_nl, highlighter.syntax_set()).ok()?;
+                    let escaped =
+                        pgr_display::syntax::highlighting::as_24_bit_terminal_escaped(&ranges);
+                    // Remove trailing newline that we added (render pipeline handles line breaks).
+                    Some(escaped.trim_end_matches('\n').to_string())
+                })
+            })
+            .collect()
     }
 }
 

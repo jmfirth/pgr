@@ -301,6 +301,11 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
     configure_pager(&mut pager, options, rows, cols);
     apply_lesskey(&mut pager, options, &env_config);
 
+    // Syntax highlighting (pipe input has no filename, so detection will
+    // return None and highlighting won't apply — correct behavior).
+    #[cfg(feature = "syntax")]
+    configure_syntax(&mut pager, options, &env_config);
+
     if env_config.secure_mode {
         pager.set_secure_mode(true);
     }
@@ -404,6 +409,9 @@ fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
     apply_lesskey(&mut pager, options, &env_config);
+
+    #[cfg(feature = "syntax")]
+    configure_syntax(&mut pager, options, &env_config);
 
     if env_config.secure_mode {
         pager.set_secure_mode(true);
@@ -537,6 +545,36 @@ fn configure_pager<R: std::io::Read, W: std::io::Write>(
     if options.quit_on_intr {
         pager.set_quit_on_intr(true);
     }
+}
+
+/// Configure syntax highlighting on the pager based on CLI flags and env vars.
+///
+/// When the `syntax` feature is compiled in and not disabled by `--no-syntax`
+/// or `PGR_SYNTAX=0`, creates a `Highlighter` and attaches it to the pager.
+/// For pipe input (no filename), highlighting is skipped.
+#[cfg(feature = "syntax")]
+fn configure_syntax<R: std::io::Read, W: std::io::Write>(
+    pager: &mut Pager<R, W>,
+    options: &Options,
+    env_config: &EnvConfig,
+) {
+    // Determine whether syntax highlighting should be active.
+    let disabled = options.no_syntax || env_config.pgr_syntax_disabled;
+    if disabled {
+        pager.set_syntax_enabled(false);
+        return;
+    }
+
+    // Determine theme: CLI flag > env var > default.
+    let theme_name = options.theme.as_deref().or(env_config.pgr_theme.as_deref());
+
+    let highlighter = if let Some(name) = theme_name {
+        pgr_display::syntax::highlighting::Highlighter::with_theme(name)
+    } else {
+        pgr_display::syntax::highlighting::Highlighter::new()
+    };
+
+    pager.set_highlighter(highlighter);
 }
 
 /// Discover and load a lesskey source file.

@@ -376,6 +376,19 @@ pub struct Options {
     #[arg(long = "use-backslash")]
     pub use_backslash: bool,
 
+    // ── Syntax highlighting flags ────────────────────────────────────
+    /// Enable syntax highlighting (default when compiled with `syntax` feature).
+    #[arg(long = "syntax", overrides_with = "no_syntax")]
+    pub syntax: bool,
+
+    /// Disable syntax highlighting.
+    #[arg(long = "no-syntax")]
+    pub no_syntax: bool,
+
+    /// Select the syntax highlighting color theme.
+    #[arg(long = "theme")]
+    pub theme: Option<String>,
+
     // ── Meta flags ────────────────────────────────────────────────────
     /// Print version information and exit.
     #[arg(short = 'V', long = "version")]

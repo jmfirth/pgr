@@ -11,6 +11,8 @@ pub mod prompt;
 pub mod render;
 pub mod screen;
 pub mod squeeze;
+#[cfg(feature = "syntax")]
+pub mod syntax;
 pub mod termcap;
 pub mod terminal_output;
 pub mod unicode;

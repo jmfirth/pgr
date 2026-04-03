@@ -3,6 +3,10 @@ name = "pgr-cli"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["syntax"]
+syntax = ["pgr-keys/syntax", "pgr-display/syntax"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -10,8 +14,8 @@ libc = "0.2"
 pgr-core = { path = "../pgr-core" }
 pgr-input = { path = "../pgr-input" }
 pgr-search = { path = "../pgr-search" }
-pgr-display = { path = "../pgr-display" }
-pgr-keys = { path = "../pgr-keys" }
+pgr-display = { path = "../pgr-display", default-features = false }
+pgr-keys = { path = "../pgr-keys", default-features = false }
 
 [dev-dependencies]
 expectrl = "0.8"

@@ -138,6 +138,8 @@ impl Keymap {
             // Tag navigation
             (Key::Char('t'), Command::NextTag),
             (Key::Char('T'), Command::PrevTag),
+            // Syntax highlighting toggle
+            (Key::EscSeq('S'), Command::ToggleSyntax),
             // Mouse scroll (default 3 lines per wheel tick)
             (Key::ScrollUp, Command::ScrollBackward(3)),
             (Key::ScrollDown, Command::ScrollForward(3)),
@@ -705,5 +707,13 @@ mod tests {
         // Verify other scroll bindings are unchanged.
         assert_eq!(keymap.lookup(&Key::Down), Command::ScrollForward(1));
         assert_eq!(keymap.lookup(&Key::Up), Command::ScrollBackward(1));
+    }
+
+    // ── Task 313: Syntax highlighting toggle ──
+
+    #[test]
+    fn test_keymap_esc_s_maps_to_toggle_syntax() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('S')), Command::ToggleSyntax);
     }
 }

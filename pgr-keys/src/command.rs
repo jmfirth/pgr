@@ -133,6 +133,8 @@ pub enum Command {
     HyperlinkJump,
     /// Open the current hyperlink's URI in a browser. `^O^O`.
     HyperlinkOpen,
+    /// Toggle syntax highlighting on/off. `ESC-S`.
+    ToggleSyntax,
 }
 
 #[cfg(test)]

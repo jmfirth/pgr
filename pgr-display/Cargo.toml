@@ -3,8 +3,13 @@ name = "pgr-display"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["syntax"]
+syntax = ["dep:syntect"]
+
 [dependencies]
 pgr-core = { path = "../pgr-core" }
+syntect = { version = "5.2", optional = true, default-features = false, features = ["default-fancy"] }
 thiserror = "2"
 unicode-segmentation = "1"
 unicode-width = "0.2"
