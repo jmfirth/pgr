@@ -5,6 +5,7 @@ pub mod ansi;
 pub mod blame_render;
 pub mod charset;
 pub mod color;
+pub mod compiler_links;
 pub mod diff_render;
 pub mod error;
 pub mod hyperlink;
@@ -28,6 +29,7 @@ pub use blame_render::colorize_blame_line;
 pub use blame_render::colorize_blame_line_syntax;
 pub use charset::{CharType, Charset};
 pub use color::{Color, ColorAutoDetect, ColorConfig, ColorSelector, ColorSpec};
+pub use compiler_links::linkify_compiler_output;
 pub use diff_render::colorize_diff_line;
 #[cfg(feature = "syntax")]
 pub use diff_render::highlight_content;

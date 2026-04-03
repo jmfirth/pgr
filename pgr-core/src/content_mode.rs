@@ -20,6 +20,8 @@ pub enum ContentMode {
     Json,
     /// SQL table output (ASCII box drawing or aligned columns).
     SqlTable,
+    /// Compiler error output (`file:line:col` patterns from rustc, gcc, clang, tsc, etc.).
+    CompilerError,
 }
 
 impl fmt::Display for ContentMode {
@@ -32,6 +34,7 @@ impl fmt::Display for ContentMode {
             Self::GitLog => write!(f, "git log"),
             Self::Json => write!(f, "JSON"),
             Self::SqlTable => write!(f, "SQL table"),
+            Self::CompilerError => write!(f, "compiler output"),
         }
     }
 }
@@ -76,6 +79,8 @@ pub fn detect_content_mode(lines: &[&str]) -> ContentMode {
         ContentMode::Json
     } else if is_sql_table(lines) {
         ContentMode::SqlTable
+    } else if is_compiler_error(lines) {
+        ContentMode::CompilerError
     } else {
         ContentMode::Plain
     }
@@ -294,6 +299,155 @@ fn is_sql_table(lines: &[&str]) -> bool {
 
     // Check for pipe-delimited rows alongside a rule line (already checked above,
     // but kept explicit for clarity — if we have a rule line we're already returning true)
+    false
+}
+
+/// Detect compiler error output from common compilers.
+///
+/// Checks the first 20 lines for at least 2 matching the patterns:
+/// - `path/file.rs:42:10: error[E0308]` (Rust / rustc)
+/// - `path/file.c:42:10: error:` (GCC / Clang)
+/// - `path/file.py:42: SyntaxError` (Python)
+/// - `path/file.ts(42,10): error TS2304` (TypeScript)
+///
+/// A match requires: a filename with extension, followed by `:N` or `(N,N)`,
+/// then `:` or `)` and an error/warning keyword on the same line.
+fn is_compiler_error(lines: &[&str]) -> bool {
+    let check_count = lines.len().min(20);
+    let mut matches: usize = 0;
+
+    for line in &lines[..check_count] {
+        if compiler_error_line_matches(line) {
+            matches += 1;
+            if matches >= 2 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check whether a single line looks like a compiler error/warning reference.
+///
+/// Handles two syntaxes:
+/// - Colon-separated: `file.ext:line:...` (rustc, gcc, clang, python)
+/// - Paren-separated: `file.ext(line,col): ...` (TypeScript)
+///
+/// The file must have an extension (at least one `.` before the `:` or `(`).
+/// After the location, the line must contain an error/warning keyword.
+fn compiler_error_line_matches(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+
+    // Skip leading path characters to find a filename with an extension.
+    // We look for the first occurrence of `.<alpha>` that is followed by
+    // `:` or `(` to anchor the start of the file reference.
+    let mut i = 0;
+    while i < len {
+        // Find a '.' that could start a file extension.
+        if bytes[i] != b'.' {
+            i += 1;
+            continue;
+        }
+        // Extension must start with an ASCII letter.
+        let ext_start = i + 1;
+        if ext_start >= len || !bytes[ext_start].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+        // Consume the extension characters (letters/digits).
+        let mut j = ext_start;
+        while j < len && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'+') {
+            j += 1;
+        }
+        if j >= len {
+            return false;
+        }
+
+        // After the extension: either `:` (colon syntax) or `(` (paren syntax).
+        if bytes[j] == b':' {
+            // Colon syntax: file.ext:line[:col]:...
+            // Require at least one digit after the first colon.
+            let mut k = j + 1;
+            if k >= len || !bytes[k].is_ascii_digit() {
+                i = j + 1;
+                continue;
+            }
+            while k < len && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            // Optional second :col segment.
+            if k < len && bytes[k] == b':' {
+                let after_colon = k + 1;
+                if after_colon < len && bytes[after_colon].is_ascii_digit() {
+                    k = after_colon;
+                    while k < len && bytes[k].is_ascii_digit() {
+                        k += 1;
+                    }
+                }
+            }
+            // After the location, the remainder must contain an error/warning keyword.
+            let rest = &line[k..];
+            if rest_has_error_keyword(rest) {
+                return true;
+            }
+        } else if bytes[j] == b'(' {
+            // Paren syntax: file.ext(line,col): ...
+            let mut k = j + 1;
+            if k >= len || !bytes[k].is_ascii_digit() {
+                i = j + 1;
+                continue;
+            }
+            while k < len && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            // Optional ,col
+            if k < len && bytes[k] == b',' {
+                k += 1;
+                while k < len && bytes[k].is_ascii_digit() {
+                    k += 1;
+                }
+            }
+            // Must be followed by `):` or `) :`
+            if k >= len || bytes[k] != b')' {
+                i = j + 1;
+                continue;
+            }
+            k += 1;
+            let rest = &line[k..];
+            if rest_has_error_keyword(rest) {
+                return true;
+            }
+        }
+
+        i += 1;
+    }
+
+    false
+}
+
+/// Return true if `rest` contains an error or warning keyword.
+///
+/// Matches `error`, `warning`, or `note` as whole words, case-insensitively,
+/// within the first 64 bytes. The limit prevents scanning arbitrarily long
+/// lines.
+fn rest_has_error_keyword(rest: &str) -> bool {
+    let haystack = &rest[..rest.len().min(64)];
+    let lower = haystack.to_ascii_lowercase();
+    // Match as standalone words: preceded by non-alpha or start, followed by
+    // non-alpha or end.  We use simple substring checks for each keyword.
+    for keyword in &["error", "warning", "note"] {
+        if let Some(pos) = lower.find(keyword) {
+            let before_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic();
+            let after_pos = pos + keyword.len();
+            let after_ok =
+                after_pos >= lower.len() || !lower.as_bytes()[after_pos].is_ascii_alphabetic();
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+    }
     false
 }
 
@@ -531,5 +685,120 @@ mod tests {
             "author Test User <test@example.com>",
         ];
         assert_eq!(detect_content_mode(&lines), ContentMode::GitLog);
+    }
+
+    // ── CompilerError detection tests ──
+
+    #[test]
+    fn test_detect_rust_compiler_output_returns_compiler_error() {
+        let lines = vec![
+            "error[E0308]: mismatched types",
+            " --> src/main.rs:42:10",
+            "  |",
+            "42 |     let x: i32 = \"hello\";",
+            "  |                  ^^^^^^^ expected `i32`, found `&str`",
+            "src/lib.rs:10:5: error[E0425]: cannot find value `foo` in this scope",
+            "src/lib.rs:20:1: warning: unused variable",
+        ];
+        assert_eq!(detect_content_mode(&lines), ContentMode::CompilerError);
+    }
+
+    #[test]
+    fn test_detect_gcc_output_returns_compiler_error() {
+        let lines = vec![
+            "main.c:10:5: error: undeclared (first use in this function)",
+            "main.c:10:5: note: each undeclared identifier reported only once",
+            "main.c:12:1: error: expected ';' before '}' token",
+        ];
+        assert_eq!(detect_content_mode(&lines), ContentMode::CompilerError);
+    }
+
+    #[test]
+    fn test_detect_typescript_output_returns_compiler_error() {
+        let lines = vec![
+            "src/index.ts(10,5): error TS2304: Cannot find name 'foo'.",
+            "src/index.ts(20,3): error TS2345: Argument of type 'string' is not assignable",
+            "src/utils.ts(5,1): warning TS6133: 'bar' is declared but its value is never read.",
+        ];
+        assert_eq!(detect_content_mode(&lines), ContentMode::CompilerError);
+    }
+
+    #[test]
+    fn test_detect_python_traceback_not_compiler_error() {
+        // Python tracebacks use "File ..., line N" not file:line patterns
+        let lines = vec![
+            "Traceback (most recent call last):",
+            "  File \"script.py\", line 42, in <module>",
+            "    result = foo()",
+            "  File \"lib.py\", line 10, in foo",
+            "    raise ValueError(\"bad\")",
+            "ValueError: bad",
+        ];
+        // Python tracebacks do not match the file:line:keyword pattern required
+        assert_ne!(detect_content_mode(&lines), ContentMode::CompilerError);
+    }
+
+    #[test]
+    fn test_detect_single_error_line_not_compiler_error() {
+        // Only 1 matching line — need 2+ to trigger
+        let lines = vec![
+            "src/main.rs:42:10: error[E0308]: mismatched types",
+            "some other unrelated line",
+            "another plain line",
+        ];
+        assert_ne!(detect_content_mode(&lines), ContentMode::CompilerError);
+    }
+
+    #[test]
+    fn test_content_mode_compiler_error_display() {
+        assert_eq!(ContentMode::CompilerError.to_string(), "compiler output");
+    }
+
+    #[test]
+    fn test_content_mode_compiler_error_status_label() {
+        assert_eq!(
+            ContentMode::CompilerError.status_label(),
+            Some("[compiler output]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_compiler_error_line_matches_rust_colon_syntax() {
+        assert!(compiler_error_line_matches(
+            "src/main.rs:42:10: error[E0308]"
+        ));
+    }
+
+    #[test]
+    fn test_compiler_error_line_matches_gcc_colon_syntax() {
+        assert!(compiler_error_line_matches(
+            "main.c:10:5: error: undeclared identifier"
+        ));
+    }
+
+    #[test]
+    fn test_compiler_error_line_matches_typescript_paren_syntax() {
+        assert!(compiler_error_line_matches(
+            "src/index.ts(10,5): error TS2304: Cannot find name"
+        ));
+    }
+
+    #[test]
+    fn test_compiler_error_line_matches_warning_keyword() {
+        assert!(compiler_error_line_matches(
+            "src/lib.rs:5:1: warning: unused variable"
+        ));
+    }
+
+    #[test]
+    fn test_compiler_error_line_no_match_plain_text() {
+        assert!(!compiler_error_line_matches("just a plain text line"));
+    }
+
+    #[test]
+    fn test_compiler_error_line_no_match_no_extension() {
+        assert!(!compiler_error_line_matches(
+            "Makefile:10: *** missing separator"
+        ));
     }
 }
