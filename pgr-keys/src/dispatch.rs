@@ -4227,6 +4227,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        // Apply diff coloring + syntax highlighting before side-by-side layout.
+        // The side-by-side renderer uses ANSI-aware truncation so SGR codes
+        // don't consume panel width.
+        all_lines = self.colorize_diff_lines(&all_lines);
+
         let (_, cols) = self.screen.dimensions();
 
         // Build the side-by-side rendered lines.

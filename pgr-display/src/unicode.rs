@@ -139,6 +139,65 @@ pub fn truncate_to_width_grapheme(s: &str, max_width: usize) -> (&str, usize) {
     (s, col)
 }
 
+/// Truncate a string containing ANSI escape sequences to fit within
+/// `max_width` display columns.
+///
+/// Like [`truncate_to_width_grapheme`] but skips ANSI escape sequences
+/// (e.g., SGR color codes) during width calculation. Escape sequences
+/// are preserved in the output and don't count toward the width limit.
+///
+/// Returns `(truncated_str, visible_width)`.
+#[must_use]
+pub fn truncate_to_width_ansi(s: &str, max_width: usize) -> (&str, usize) {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut col: usize = 0;
+    let mut i: usize = 0;
+
+    while i < len {
+        // Skip ANSI escape sequences (ESC [ ... final_byte)
+        if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < len && !(0x40..=0x7E).contains(&bytes[i]) {
+                i += 1;
+            }
+            if i < len {
+                i += 1; // skip final byte
+            }
+            continue;
+        }
+        // Skip OSC sequences (ESC ] ... BEL/ST)
+        if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b']' {
+            i += 2;
+            while i < len && bytes[i] != 0x07 {
+                if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b'\\' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            if i < len && bytes[i] == 0x07 {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Visible character — check width
+        let rest = &s[i..];
+        let grapheme = rest.graphemes(true).next().unwrap_or("");
+        if grapheme.is_empty() {
+            break;
+        }
+        let w = grapheme_width(grapheme);
+        if col + w > max_width {
+            return (&s[..i], col);
+        }
+        col += w;
+        i += grapheme.len();
+    }
+    (s, col)
+}
+
 /// Left-truncate: return the rightmost `max_width` display columns of a
 /// string, respecting grapheme boundaries.
 ///

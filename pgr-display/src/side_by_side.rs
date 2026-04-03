@@ -6,7 +6,7 @@
 
 use pgr_core::{classify_diff_line, DiffLineType};
 
-use crate::unicode::truncate_to_width_grapheme;
+use crate::unicode::truncate_to_width_ansi;
 
 /// Minimum terminal width required for side-by-side mode.
 ///
@@ -193,11 +193,11 @@ fn render_one_line(line: &SideBySideLine, layout: &SideBySideLayout) -> String {
     let right_text = line.right.as_deref().unwrap_or("");
 
     // Truncate and pad left panel
-    let (left_truncated, left_width) = truncate_to_width_grapheme(left_text, layout.left_width);
+    let (left_truncated, left_width) = truncate_to_width_ansi(left_text, layout.left_width);
     let left_pad = layout.left_width.saturating_sub(left_width);
 
     // Truncate and pad right panel
-    let (right_truncated, right_width) = truncate_to_width_grapheme(right_text, layout.right_width);
+    let (right_truncated, right_width) = truncate_to_width_ansi(right_text, layout.right_width);
     let right_pad = layout.right_width.saturating_sub(right_width);
 
     let mut out = String::with_capacity(
