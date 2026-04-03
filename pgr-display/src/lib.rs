@@ -15,6 +15,7 @@ pub mod side_by_side;
 pub mod squeeze;
 #[cfg(feature = "syntax")]
 pub mod syntax;
+pub mod table_render;
 pub mod termcap;
 pub mod terminal_output;
 pub mod unicode;
@@ -45,6 +46,10 @@ pub use side_by_side::{
     SideBySideLayout, SideBySideLine, MIN_SIDE_BY_SIDE_COLS,
 };
 pub use squeeze::{is_blank_line, squeeze_visible_lines};
+pub use table_render::{
+    first_column_width, parse_table_layout, render_frozen_column, snap_to_next_column,
+    snap_to_prev_column, SqlTableLayout,
+};
 pub use termcap::TermcapOverrides;
 pub use terminal_output::{
     clear_screen, compute_line_screen_rows, paint_error_message, paint_screen, paint_screen_mapped,

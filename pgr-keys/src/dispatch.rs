@@ -12,8 +12,9 @@ use pgr_core::{detect_content_mode, Buffer, ContentMode, LineIndex, Mark, MarkSt
 use pgr_display::{
     build_side_by_side_lines, compute_line_screen_rows, eval_prompt, find_urls, line_number_width,
     paint_info_line, paint_prompt, paint_screen_mapped, paint_screen_with_options,
-    squeeze_visible_lines, wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions,
-    PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, ScreenLine, TabStops,
+    parse_table_layout, snap_to_next_column, snap_to_prev_column, squeeze_visible_lines,
+    wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, ScreenLine, SqlTableLayout, TabStops,
     DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
@@ -288,6 +289,8 @@ pub struct Pager<R: Read, W: Write> {
     git_gutter_enabled: bool,
     /// Whether side-by-side diff rendering is active (toggled with ESC-V).
     side_by_side: bool,
+    /// Parsed SQL table layout for column-snap hscroll and sticky headers.
+    sql_table_layout: Option<SqlTableLayout>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -378,6 +381,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             gutter_state: None,
             git_gutter_enabled: false,
             side_by_side: false,
+            sql_table_layout: None,
         }
     }
 
@@ -992,17 +996,31 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::Noop => {}
             Command::ScrollRight => {
-                let cols = self.screen.cols();
-                let amount = count.unwrap_or(cols / 2);
-                let h = self.screen.horizontal_offset();
-                self.screen.set_horizontal_offset(h.saturating_add(amount));
+                if let Some(ref layout) = self.sql_table_layout {
+                    // Column-snap hscroll: jump to the next column boundary.
+                    let h = self.screen.horizontal_offset();
+                    let new_h = snap_to_next_column(layout, h);
+                    self.screen.set_horizontal_offset(new_h);
+                } else {
+                    let cols = self.screen.cols();
+                    let amount = count.unwrap_or(cols / 2);
+                    let h = self.screen.horizontal_offset();
+                    self.screen.set_horizontal_offset(h.saturating_add(amount));
+                }
                 self.repaint()?;
             }
             Command::ScrollLeft => {
-                let cols = self.screen.cols();
-                let amount = count.unwrap_or(cols / 2);
-                let h = self.screen.horizontal_offset();
-                self.screen.set_horizontal_offset(h.saturating_sub(amount));
+                if let Some(ref layout) = self.sql_table_layout {
+                    // Column-snap hscroll: jump to the previous column boundary.
+                    let h = self.screen.horizontal_offset();
+                    let new_h = snap_to_prev_column(layout, h);
+                    self.screen.set_horizontal_offset(new_h);
+                } else {
+                    let cols = self.screen.cols();
+                    let amount = count.unwrap_or(cols / 2);
+                    let h = self.screen.horizontal_offset();
+                    self.screen.set_horizontal_offset(h.saturating_sub(amount));
+                }
                 self.repaint()?;
             }
             Command::ScrollRightEnd => {
@@ -3524,9 +3542,10 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         // Invalidate match count cache when switching files since the buffer changed.
         self.match_count_cache = None;
-        // Reset content mode and diff state so they are re-detected on next first paint.
+        // Reset content mode and diff/table state so they are re-detected on next first paint.
         self.content_mode = ContentMode::Plain;
         self.diff_state = None;
+        self.sql_table_layout = None;
         // Reload git gutter state for the new file.
         if self.git_gutter_enabled {
             self.load_gutter_state();
@@ -3674,6 +3693,16 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        // SQL table mode: apply frozen first column when horizontally scrolled.
+        // Transforms each line to keep the first column visible on the left
+        // while scrolling the remaining columns.
+        let sql_frozen = self.content_mode == ContentMode::SqlTable
+            && self.screen.horizontal_offset() > 0
+            && self.sql_table_layout.is_some();
+        if sql_frozen {
+            lines = self.apply_frozen_column(&lines);
+        }
+
         // Apply content-aware coloring before search highlights (SGR injection).
         // When coloring is active, the render config must be at least AnsiOnly
         // so the injected SGR codes are preserved.
@@ -3751,6 +3780,14 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         let line_highlights = self.build_line_highlights();
         let gutter_marks = self.build_gutter_marks(start, lines.len());
+
+        // Transform header lines with frozen column when SQL table is hscrolled.
+        let header_line_contents = if sql_frozen {
+            self.apply_frozen_column(&header_line_contents)
+        } else {
+            header_line_contents
+        };
+
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
@@ -3777,6 +3814,17 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.render_config.clone()
         };
 
+        // When frozen column mode is active, temporarily set h_offset to 0
+        // for the paint call since the line content already includes the
+        // frozen prefix and scrolled remainder.
+        let saved_h_offset = if sql_frozen {
+            let h = self.screen.horizontal_offset();
+            self.screen.set_horizontal_offset(0);
+            Some(h)
+        } else {
+            None
+        };
+
         paint_screen_with_options(
             &mut self.writer,
             &self.screen,
@@ -3784,6 +3832,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             &effective_config,
             &paint_opts,
         )?;
+
+        // Restore h_offset after painting with frozen columns.
+        if let Some(h) = saved_h_offset {
+            self.screen.set_horizontal_offset(h);
+        }
 
         // Detect content mode on first paint and show status message.
         if self.initial_render {
@@ -4663,6 +4716,12 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.content_mode
     }
 
+    /// Returns the parsed SQL table layout, if any.
+    #[must_use]
+    pub fn sql_table_layout(&self) -> Option<&SqlTableLayout> {
+        self.sql_table_layout.as_ref()
+    }
+
     /// Detect content mode from the visible lines and set the status message.
     ///
     /// Called once per file on the first paint. If a non-plain mode is detected,
@@ -4678,6 +4737,45 @@ impl<R: Read, W: Write> Pager<R, W> {
         if self.content_mode == ContentMode::Diff {
             self.parse_diff_state();
         }
+
+        // Parse SQL table layout for sticky header and column-snap hscroll.
+        if self.content_mode == ContentMode::SqlTable {
+            self.parse_sql_table_layout(&borrowed);
+        }
+    }
+
+    /// Parse the SQL table layout and configure sticky headers.
+    ///
+    /// Extracts column boundaries from rule lines and sets the header
+    /// line count so the pager freezes header rows at the top of the screen.
+    fn parse_sql_table_layout(&mut self, lines: &[&str]) {
+        if let Some(layout) = parse_table_layout(lines) {
+            let header_rows = layout.header_rows;
+            self.sql_table_layout = Some(layout);
+            // Enable sticky header: freeze the header rows at the top.
+            if header_rows > 0 {
+                self.screen.set_header_lines(header_rows);
+            }
+        }
+    }
+
+    /// Apply frozen first column to lines for SQL table mode.
+    ///
+    /// When the table is horizontally scrolled, the first column stays
+    /// visible at the left edge. This transforms each line by extracting
+    /// the frozen prefix and appending the scrolled remainder.
+    fn apply_frozen_column(&self, lines: &[Option<String>]) -> Vec<Option<String>> {
+        let Some(ref layout) = self.sql_table_layout else {
+            return lines.to_vec();
+        };
+        let h_offset = self.screen.horizontal_offset();
+        lines
+            .iter()
+            .map(|opt| {
+                opt.as_ref()
+                    .map(|line| pgr_display::render_frozen_column(line, layout, h_offset))
+            })
+            .collect()
     }
 
     /// Parse the entire buffer into diff structure for hunk/file navigation.
