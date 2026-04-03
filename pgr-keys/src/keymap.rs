@@ -104,7 +104,9 @@ impl Keymap {
             (Key::Char('#'), Command::ShellCommandExpand),
             (Key::Char('|'), Command::PipeToCommand),
             (Key::Char('v'), Command::EditFile),
-            (Key::Char('s'), Command::SavePipeInput),
+            // pgr extension: `s` saves any buffer (pipe or file) to a file,
+            // stripping ANSI. Overrides less's `save-pipe-input` (pipe-only).
+            (Key::Char('s'), Command::SaveBuffer),
             // Examine (open new file) — alternative binding
             (Key::Char('E'), Command::ExamineAlt),
             // Info and help
@@ -473,11 +475,11 @@ mod tests {
         assert_eq!(keymap.lookup(&Key::Char('v')), Command::EditFile);
     }
 
-    // Test 3: s key maps to SavePipeInput
+    // Task 366: s key maps to SaveBuffer (pgr extension, overrides less save-pipe-input)
     #[test]
-    fn test_keymap_s_maps_to_save_pipe_input() {
+    fn test_keymap_s_maps_to_save_buffer() {
         let keymap = Keymap::default_less();
-        assert_eq!(keymap.lookup(&Key::Char('s')), Command::SavePipeInput);
+        assert_eq!(keymap.lookup(&Key::Char('s')), Command::SaveBuffer);
     }
 
     // ── Task 118: Info and help command key bindings ──
