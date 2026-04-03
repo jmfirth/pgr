@@ -517,4 +517,54 @@ mod tests {
         state.process_line("\x1b[31m\x1b[1m\x1b[4m");
         assert_eq!(state.carry_forward(), "\x1b[4m");
     }
+
+    // --- Extended color state tracking tests (task 310) ---
+
+    #[test]
+    fn test_ansi_state_256_color_carries_across_lines() {
+        // Spec §310.9: 256-color SGR must be preserved in carry-forward state
+        let mut state = AnsiState::default();
+        state.process_line("\x1b[38;5;196mred");
+        let carry = state.carry_forward();
+        assert!(
+            carry.contains("38;5;196"),
+            "carry_forward should contain 256-color params: {carry:?}"
+        );
+    }
+
+    #[test]
+    fn test_ansi_state_24bit_color_carries_across_lines() {
+        // Spec §310.10: 24-bit true color SGR must be preserved in carry-forward state
+        let mut state = AnsiState::default();
+        state.process_line("\x1b[38;2;255;128;0morange");
+        let carry = state.carry_forward();
+        assert!(
+            carry.contains("38;2;255;128;0"),
+            "carry_forward should contain 24-bit color params: {carry:?}"
+        );
+    }
+
+    #[test]
+    fn test_ansi_state_reset_clears_extended_color() {
+        // Spec §310.11: a reset sequence after extended color must clear the state
+        let mut state = AnsiState::default();
+        state.process_line("\x1b[38;2;255;0;0mred\x1b[0m");
+        assert_eq!(
+            state.carry_forward(),
+            "",
+            "reset should clear extended color state"
+        );
+    }
+
+    #[test]
+    fn test_display_width_ansi_excludes_extended_color_escapes() {
+        // Spec §310.12: display width must exclude 24-bit color escape sequences
+        let input = "\x1b[38;2;255;128;0morange\x1b[0m";
+        // "orange" is 6 characters wide; escapes contribute zero width
+        assert_eq!(
+            display_width_ansi(input, 8),
+            6,
+            "display_width_ansi should return only visible text width"
+        );
+    }
 }

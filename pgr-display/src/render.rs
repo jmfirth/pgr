@@ -1853,4 +1853,133 @@ mod tests {
             "ASCII 'a' should be replaced by marker: {result}"
         );
     }
+
+    // --- ANSI extended color passthrough tests (task 310) ---
+
+    #[test]
+    fn test_render_line_ansi_only_256_color_fg_passes_through() {
+        // Spec §310.1: 256-color foreground sequence must appear in output
+        let input = "\x1b[38;5;196mred text\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert!(
+            rendered.contains("\x1b[38;5;196m"),
+            "256-color fg SGR should be passed through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("red text"),
+            "visible text should be present: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_256_color_bg_passes_through() {
+        // Spec §310.2: 256-color background sequence must be preserved
+        let input = "\x1b[48;5;21mblue bg\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert!(
+            rendered.contains("\x1b[48;5;21m"),
+            "256-color bg SGR should be passed through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("blue bg"),
+            "visible text should be present: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_24bit_fg_passes_through() {
+        // Spec §310.3: 24-bit true color foreground must be preserved
+        let input = "\x1b[38;2;255;128;0morange\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert!(
+            rendered.contains("\x1b[38;2;255;128;0m"),
+            "24-bit fg SGR should be passed through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("orange"),
+            "visible text should be present: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_24bit_bg_passes_through() {
+        // Spec §310.4: 24-bit true color background must be preserved
+        let input = "\x1b[48;2;0;128;255msky bg\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert!(
+            rendered.contains("\x1b[48;2;0;128;255m"),
+            "24-bit bg SGR should be passed through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("sky bg"),
+            "visible text should be present: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_mixed_truecolor_and_bold_passes_through() {
+        // Spec §310.5: combined bold + 24-bit color params must both be preserved
+        let input = "\x1b[1;38;2;255;0;0mbold red\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert!(
+            rendered.contains("\x1b[1;38;2;255;0;0m"),
+            "combined bold+24-bit SGR should be passed through: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("bold red"),
+            "visible text should be present: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_multiple_color_sequences_all_preserved() {
+        // Spec §310.6: multiple color changes in one line must all be preserved
+        let input =
+            "\x1b[38;2;255;0;0mred\x1b[0m \x1b[38;2;0;255;0mgreen\x1b[0m \x1b[38;2;0;0;255mblue\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert!(
+            rendered.contains("\x1b[38;2;255;0;0m"),
+            "red SGR should be present: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\x1b[38;2;0;255;0m"),
+            "green SGR should be present: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("\x1b[38;2;0;0;255m"),
+            "blue SGR should be present: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("red") && rendered.contains("green") && rendered.contains("blue"),
+            "all visible text should be present: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_non_sgr_csi_stripped() {
+        // Spec §310.7: non-SGR CSI (e.g., erase) must be stripped; only text remains
+        let input = "\x1b[2Jclear";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (rendered, _) = render_line(input, 0, 80, &config);
+        assert_eq!(
+            rendered, "clear",
+            "non-SGR CSI should be stripped, leaving only text"
+        );
+    }
+
+    #[test]
+    fn test_render_line_ansi_only_truecolor_width_equals_visible_text_only() {
+        // Spec §310.8: width returned must equal visible text width, excluding escapes
+        let input = "\x1b[38;2;255;128;0morange\x1b[0m";
+        let config = config_with_mode(RawControlMode::AnsiOnly);
+        let (_, width) = render_line(input, 0, 80, &config);
+        // "orange" is 6 characters, all ASCII (width 1 each)
+        assert_eq!(width, 6, "width should equal visible text width only");
+    }
 }
