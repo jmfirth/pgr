@@ -3917,6 +3917,12 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        // Detect content mode on first paint so content-aware rendering
+        // (diff coloring, SQL sticky header, etc.) applies from the start.
+        if self.initial_render {
+            self.detect_content_mode_from_lines(&lines);
+        }
+
         // SQL table mode: apply frozen first column when horizontally scrolled.
         // Transforms each line to keep the first column visible on the left
         // while scrolling the remaining columns.
@@ -4277,12 +4283,6 @@ impl<R: Read, W: Write> Pager<R, W> {
             &effective_config,
             &paint_opts,
         )?;
-
-        // Detect content mode on first paint and show status message.
-        if self.initial_render {
-            let all_for_detect: Vec<Option<String>> = all_lines.clone();
-            self.detect_content_mode_from_lines(&all_for_detect);
-        }
 
         self.paint_status_prompt(sbs_total)?;
         self.initial_render = false;
