@@ -3933,7 +3933,12 @@ impl<R: Read, W: Write> Pager<R, W> {
             lines = self.apply_frozen_column(&lines);
         }
 
-        // Apply content-aware coloring before search highlights (SGR injection).
+        // Compute search highlights on RAW lines (before syntax/diff coloring)
+        // so byte offsets match the original text, not SGR-injected text.
+        self.highlight_state
+            .compute_highlights(&lines, self.last_pattern.as_ref());
+
+        // Apply content-aware coloring after highlight computation.
         // When coloring is active, the render config must be at least AnsiOnly
         // so the injected SGR codes are preserved.
         let diff_colored = self.content_mode == ContentMode::Diff;
@@ -3959,10 +3964,6 @@ impl<R: Read, W: Write> Pager<R, W> {
         if syntax_active {
             lines = self.highlight_lines(&lines, start);
         }
-
-        // Compute highlights for the visible lines.
-        self.highlight_state
-            .compute_highlights(&lines, self.last_pattern.as_ref());
 
         // Build status column data if enabled.
         let status_column_chars = if self.runtime_options.status_column {
