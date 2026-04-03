@@ -13,7 +13,6 @@ pgr-search = { path = "../pgr-search" }
 pgr-display = { path = "../pgr-display" }
 pgr-keys = { path = "../pgr-keys" }
 pgr-syntax = { path = "../pgr-syntax" }
-pgr-agent = { path = "../pgr-agent" }
 
 [dev-dependencies]
 expectrl = "0.8"

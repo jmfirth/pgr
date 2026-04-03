@@ -7,7 +7,6 @@ members = [
     "pgr-display",
     "pgr-keys",
     "pgr-syntax",
-    "pgr-agent",
     "pgr-cli",
 ]
 
