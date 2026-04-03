@@ -30,8 +30,8 @@ pub use prompt::{
     DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 pub use render::{
-    render_line, render_line_highlighted, render_line_marked, BinFmt, BinFmtSegment,
-    RawControlMode, RenderConfig, TabStops,
+    render_line, render_line_highlighted, render_line_marked, render_line_multi_highlighted,
+    BinFmt, BinFmtSegment, ColoredRange, RawControlMode, RenderConfig, TabStops,
 };
 pub use screen::Screen;
 pub use squeeze::{is_blank_line, squeeze_visible_lines};

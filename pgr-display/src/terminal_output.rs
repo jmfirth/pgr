@@ -8,7 +8,7 @@ use std::io::Write;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::line_numbers;
-use crate::render::{self, RenderConfig};
+use crate::render::{self, ColoredRange, RenderConfig};
 use crate::screen::Screen;
 use crate::unicode;
 
@@ -64,6 +64,13 @@ pub struct PaintOptions {
     /// last space character that fits. If no space exists, the line falls
     /// back to character-level wrapping (the default behavior).
     pub wordwrap: bool,
+    /// Per-line colored highlight ranges for multi-pattern search highlighting.
+    ///
+    /// Outer vec is parallel to the `lines` slice. Each inner vec contains
+    /// sorted, non-overlapping `ColoredRange` entries that specify which byte
+    /// ranges should be highlighted and what SGR color to use.
+    /// When empty (the default), no search highlighting is applied.
+    pub line_highlights: Vec<Vec<ColoredRange<'static>>>,
 }
 
 /// Paint the full screen content to the terminal.
@@ -188,11 +195,26 @@ pub fn paint_screen_with_options<W: Write>(
                 }
             }
 
+            // Get highlights for this line (if any).
+            let line_hl = options
+                .line_highlights
+                .get(line_idx)
+                .filter(|hl| !hl.is_empty());
+
             if chop_mode {
                 // Chop mode: truncate at content_cols, apply markers
                 // Sub-line offset does not apply in chop mode (no wrapping).
-                let (rendered, width) =
-                    render::render_line(line_text, h_offset, content_cols, config);
+                let (rendered, width) = if let Some(hl) = line_hl {
+                    render::render_line_multi_highlighted(
+                        line_text,
+                        h_offset,
+                        content_cols,
+                        config,
+                        hl,
+                    )
+                } else {
+                    render::render_line(line_text, h_offset, content_cols, config)
+                };
                 if content_cols > 0 {
                     let full_width = render::line_display_width(line_text, config);
                     let truncated_right = full_width > h_offset + content_cols;
@@ -207,7 +229,17 @@ pub fn paint_screen_with_options<W: Write>(
             } else if options.wordwrap && content_cols > 0 {
                 // Word-wrap mode: break lines at word boundaries.
                 let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
-                let (rendered, _) = render::render_line(line_text, h_offset, render_width, config);
+                let (rendered, _) = if let Some(hl) = line_hl {
+                    render::render_line_multi_highlighted(
+                        line_text,
+                        h_offset,
+                        render_width,
+                        config,
+                        hl,
+                    )
+                } else {
+                    render::render_line(line_text, h_offset, render_width, config)
+                };
                 let segments = wordwrap_segments(&rendered, content_cols);
 
                 // First segment was already preceded by margin output above.
@@ -245,12 +277,22 @@ pub fn paint_screen_with_options<W: Write>(
                     let content_skip =
                         cols.saturating_sub(margin_width) + skip_rows.saturating_sub(1) * cols;
                     let render_width = usize::MAX / 2;
-                    let (rendered, width) = render::render_line(
-                        line_text,
-                        h_offset + content_skip,
-                        render_width,
-                        config,
-                    );
+                    let (rendered, width) = if let Some(hl) = line_hl {
+                        render::render_line_multi_highlighted(
+                            line_text,
+                            h_offset + content_skip,
+                            render_width,
+                            config,
+                            hl,
+                        )
+                    } else {
+                        render::render_line(
+                            line_text,
+                            h_offset + content_skip,
+                            render_width,
+                            config,
+                        )
+                    };
                     writer.write_all(rendered.as_bytes())?;
                     clear_to_eol(writer)?;
 
@@ -258,8 +300,17 @@ pub fn paint_screen_with_options<W: Write>(
                     screen_row += rows_used;
                 } else {
                     let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
-                    let (rendered, width) =
-                        render::render_line(line_text, h_offset, render_width, config);
+                    let (rendered, width) = if let Some(hl) = line_hl {
+                        render::render_line_multi_highlighted(
+                            line_text,
+                            h_offset,
+                            render_width,
+                            config,
+                            hl,
+                        )
+                    } else {
+                        render::render_line(line_text, h_offset, render_width, config)
+                    };
                     writer.write_all(rendered.as_bytes())?;
                     clear_to_eol(writer)?;
 
@@ -430,9 +481,23 @@ pub fn paint_screen_mapped<W: Write>(
                     writer.write_all(formatted.as_bytes())?;
                 }
 
+                let mapped_line_hl = options
+                    .line_highlights
+                    .get(line_idx)
+                    .filter(|hl| !hl.is_empty());
+
                 if chop_mode {
-                    let (rendered, width) =
-                        render::render_line(line_text, h_offset, content_cols, config);
+                    let (rendered, width) = if let Some(hl) = mapped_line_hl {
+                        render::render_line_multi_highlighted(
+                            line_text,
+                            h_offset,
+                            content_cols,
+                            config,
+                            hl,
+                        )
+                    } else {
+                        render::render_line(line_text, h_offset, content_cols, config)
+                    };
                     if content_cols > 0 {
                         let full_width = render::line_display_width(line_text, config);
                         let truncated_right = full_width > h_offset + content_cols;
@@ -446,8 +511,17 @@ pub fn paint_screen_mapped<W: Write>(
                     screen_row += 1;
                 } else {
                     let render_width = if cols > 0 { usize::MAX / 2 } else { 0 };
-                    let (rendered, width) =
-                        render::render_line(line_text, h_offset, render_width, config);
+                    let (rendered, width) = if let Some(hl) = mapped_line_hl {
+                        render::render_line_multi_highlighted(
+                            line_text,
+                            h_offset,
+                            render_width,
+                            config,
+                            hl,
+                        )
+                    } else {
+                        render::render_line(line_text, h_offset, render_width, config)
+                    };
                     writer.write_all(rendered.as_bytes())?;
                     clear_to_eol(writer)?;
 

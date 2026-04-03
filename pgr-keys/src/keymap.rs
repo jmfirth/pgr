@@ -99,8 +99,8 @@ impl Keymap {
             // Option toggling and query
             (Key::Char('-'), Command::ToggleOption),
             (Key::Char('_'), Command::QueryOption),
-            // Filter mode
-            (Key::Char('&'), Command::Filter),
+            // Filter mode — `&` is handled via PendingCommand::FilterPrefix
+            // in dispatch.rs (supports `&+`, `&-`, `&l` sub-commands).
             // Shell and pipe commands
             (Key::Char('!'), Command::ShellCommand),
             (Key::Char('#'), Command::ShellCommandExpand),
@@ -431,11 +431,13 @@ mod tests {
         assert_eq!(keymap.lookup(&Key::Char('_')), Command::QueryOption);
     }
 
-    // ── Test 14: & key maps to Filter command ───────────────────────
+    // ── Test 14: & key is handled via PendingCommand, not keymap ───────
     #[test]
-    fn test_keymap_ampersand_maps_to_filter() {
+    fn test_keymap_ampersand_returns_noop_handled_via_pending() {
         let keymap = Keymap::default_less();
-        assert_eq!(keymap.lookup(&Key::Char('&')), Command::Filter);
+        // `&` is now intercepted by PendingCommand::FilterPrefix in dispatch.rs
+        // before the keymap is consulted, so the keymap returns Noop.
+        assert_eq!(keymap.lookup(&Key::Char('&')), Command::Noop);
     }
 
     // Test 1: ! key maps to ShellCommand

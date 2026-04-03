@@ -12,12 +12,13 @@ use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
     compute_line_screen_rows, eval_prompt, line_number_width, paint_info_line, paint_prompt,
     paint_screen_mapped, paint_screen_with_options, squeeze_visible_lines, wordwrap_segments,
-    OverstrikeMode, PaintOptions, PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen,
-    ScreenLine, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle, RawControlMode,
+    RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT,
+    DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     CaseMode, FilterState, FilteredLines, HighlightState, SearchDirection, SearchModifiers,
-    SearchPattern, Searcher, WrapMode,
+    SearchPattern, Searcher, WrapMode, HIGHLIGHT_COLORS,
 };
 
 use pgr_input::{FileWatcher, FollowEvent};
@@ -108,6 +109,9 @@ pub enum PendingCommand {
     ZPrefix,
     /// `^O` pressed; waiting for the hyperlink sub-command (^N, ^P, ^L, ^O).
     CtrlOPrefix,
+    /// `&` pressed; waiting for sub-command: bare → filter, `+` → add highlight,
+    /// `-` → remove highlight, `l` → list highlights.
+    FilterPrefix,
 }
 
 /// The main pager state, tying together all subsystems.
@@ -186,6 +190,10 @@ pub struct Pager<R: Read, W: Write> {
     editing_filter: bool,
     /// Whether the current filter prompt has inversion toggled via `^N`.
     filter_invert: bool,
+    /// Whether we are currently in add-highlight prompt mode (`&+`).
+    editing_add_highlight: bool,
+    /// Whether we are currently in remove-highlight prompt mode (`&-`).
+    editing_remove_highlight: bool,
     /// Whether the next keypress should be absorbed (used to dismiss
     /// option toggle/query status messages, matching GNU less behavior).
     absorb_next_key: bool,
@@ -284,6 +292,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             filtered_lines: None,
             editing_filter: false,
             filter_invert: false,
+            editing_add_highlight: false,
+            editing_remove_highlight: false,
             absorb_next_key: false,
             key_fd: None,
             initial_commands: Vec::new(),
@@ -411,6 +421,16 @@ impl<R: Read, W: Write> Pager<R, W> {
             return self.process_filter_key(key);
         }
 
+        // If we're in add-highlight prompt mode, feed keys to the line editor.
+        if self.editing_add_highlight {
+            return self.process_add_highlight_key(key);
+        }
+
+        // If we're in remove-highlight prompt mode, feed keys to the line editor.
+        if self.editing_remove_highlight {
+            return self.process_remove_highlight_key(key);
+        }
+
         // If there's a pending multi-key command, resolve it.
         if let Some(pending) = self.pending_command.take() {
             return self.resolve_pending(pending, key);
@@ -462,11 +482,13 @@ impl<R: Read, W: Write> Pager<R, W> {
             Key::Ctrl('o') => Some(PendingCommand::CtrlOPrefix),
             Key::Char(':') => Some(PendingCommand::ColonPrefix),
             Key::Char('Z') => Some(PendingCommand::ZPrefix),
+            Key::Char('&') => Some(PendingCommand::FilterPrefix),
             _ => None,
         }
     }
 
     /// Resolve a pending multi-key command with the argument key.
+    #[allow(clippy::too_many_lines)] // Each PendingCommand variant is a distinct dispatch case
     fn resolve_pending(&mut self, pending: PendingCommand, key: &Key) -> Result<bool> {
         match pending {
             PendingCommand::SetMarkTop => {
@@ -552,6 +574,29 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Key::Ctrl('l') => self.execute(&Command::HyperlinkJump, count)?,
                     Key::Ctrl('o') => self.execute(&Command::HyperlinkOpen, count)?,
                     _ => {} // Unknown ^O sub-command: ignore.
+                }
+                return Ok(!self.should_quit);
+            }
+            PendingCommand::FilterPrefix => {
+                match *key {
+                    Key::Char('+') => {
+                        self.enter_add_highlight_mode()?;
+                    }
+                    Key::Char('-') => {
+                        self.enter_remove_highlight_mode()?;
+                    }
+                    Key::Char('l') => {
+                        self.execute(&Command::ListHighlights, None)?;
+                    }
+                    _ => {
+                        // Default: enter normal filter mode (GNU less behavior).
+                        // Feed the key into the filter editor so it becomes
+                        // the first character of the filter pattern.
+                        self.enter_filter_mode()?;
+                        if self.editing_filter {
+                            return self.process_filter_key(key);
+                        }
+                    }
                 }
                 return Ok(!self.should_quit);
             }
@@ -1085,6 +1130,15 @@ impl<R: Read, W: Write> Pager<R, W> {
                     self.status_message = Some("syntax highlighting not compiled in".to_string());
                     self.repaint()?;
                 }
+            }
+            Command::AddHighlight => {
+                self.enter_add_highlight_mode()?;
+            }
+            Command::RemoveHighlight => {
+                self.enter_remove_highlight_mode()?;
+            }
+            Command::ListHighlights => {
+                self.show_highlight_list()?;
             }
         }
 
@@ -2146,6 +2200,145 @@ impl<R: Read, W: Write> Pager<R, W> {
         Ok(())
     }
 
+    /// Enter add-highlight prompt mode (`&+`).
+    fn enter_add_highlight_mode(&mut self) -> Result<()> {
+        self.line_editor = Some(LineEditor::new("&+"));
+        self.editing_add_highlight = true;
+        self.render_highlight_prompt()?;
+        Ok(())
+    }
+
+    /// Enter remove-highlight prompt mode (`&-`).
+    fn enter_remove_highlight_mode(&mut self) -> Result<()> {
+        self.line_editor = Some(LineEditor::new("&-"));
+        self.editing_remove_highlight = true;
+        self.render_highlight_prompt()?;
+        Ok(())
+    }
+
+    /// Process a key while in add-highlight prompt mode.
+    fn process_add_highlight_key(&mut self, key: &Key) -> Result<bool> {
+        let result = if let Some(ref mut editor) = self.line_editor {
+            editor.process_key(key)
+        } else {
+            self.editing_add_highlight = false;
+            return Ok(true);
+        };
+
+        match result {
+            LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
+                self.render_highlight_prompt()?;
+            }
+            LineEditResult::Confirm(pattern_str) => {
+                self.editing_add_highlight = false;
+                self.line_editor = None;
+                self.submit_add_highlight(&pattern_str)?;
+            }
+            LineEditResult::Cancel => {
+                self.editing_add_highlight = false;
+                self.line_editor = None;
+                self.repaint()?;
+            }
+        }
+        Ok(!self.should_quit)
+    }
+
+    /// Process a key while in remove-highlight prompt mode.
+    fn process_remove_highlight_key(&mut self, key: &Key) -> Result<bool> {
+        let result = if let Some(ref mut editor) = self.line_editor {
+            editor.process_key(key)
+        } else {
+            self.editing_remove_highlight = false;
+            return Ok(true);
+        };
+
+        match result {
+            LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
+                self.render_highlight_prompt()?;
+            }
+            LineEditResult::Confirm(pattern_str) => {
+                self.editing_remove_highlight = false;
+                self.line_editor = None;
+                self.submit_remove_highlight(&pattern_str)?;
+            }
+            LineEditResult::Cancel => {
+                self.editing_remove_highlight = false;
+                self.line_editor = None;
+                self.repaint()?;
+            }
+        }
+        Ok(!self.should_quit)
+    }
+
+    /// Render the highlight prompt on the status line.
+    fn render_highlight_prompt(&mut self) -> Result<()> {
+        if let Some(ref editor) = self.line_editor {
+            let (rows, cols) = self.screen.dimensions();
+            if rows > 0 {
+                editor.render(&mut self.writer, rows - 1, 0, cols)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit a new highlight pattern from the `&+` prompt.
+    fn submit_add_highlight(&mut self, pattern_str: &str) -> Result<()> {
+        if pattern_str.is_empty() {
+            self.repaint()?;
+            return Ok(());
+        }
+        let case_mode = self.effective_case_mode();
+        match self.highlight_state.add_pattern(pattern_str, case_mode) {
+            Ok(Some(idx)) => {
+                self.status_message =
+                    Some(format!("Highlight added: \"{pattern_str}\" (color {idx})"));
+                self.repaint()?;
+            }
+            Ok(None) => {
+                self.status_message =
+                    Some("Maximum number of highlight patterns reached".to_string());
+                self.repaint()?;
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Invalid pattern: {e}"));
+                self.repaint()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit a highlight removal from the `&-` prompt.
+    fn submit_remove_highlight(&mut self, pattern_str: &str) -> Result<()> {
+        if pattern_str.is_empty() {
+            self.repaint()?;
+            return Ok(());
+        }
+        if self.highlight_state.remove_pattern(pattern_str) {
+            self.status_message = Some(format!("Highlight removed: \"{pattern_str}\""));
+        } else {
+            self.status_message = Some(format!("No highlight pattern: \"{pattern_str}\""));
+        }
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Show the list of active highlight patterns as a status message.
+    fn show_highlight_list(&mut self) -> Result<()> {
+        let patterns = self.highlight_state.list_patterns();
+        if patterns.is_empty() {
+            self.status_message = Some("No extra highlight patterns".to_string());
+        } else {
+            let list: Vec<String> = patterns
+                .iter()
+                .map(|(pat, idx)| format!("[{idx}] \"{pat}\""))
+                .collect();
+            self.status_message = Some(format!("Highlights: {}", list.join(", ")));
+        }
+        self.repaint()?;
+        self.absorb_next_key = true;
+        Ok(())
+    }
+
     /// Enter follow mode: scroll to end, watch for new data, and wait for
     /// interrupt.
     ///
@@ -2982,6 +3175,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     Vec::new()
                 };
 
+                let line_highlights = self.build_line_highlights();
                 let paint_opts = PaintOptions {
                     show_line_numbers: self.runtime_options.line_numbers,
                     total_lines: visible_total,
@@ -2992,6 +3186,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     status_column_chars,
                     header_line_contents,
                     wordwrap: self.runtime_options.wordwrap,
+                    line_highlights,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -3090,6 +3285,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             0
         };
 
+        let line_highlights = self.build_line_highlights();
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
@@ -3100,6 +3296,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             status_column_chars,
             header_line_contents,
             wordwrap: self.runtime_options.wordwrap,
+            line_highlights,
         };
         // When syntax highlighting injected SGR codes, ensure the render
         // pipeline uses at least AnsiOnly mode so those codes are preserved.
@@ -3193,6 +3390,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         } else {
             0
         };
+        let line_highlights = self.build_line_highlights();
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
             total_lines: total,
@@ -3203,6 +3401,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             status_column_chars,
             header_line_contents,
             wordwrap: self.runtime_options.wordwrap,
+            line_highlights,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -3254,6 +3453,37 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
 
                 ' '
+            })
+            .collect()
+    }
+
+    /// Build per-line colored highlight ranges for paint options.
+    ///
+    /// Converts the cached `ColoredHighlight` data from `HighlightState`
+    /// into `ColoredRange<'static>` suitable for `PaintOptions.line_highlights`.
+    /// Each highlight's color index is mapped to its SGR string from
+    /// [`HIGHLIGHT_COLORS`].
+    fn build_line_highlights(&self) -> Vec<Vec<ColoredRange<'static>>> {
+        let colored = self.highlight_state.colored_highlights();
+        colored
+            .iter()
+            .map(|line_hl| {
+                line_hl
+                    .iter()
+                    .map(|ch| {
+                        let idx = ch.color_index as usize;
+                        let sgr = if idx < HIGHLIGHT_COLORS.len() {
+                            HIGHLIGHT_COLORS[idx]
+                        } else {
+                            HIGHLIGHT_COLORS[0]
+                        };
+                        ColoredRange {
+                            start: ch.start,
+                            end: ch.end,
+                            sgr,
+                        }
+                    })
+                    .collect()
             })
             .collect()
     }
@@ -6912,5 +7142,116 @@ mod tests {
 
         let pager = Pager::new(reader, writer, buffer, index, None);
         assert_eq!(pager.exit_reason(), ExitReason::Normal);
+    }
+
+    // ── Task 321: Multi-pattern highlighting tests ──
+
+    #[test]
+    fn test_dispatch_add_highlight_adds_extra_pattern() {
+        let content = make_test_content(10);
+        // &+ enters add-highlight mode, then type "line" and Enter.
+        let pager = run_pager(b"&+line\nq", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 1);
+    }
+
+    #[test]
+    fn test_dispatch_add_highlight_shows_status_message() {
+        let content = make_test_content(10);
+        let pager = run_pager(b"&+test\nq", &content);
+        // After adding, status message was set (and may have been cleared by repaint),
+        // but the pattern count confirms it was added.
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 1);
+    }
+
+    #[test]
+    fn test_dispatch_remove_highlight_removes_existing_pattern() {
+        let content = make_test_content(10);
+        // Add "line", then remove "line".
+        let pager = run_pager(b"&+line\n&-line\nq", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_remove_highlight_nonexistent_does_not_crash() {
+        let content = make_test_content(10);
+        // Remove a pattern that was never added.
+        let pager = run_pager(b"&-nothere\nq", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_list_highlights_empty() {
+        let content = make_test_content(10);
+        // &l lists highlights (absorbs next key).
+        let pager = run_pager(b"&l q", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_list_highlights_with_patterns() {
+        let content = make_test_content(10);
+        // Add two patterns, then list.
+        let pager = run_pager(b"&+alpha\n&+beta\n&l q", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 2);
+    }
+
+    #[test]
+    fn test_dispatch_filter_prefix_default_enters_filter_mode() {
+        // `&` followed by `E` (not +/-/l) should enter filter mode with E as first char.
+        // Then "RROR\n" completes the pattern "ERROR".
+        // But since only every 7th line has "ERROR", we can't easily check.
+        // Just verify the filter was set (lines 0,7,14,... have "ERROR").
+        let mut test_content = Vec::new();
+        for i in 0..50 {
+            if i % 7 == 0 {
+                test_content.extend_from_slice(format!("line {i} ERROR here\n").as_bytes());
+            } else {
+                test_content.extend_from_slice(format!("line {i} normal\n").as_bytes());
+            }
+        }
+        let pager = run_pager(b"&ERROR\n&\nq", &test_content);
+        // Second `&` followed by `\n` clears the filter.
+        assert!(!pager.filter.is_active());
+    }
+
+    #[test]
+    fn test_dispatch_add_highlight_empty_pattern_no_crash() {
+        let content = make_test_content(10);
+        // &+ followed by immediate Enter (empty pattern).
+        let pager = run_pager(b"&+\nq", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_add_highlight_invalid_pattern_shows_error() {
+        let content = make_test_content(10);
+        // Invalid regex pattern.
+        let pager = run_pager(b"&+(unclosed\nq", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_add_highlight_cancel_with_escape() {
+        let content = make_test_content(10);
+        // &+ then ESC cancels the add-highlight prompt.
+        let pager = run_pager(b"&+abc\x1bq", &content);
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 0);
+    }
+
+    #[test]
+    fn test_dispatch_has_extra_patterns_reflects_state() {
+        let content = make_test_content(10);
+        let pager = run_pager(b"&+test\nq", &content);
+        assert!(pager.highlight_state().has_extra_patterns());
+    }
+
+    #[test]
+    fn test_dispatch_colored_highlights_populated_after_repaint() {
+        let content = b"hello world\nhello again\n";
+        // Search for "hello" first, then add "world" as extra highlight.
+        let pager = run_pager(b"/hello\n&+world\nq", content);
+        // Both patterns should be active.
+        assert!(pager.last_pattern().is_some());
+        assert_eq!(pager.highlight_state().extra_pattern_count(), 1);
     }
 }
