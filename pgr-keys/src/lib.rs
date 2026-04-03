@@ -1,6 +1,7 @@
 #![warn(clippy::pedantic)]
 //! Raw terminal mode, key binding, lesskey parsing, and command dispatch.
 
+pub mod clipboard;
 pub mod command;
 pub mod completion;
 pub mod dispatch;
@@ -19,6 +20,10 @@ pub mod shell;
 pub mod tags;
 pub mod terminal;
 
+pub use clipboard::{
+    base64_encode, create_clipboard, detect_clipboard, osc52_sequence, Clipboard, ClipboardBackend,
+    DisabledClipboard, Osc52Clipboard,
+};
 pub use command::Command;
 pub use completion::{
     complete, complete_filename, complete_option, longest_common_prefix, tab_complete,

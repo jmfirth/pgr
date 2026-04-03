@@ -390,6 +390,10 @@ fn build_action_map() -> HashMap<&'static str, Command> {
     // Byte offset
     m.insert("goto-byte", Command::GotoByteOffset);
 
+    // Clipboard yank (pgr extension)
+    m.insert("yank-line", Command::YankLine);
+    m.insert("yank-screen", Command::YankScreen);
+
     m
 }
 

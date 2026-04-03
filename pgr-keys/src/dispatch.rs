@@ -252,6 +252,10 @@ pub struct Pager<R: Read, W: Write> {
     /// Whether syntax highlighting is enabled at runtime (can be toggled).
     #[cfg(feature = "syntax")]
     syntax_enabled: bool,
+    /// Clipboard backend for yank commands.
+    clipboard: Box<dyn crate::clipboard::Clipboard>,
+    /// Whether clipboard is disabled (--clipboard=off).
+    clipboard_disabled: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -333,6 +337,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             highlighter: None,
             #[cfg(feature = "syntax")]
             syntax_enabled: true,
+            clipboard: crate::clipboard::detect_clipboard(),
+            clipboard_disabled: false,
         }
     }
 
@@ -1157,6 +1163,12 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::ListHighlights => {
                 self.show_highlight_list()?;
+            }
+            Command::YankLine => {
+                self.yank_line()?;
+            }
+            Command::YankScreen => {
+                self.yank_screen(total)?;
             }
         }
 
@@ -4252,6 +4264,68 @@ impl<R: Read, W: Write> Pager<R, W> {
                 })
             })
             .collect()
+    }
+
+    /// Set the clipboard backend for yank commands.
+    pub fn set_clipboard(&mut self, clipboard: Box<dyn crate::clipboard::Clipboard>) {
+        self.clipboard_disabled = clipboard.name() == "disabled";
+        self.clipboard = clipboard;
+    }
+
+    /// Yank (copy) the current top-of-screen line to the clipboard.
+    fn yank_line(&mut self) -> Result<()> {
+        if self.clipboard_disabled {
+            self.status_message = Some("Clipboard disabled".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let line_num = self.screen.top_line();
+        let text = self
+            .index
+            .get_line(line_num, &*self.buffer)?
+            .unwrap_or_default();
+        let plain = pgr_display::ansi::strip_ansi(&text);
+
+        if let Err(e) = self.clipboard.copy(&plain) {
+            self.status_message = Some(format!("Clipboard error: {e}"));
+        } else {
+            self.status_message = Some("Yanked 1 line".to_string());
+        }
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Yank (copy) all visible lines to the clipboard.
+    fn yank_screen(&mut self, total: usize) -> Result<()> {
+        if self.clipboard_disabled {
+            self.status_message = Some("Clipboard disabled".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let (start, end) = self.screen.visible_range();
+        let end = end.min(total);
+        let mut lines = Vec::new();
+
+        for line_num in start..end {
+            let text = self
+                .index
+                .get_line(line_num, &*self.buffer)?
+                .unwrap_or_default();
+            lines.push(pgr_display::ansi::strip_ansi(&text));
+        }
+
+        let count = lines.len();
+        let joined = lines.join("\n");
+
+        if let Err(e) = self.clipboard.copy(&joined) {
+            self.status_message = Some(format!("Clipboard error: {e}"));
+        } else {
+            self.status_message = Some(format!("Yanked {count} lines"));
+        }
+        self.repaint()?;
+        Ok(())
     }
 }
 

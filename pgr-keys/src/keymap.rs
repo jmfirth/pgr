@@ -28,8 +28,7 @@ impl Keymap {
             (Key::Ctrl('e'), Command::ScrollForward(1)),
             (Key::Ctrl('n'), Command::ScrollForward(1)),
             (Key::Down, Command::ScrollForward(1)),
-            // ScrollBackward(1)
-            (Key::Char('y'), Command::ScrollBackward(1)),
+            // ScrollBackward(1) — note: `y` is rebound to YankLine (pgr extension)
             (Key::Char('k'), Command::ScrollBackward(1)),
             (Key::Ctrl('y'), Command::ScrollBackward(1)),
             (Key::Ctrl('k'), Command::ScrollBackward(1)),
@@ -92,10 +91,9 @@ impl Keymap {
             // File line navigation
             (Key::EscSeq('j'), Command::FileLineForward),
             (Key::EscSeq('k'), Command::FileLineBackward),
-            // Force scroll (unclamped)
+            // Force scroll (unclamped) — note: `Y` is rebound to YankScreen (pgr extension)
             (Key::Char('J'), Command::ScrollForwardForce(1)),
             (Key::Char('K'), Command::ScrollBackwardForce(1)),
-            (Key::Char('Y'), Command::ScrollBackwardForce(1)),
             // Option toggling and query
             (Key::Char('-'), Command::ToggleOption),
             (Key::Char('_'), Command::QueryOption),
@@ -138,6 +136,9 @@ impl Keymap {
             // Tag navigation
             (Key::Char('t'), Command::NextTag),
             (Key::Char('T'), Command::PrevTag),
+            // Clipboard yank (pgr extension)
+            (Key::Char('y'), Command::YankLine),
+            (Key::Char('Y'), Command::YankScreen),
             // Syntax highlighting toggle
             (Key::EscSeq('S'), Command::ToggleSyntax),
             // Mouse scroll (default 3 lines per wheel tick)
@@ -376,13 +377,11 @@ mod tests {
         );
     }
 
+    // ── Task 330: Y is rebound to YankScreen (pgr extension) ──
     #[test]
-    fn test_keymap_upper_y_maps_to_scroll_backward_force() {
+    fn test_keymap_upper_y_maps_to_yank_screen() {
         let keymap = Keymap::default_less();
-        assert_eq!(
-            keymap.lookup(&Key::Char('Y')),
-            Command::ScrollBackwardForce(1)
-        );
+        assert_eq!(keymap.lookup(&Key::Char('Y')), Command::YankScreen);
     }
 
     #[test]
@@ -709,6 +708,20 @@ mod tests {
         // Verify other scroll bindings are unchanged.
         assert_eq!(keymap.lookup(&Key::Down), Command::ScrollForward(1));
         assert_eq!(keymap.lookup(&Key::Up), Command::ScrollBackward(1));
+    }
+
+    // ── Task 330: Clipboard yank key bindings ──
+
+    #[test]
+    fn test_keymap_y_maps_to_yank_line() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('y')), Command::YankLine);
+    }
+
+    #[test]
+    fn test_keymap_upper_y_maps_to_yank_screen_explicit() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::Char('Y')), Command::YankScreen);
     }
 
     // ── Task 313: Syntax highlighting toggle ──

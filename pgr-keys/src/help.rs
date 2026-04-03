@@ -18,7 +18,7 @@ pub const HELP_TEXT: &str = "\
           MOVING
 
   e  ^E  j  ^N  CR  *  Forward  one line (or N lines).
-  y  ^Y  k  ^K  ^P  *  Backward one line (or N lines).
+  ^Y  k  ^K  ^P     *  Backward one line (or N lines).
   f  ^F  ^V  SPACE  *  Forward  one window (or N lines).
   b  ^B  ESC-v      *  Backward one window (or N lines).
   z                 *  Forward  one window (and set window to N).
@@ -29,7 +29,7 @@ pub const HELP_TEXT: &str = "\
   ESC-j             *  Forward  one file-line.
   ESC-k             *  Backward one file-line.
   J                 *  Forward  one line (force; past end-of-file).
-  K  Y              *  Backward one line (force; past beginning).
+  K                 *  Backward one line (force; past beginning).
   F                    Scroll forward; like tail -f.
   r  ^R  ^L            Repaint screen.
   R                    Repaint screen, discarding buffered input.
@@ -62,6 +62,11 @@ pub const HELP_TEXT: &str = "\
   :p                *  Examine the previous file.
   :x                *  Examine the first file (or file N).
   :d                   Remove the current file from the list.
+
+          CLIPBOARD
+
+  y                    Yank (copy) current line to clipboard.
+  Y                    Yank (copy) all visible lines to clipboard.
 
           MISCELLANEOUS
 

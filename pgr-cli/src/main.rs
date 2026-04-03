@@ -11,8 +11,9 @@ use pgr_core::{Buffer, LineIndex, MarkStore};
 use pgr_display::TabStops;
 use pgr_input::{stdin_is_pipe, LoadedFile, LogWriter, PipeBuffer, PreprocessResult, Preprocessor};
 use pgr_keys::{
-    find_tag, parse_lesskey_file, resolve_pattern, ExitReason, FileEntry, FileList, JumpTarget,
-    KeyReader, LesskeyConfig, Pager, RawTerminal, RuntimeOptions, TagState, WindowSize,
+    create_clipboard, find_tag, parse_lesskey_file, resolve_pattern, ClipboardBackend, ExitReason,
+    FileEntry, FileList, JumpTarget, KeyReader, LesskeyConfig, Pager, RawTerminal, RuntimeOptions,
+    TagState, WindowSize,
 };
 
 use crate::env::EnvConfig;
@@ -306,6 +307,8 @@ fn run_stdin_mode(options: &Options) -> anyhow::Result<ExitReason> {
     #[cfg(feature = "syntax")]
     configure_syntax(&mut pager, options, &env_config);
 
+    configure_clipboard(&mut pager, options, &env_config);
+
     if env_config.secure_mode {
         pager.set_secure_mode(true);
     }
@@ -412,6 +415,8 @@ fn run_file_mode(options: &Options) -> anyhow::Result<ExitReason> {
 
     #[cfg(feature = "syntax")]
     configure_syntax(&mut pager, options, &env_config);
+
+    configure_clipboard(&mut pager, options, &env_config);
 
     if env_config.secure_mode {
         pager.set_secure_mode(true);
@@ -577,6 +582,27 @@ fn configure_syntax<R: std::io::Read, W: std::io::Write>(
     pager.set_highlighter(highlighter);
 }
 
+/// Configure clipboard backend on the pager based on CLI flags and env vars.
+///
+/// Priority: `--clipboard` CLI flag > `PGR_CLIPBOARD` env var > auto-detect.
+fn configure_clipboard<R: std::io::Read, W: std::io::Write>(
+    pager: &mut Pager<R, W>,
+    options: &Options,
+    env_config: &EnvConfig,
+) {
+    // CLI flag takes priority, then env var, then auto-detect.
+    let backend_str = options
+        .clipboard
+        .as_deref()
+        .or(env_config.pgr_clipboard.as_deref());
+
+    let backend = backend_str
+        .and_then(ClipboardBackend::parse)
+        .unwrap_or(ClipboardBackend::Auto);
+
+    pager.set_clipboard(create_clipboard(backend));
+}
+
 /// Discover and load a lesskey source file.
 ///
 /// Checks the following locations in priority order:
@@ -699,6 +725,7 @@ fn run_tag_mode(options: &Options, tag: &str) -> anyhow::Result<ExitReason> {
     let mut pager = Pager::new(reader, writer, buffer, index, Some(display_name));
     pager.set_key_fd(tty_keys_fd);
     configure_pager(&mut pager, options, rows, cols);
+    configure_clipboard(&mut pager, options, &env_config);
     pager.set_tag_state(tag_state);
 
     if env_config.secure_mode {
