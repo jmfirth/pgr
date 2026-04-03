@@ -105,6 +105,11 @@ pub struct PromptContext<'a> {
     /// Present when a search is active and match counting has been performed.
     /// Used by `%r` escape ("match N of M") and `?r` conditional.
     pub match_info: Option<(usize, usize)>,
+    /// Diff navigation info: current file name, hunk index, file index.
+    ///
+    /// Present when the content mode is `Diff` and the diff has been parsed.
+    /// Used by `%D` escape (diff file name) and `?D` conditional.
+    pub diff_info: Option<pgr_core::DiffPromptInfo>,
 }
 
 /// Render the prompt string for the given style and context.
@@ -286,6 +291,10 @@ fn evaluate_condition(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>) 
         'T' => ctx.current_tag.is_some(),
         'W' => ctx.waiting_for_data,
         'r' => ctx.match_info.is_some(),
+        'D' => ctx
+            .diff_info
+            .as_ref()
+            .is_some_and(|d| d.current_file.is_some()),
         _ => false,
     }
 }
@@ -429,10 +438,12 @@ fn expand_escape(chars: &[char], pos: &mut usize, ctx: &PromptContext<'_>, out: 
             let _ = write!(out, "{}", ctx.page_number.unwrap_or(0));
         }
         'D' => {
-            // Number of pages: not directly available, stub as 0.
-            // A full implementation would compute from total_lines and screen height,
-            // but screen height is not in the prompt context.
-            out.push('0');
+            // Diff file name: shows the current diff file name when in diff mode.
+            if let Some(ref diff_info) = ctx.diff_info {
+                if let Some(ref name) = diff_info.current_file {
+                    out.push_str(name);
+                }
+            }
         }
         'E' => {
             if !ctx.at_eof {
@@ -676,6 +687,7 @@ mod tests {
             current_tag: None,
             waiting_for_data: false,
             match_info: None,
+            diff_info: None,
         }
     }
 
@@ -708,6 +720,7 @@ mod tests {
             current_tag: None,
             waiting_for_data: false,
             match_info: None,
+            diff_info: None,
         }
     }
 
@@ -747,6 +760,7 @@ mod tests {
             current_tag: None,
             waiting_for_data: false,
             match_info: None,
+            diff_info: None,
         }
     }
 
@@ -1568,5 +1582,53 @@ mod tests {
         let ctx = file_ctx("data.log", false, 10, 33, Some(200), 1500, 10000);
         let result = render_prompt(&PromptStyle::Long, &ctx);
         assert_eq!(result, "data.log lines 10-33/200 15%");
+    }
+
+    // ── Task 350: Diff prompt escapes ──
+
+    #[test]
+    fn test_eval_prompt_percent_d_shows_diff_filename() {
+        let mut ctx = eval_ctx(Some("test.patch"), 1, 24, Some(100), 0, 5000);
+        ctx.diff_info = Some(pgr_core::DiffPromptInfo {
+            current_file: Some("src/main.rs".to_string()),
+            hunk_index: Some((2, 5)),
+            file_index: Some((1, 3)),
+        });
+        assert_eq!(eval_prompt("%D", &ctx), "src/main.rs");
+    }
+
+    #[test]
+    fn test_eval_prompt_percent_d_empty_when_no_diff_info() {
+        let ctx = eval_ctx(Some("test.patch"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("%D", &ctx), "");
+    }
+
+    #[test]
+    fn test_eval_prompt_condition_d_true_when_diff_file_present() {
+        let mut ctx = eval_ctx(Some("test.patch"), 1, 24, Some(100), 0, 5000);
+        ctx.diff_info = Some(pgr_core::DiffPromptInfo {
+            current_file: Some("src/main.rs".to_string()),
+            hunk_index: None,
+            file_index: None,
+        });
+        // Use `\:` to escape the colon (`:` is the else separator in prompt syntax).
+        assert_eq!(eval_prompt("?DDiff\\: %D.", &ctx), "Diff: src/main.rs");
+    }
+
+    #[test]
+    fn test_eval_prompt_condition_d_false_when_no_diff_info() {
+        let ctx = eval_ctx(Some("test.patch"), 1, 24, Some(100), 0, 5000);
+        assert_eq!(eval_prompt("?D[%D].", &ctx), "");
+    }
+
+    #[test]
+    fn test_eval_prompt_condition_d_false_when_no_current_file() {
+        let mut ctx = eval_ctx(Some("test.patch"), 1, 24, Some(100), 0, 5000);
+        ctx.diff_info = Some(pgr_core::DiffPromptInfo {
+            current_file: None,
+            hunk_index: Some((1, 3)),
+            file_index: Some((1, 1)),
+        });
+        assert_eq!(eval_prompt("?D[%D].", &ctx), "");
     }
 }
