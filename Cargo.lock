@@ -342,7 +342,6 @@ dependencies = [
  "pgr-input",
  "pgr-keys",
  "pgr-search",
- "pgr-syntax",
  "tempfile",
  "vt100",
 ]
@@ -394,14 +393,6 @@ version = "0.1.0"
 dependencies = [
  "pgr-core",
  "regex",
- "thiserror",
-]
-
-[[package]]
-name = "pgr-syntax"
-version = "0.1.0"
-dependencies = [
- "pgr-core",
  "thiserror",
 ]
 

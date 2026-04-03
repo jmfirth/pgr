@@ -16,7 +16,7 @@ See `SPECIFICATION.md` for the full design document. See `PROCESS.md` for the de
 
 ## Architecture
 
-Eight crates in a Cargo workspace (see SPECIFICATION.md §8):
+Six crates in a Cargo workspace (see SPECIFICATION.md §8):
 
 | Crate | Responsibility |
 |-------|---------------|
@@ -25,8 +25,6 @@ Eight crates in a Cargo workspace (see SPECIFICATION.md §8):
 | `pgr-search` | Regex/literal search, highlighting, filter mode |
 | `pgr-display` | Terminal rendering, prompt evaluation, ANSI handling, color, Unicode width |
 | `pgr-keys` | Raw terminal, key binding, lesskey parsing, command dispatch |
-| `pgr-syntax` | Tree-sitter syntax highlighting (optional feature) |
-| `pgr-agent` | Pgr Protocol server, NDJSON, event subscriptions, batch mode |
 | `pgr-cli` | Binary entry point, arg parsing, env vars, security mode |
 
 **Dependency direction**: `pgr-cli` depends on everything. `pgr-core` depends on nothing internal. Other crates may depend on `pgr-core` but not on each other without explicit architectural justification.

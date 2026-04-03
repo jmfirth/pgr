@@ -6,7 +6,13 @@ members = [
     "pgr-search",
     "pgr-display",
     "pgr-keys",
-    "pgr-syntax",
     "pgr-cli",
 ]
 
+
+[profile.release]
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
+opt-level = "s"
