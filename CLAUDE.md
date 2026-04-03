@@ -93,6 +93,8 @@ Tree-sitter and LSP-powered code intelligence is available via `cq-mcp`. These t
 - **Reading code**: `cq_body` for specific symbols, `cq_outline` for file overview
 - **Debugging**: `cq_context` with file:line from error messages
 - **Renaming**: `cq_rename` with `dry_run: true` first, then `apply: true`
+- **Scoping**: Use `scope` parameter to limit searches to a crate (e.g., `scope: "pgr-display/src"`)
+- **Verifying conventions**: `cq_search` with tree-sitter queries (e.g., find all `unwrap()` in library code)
 
 ## Conventions
 
