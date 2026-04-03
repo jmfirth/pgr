@@ -3,7 +3,8 @@
 //! Handles UAX #11 East Asian Width, tab expansion, control character
 //! display notation (`^X`), and column-to-byte-index mapping.
 
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Calculate the display width of a single character in terminal cells.
 ///
@@ -96,6 +97,94 @@ fn char_display_width(c: char, current_col: usize, tab_width: usize) -> usize {
         tab_width - (current_col % tab_width)
     } else {
         char_width(c)
+    }
+}
+
+/// Display width of a single grapheme cluster in terminal cells.
+///
+/// Uses string-level width measurement which correctly handles
+/// multi-codepoint sequences (ZWJ emoji, flag sequences, skin tone
+/// modifiers). Returns 0 for an empty string.
+#[must_use]
+pub fn grapheme_width(grapheme: &str) -> usize {
+    UnicodeWidthStr::width(grapheme)
+}
+
+/// Display width of a string using string-level width measurement.
+///
+/// Unlike [`display_width`] which iterates by character and handles tab
+/// expansion, this uses `UnicodeWidthStr::width()` for correct
+/// multi-codepoint emoji handling. Does NOT handle tab expansion — input
+/// should be post-render text with tabs already expanded.
+#[must_use]
+pub fn str_display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Truncate a string to fit within `max_width` display columns, respecting
+/// grapheme cluster boundaries.
+///
+/// Returns `(truncated_str, actual_width)`. Grapheme clusters that would
+/// straddle the boundary are not split — truncation stops before them.
+#[must_use]
+pub fn truncate_to_width_grapheme(s: &str, max_width: usize) -> (&str, usize) {
+    let mut col: usize = 0;
+    for (byte_offset, grapheme) in s.grapheme_indices(true) {
+        let w = grapheme_width(grapheme);
+        if col + w > max_width {
+            return (&s[..byte_offset], col);
+        }
+        col += w;
+    }
+    (s, col)
+}
+
+/// Left-truncate: return the rightmost `max_width` display columns of a
+/// string, respecting grapheme boundaries.
+///
+/// Used by prompt left-truncation. If the string fits within `max_width`,
+/// returns the entire string. Wide characters that straddle the truncation
+/// boundary are excluded.
+#[must_use]
+pub fn left_truncate_to_width(s: &str, max_width: usize) -> &str {
+    let total = str_display_width(s);
+    if total <= max_width {
+        return s;
+    }
+    let skip_cols = total - max_width;
+    let mut accumulated: usize = 0;
+    for (byte_offset, grapheme) in s.grapheme_indices(true) {
+        if accumulated >= skip_cols {
+            // Check that the remainder actually fits in max_width
+            let remainder = &s[byte_offset..];
+            if str_display_width(remainder) <= max_width {
+                return remainder;
+            }
+        }
+        accumulated += grapheme_width(grapheme);
+    }
+    // All graphemes skipped — nothing fits
+    ""
+}
+
+/// Map a display column to a byte index, iterating by grapheme cluster.
+///
+/// Returns `None` if `column` is beyond the string's display width.
+/// Same logic as [`byte_index_at_column`] but grapheme-aware for correct
+/// handling of multi-codepoint sequences.
+#[must_use]
+pub fn byte_index_at_column_grapheme(s: &str, column: usize) -> Option<usize> {
+    let mut col: usize = 0;
+    for (byte_offset, grapheme) in s.grapheme_indices(true) {
+        if col >= column {
+            return Some(byte_offset);
+        }
+        col += grapheme_width(grapheme);
+    }
+    if col >= column {
+        Some(s.len())
+    } else {
+        None
     }
 }
 
@@ -270,5 +359,134 @@ mod tests {
     #[test]
     fn test_byte_index_at_column_empty_string_nonzero_returns_none() {
         assert_eq!(byte_index_at_column("", 1, 8), None);
+    }
+
+    // --- grapheme_width tests ---
+
+    #[test]
+    fn test_grapheme_width_ascii_returns_one() {
+        assert_eq!(grapheme_width("a"), 1);
+    }
+
+    #[test]
+    fn test_grapheme_width_cjk_returns_two() {
+        assert_eq!(grapheme_width("\u{4e2d}"), 2); // 中
+    }
+
+    #[test]
+    fn test_grapheme_width_combining_mark_returns_zero() {
+        assert_eq!(grapheme_width("\u{0301}"), 0); // lone combining acute accent
+    }
+
+    #[test]
+    fn test_grapheme_width_base_plus_combining_returns_one() {
+        assert_eq!(grapheme_width("e\u{0301}"), 1); // e + combining acute = 1 column
+    }
+
+    #[test]
+    fn test_grapheme_width_zwj_family_returns_two() {
+        // 👨‍👩‍👧‍👦 = U+1F468 U+200D U+1F469 U+200D U+1F467 U+200D U+1F466
+        assert_eq!(
+            grapheme_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"),
+            2
+        );
+    }
+
+    #[test]
+    fn test_grapheme_width_flag_returns_two() {
+        // 🇺🇸 = U+1F1FA U+1F1F8
+        assert_eq!(grapheme_width("\u{1F1FA}\u{1F1F8}"), 2);
+    }
+
+    #[test]
+    fn test_grapheme_width_skin_tone_returns_two() {
+        // 👋🏽 = U+1F44B U+1F3FD
+        assert_eq!(grapheme_width("\u{1F44B}\u{1F3FD}"), 2);
+    }
+
+    // --- str_display_width tests ---
+
+    #[test]
+    fn test_str_display_width_mixed_content_correct_sum() {
+        // "hello" = 5, "中文" = 4, 👨‍👩‍👧‍👦 = 2, "!" = 1 => total 12
+        let s =
+            "hello\u{4e2d}\u{6587}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}!";
+        assert_eq!(str_display_width(s), 12);
+    }
+
+    #[test]
+    fn test_str_display_width_empty_returns_zero() {
+        assert_eq!(str_display_width(""), 0);
+    }
+
+    // --- truncate_to_width_grapheme tests ---
+
+    #[test]
+    fn test_truncate_grapheme_cjk_no_split() {
+        // "a中b" widths: a=1, 中=2, b=1. Max 2 -> only 'a' fits (1+2=3 > 2)
+        let (s, w) = truncate_to_width_grapheme("a\u{4e2d}b", 2);
+        assert_eq!(s, "a");
+        assert_eq!(w, 1);
+    }
+
+    #[test]
+    fn test_truncate_grapheme_cjk_exact_fit() {
+        // "a中b" widths: a=1, 中=2, b=1. Max 3 -> 'a' + '中' fits
+        let (s, w) = truncate_to_width_grapheme("a\u{4e2d}b", 3);
+        assert_eq!(s, "a\u{4e2d}");
+        assert_eq!(w, 3);
+    }
+
+    #[test]
+    fn test_truncate_grapheme_zwj_no_split() {
+        // ZWJ family emoji = 2 cols. Truncating to 1 should yield empty.
+        let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        let (s, w) = truncate_to_width_grapheme(emoji, 1);
+        assert_eq!(s, "");
+        assert_eq!(w, 0);
+    }
+
+    #[test]
+    fn test_truncate_grapheme_fits_entirely() {
+        let (s, w) = truncate_to_width_grapheme("hi", 10);
+        assert_eq!(s, "hi");
+        assert_eq!(w, 2);
+    }
+
+    // --- left_truncate_to_width tests ---
+
+    #[test]
+    fn test_left_truncate_cjk_returns_rightmost_columns() {
+        // "hello中文world" widths: hello=5, 中=2, 文=2, world=5 => total 14
+        // rightmost 7 columns = "world" (5) + need 2 more from left
+        // Graphemes: h(1) e(1) l(1) l(1) o(1) 中(2) 文(2) w(1) o(1) r(1) l(1) d(1)
+        // skip_cols = 14 - 7 = 7 => skip h,e,l,l,o (5) + 中(2) = 7 => remainder = "文world" (7)
+        let result = left_truncate_to_width("hello\u{4e2d}\u{6587}world", 7);
+        assert_eq!(result, "\u{6587}world");
+    }
+
+    #[test]
+    fn test_left_truncate_fits_returns_entire_string() {
+        assert_eq!(left_truncate_to_width("hi", 10), "hi");
+    }
+
+    #[test]
+    fn test_left_truncate_wide_char_cannot_fit_returns_empty() {
+        // "中" = width 2, max_width 1 => can't fit
+        assert_eq!(left_truncate_to_width("\u{4e2d}", 1), "");
+    }
+
+    // --- byte_index_at_column_grapheme tests ---
+
+    #[test]
+    fn test_byte_index_grapheme_cjk_correct() {
+        // "a中b": a=byte 0 (width 1), 中=bytes 1..4 (width 2), b=byte 4 (width 1)
+        // Column 3 -> start of 'b' -> byte 4
+        assert_eq!(byte_index_at_column_grapheme("a\u{4e2d}b", 3), Some(4));
+    }
+
+    #[test]
+    fn test_byte_index_grapheme_beyond_returns_none() {
+        assert_eq!(byte_index_at_column_grapheme("hi", 10), None);
     }
 }
