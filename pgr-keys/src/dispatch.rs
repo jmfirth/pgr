@@ -10,11 +10,11 @@ use std::time::Duration;
 
 use pgr_core::{detect_content_mode, Buffer, ContentMode, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    compute_line_screen_rows, eval_prompt, find_urls, line_number_width, paint_info_line,
-    paint_prompt, paint_screen_mapped, paint_screen_with_options, squeeze_visible_lines,
-    wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
-    RawControlMode, RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT,
-    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    build_side_by_side_lines, compute_line_screen_rows, eval_prompt, find_urls, line_number_width,
+    paint_info_line, paint_prompt, paint_screen_mapped, paint_screen_with_options,
+    squeeze_visible_lines, wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions,
+    PromptContext, PromptStyle, RawControlMode, RenderConfig, Screen, ScreenLine, TabStops,
+    DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     count_matches, find_match_index, CaseMode, FilterState, FilteredLines, HighlightState,
@@ -286,6 +286,8 @@ pub struct Pager<R: Read, W: Write> {
     gutter_state: Option<crate::git_gutter::GutterState>,
     /// Whether git gutter display is enabled (can be toggled with ESC-G).
     git_gutter_enabled: bool,
+    /// Whether side-by-side diff rendering is active (toggled with ESC-V).
+    side_by_side: bool,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -375,6 +377,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             clipboard_disabled: false,
             gutter_state: None,
             git_gutter_enabled: false,
+            side_by_side: false,
         }
     }
 
@@ -1293,6 +1296,17 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
             Command::PrevDiffFile => {
                 self.navigate_prev_diff_file(total)?;
+            }
+            Command::ToggleSideBySide => {
+                if self.content_mode == ContentMode::Diff {
+                    self.side_by_side = !self.side_by_side;
+                    let state = if self.side_by_side { "on" } else { "off" };
+                    self.status_message = Some(format!("Side-by-side diff {state}"));
+                } else {
+                    self.status_message =
+                        Some("side-by-side only available in diff mode".to_string());
+                }
+                self.repaint()?;
             }
         }
 
@@ -3645,6 +3659,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             return self.repaint_squeezed(start, content_rows, total, header_line_contents);
         }
 
+        // Side-by-side diff mode: pre-render paired lines and feed to normal paint.
+        if self.side_by_side && self.content_mode == ContentMode::Diff {
+            return self.repaint_side_by_side(start, content_rows, total, header_line_contents);
+        }
+
         let mut lines: Vec<Option<String>> = Vec::with_capacity(content_rows);
         for line_num in start..end {
             if line_num < total {
@@ -3882,6 +3901,97 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         self.paint_status_prompt(total)?;
 
+        self.initial_render = false;
+        Ok(())
+    }
+
+    /// Repaint with side-by-side diff rendering.
+    ///
+    /// Collects all buffer lines, pairs them using the diff pairing engine,
+    /// pre-renders with ANSI coloring, and feeds the visible slice to the
+    /// normal paint path.
+    fn repaint_side_by_side(
+        &mut self,
+        start: usize,
+        content_rows: usize,
+        total: usize,
+        header_line_contents: Vec<Option<String>>,
+    ) -> Result<()> {
+        // Collect all buffer lines for diff pairing.
+        let mut all_lines: Vec<Option<String>> = Vec::with_capacity(total);
+        for i in 0..total {
+            if let Ok(content) = self.index.get_line(i, &*self.buffer) {
+                all_lines.push(content);
+            } else {
+                all_lines.push(None);
+            }
+        }
+
+        let (_, cols) = self.screen.dimensions();
+
+        // Build the side-by-side rendered lines.
+        let Some(sbs_lines) = build_side_by_side_lines(&all_lines, cols) else {
+            // Terminal too narrow — fall back to unified, disable sbs.
+            self.side_by_side = false;
+            self.status_message = Some("terminal too narrow for side-by-side".to_string());
+            // Re-enter normal repaint (recursion-safe since side_by_side is now false).
+            return self.repaint();
+        };
+
+        // The paired output has a different line count than the buffer.
+        // Use the screen's top_line as an index into the paired output.
+        let sbs_total = sbs_lines.len();
+        let visible_start = start.min(sbs_total);
+        let visible_end = (visible_start + content_rows).min(sbs_total);
+
+        let mut lines: Vec<Option<String>> = Vec::with_capacity(content_rows);
+        for sbs_line in &sbs_lines[visible_start..visible_end] {
+            lines.push(Some(sbs_line.clone()));
+        }
+        // Pad remaining rows with None (tilde lines).
+        while lines.len() < content_rows {
+            lines.push(None);
+        }
+
+        // Side-by-side lines have ANSI baked in — ensure the renderer
+        // passes them through by using at least AnsiOnly mode.
+        let effective_config = if self.render_config.raw_mode == RawControlMode::Off {
+            let mut cfg = self.render_config.clone();
+            cfg.raw_mode = RawControlMode::AnsiOnly;
+            cfg
+        } else {
+            self.render_config.clone()
+        };
+
+        let paint_opts = PaintOptions {
+            show_line_numbers: false,
+            total_lines: sbs_total,
+            line_num_width: None,
+            suppress_tildes: self.runtime_options.tilde,
+            start_row: 0,
+            show_status_column: false,
+            status_column_chars: Vec::new(),
+            header_line_contents,
+            wordwrap: false,
+            line_highlights: Vec::new(),
+            gutter_marks: Vec::new(),
+        };
+
+        paint_screen_with_options(
+            &mut self.writer,
+            &self.screen,
+            &lines,
+            &effective_config,
+            &paint_opts,
+        )?;
+
+        // Detect content mode on first paint and show status message.
+        if self.initial_render {
+            let all_for_detect: Vec<Option<String>> = all_lines.clone();
+            self.detect_content_mode_from_lines(&all_for_detect);
+        }
+
+        self.paint_status_prompt(sbs_total)?;
         self.initial_render = false;
         Ok(())
     }
@@ -4775,6 +4885,19 @@ impl<R: Read, W: Write> Pager<R, W> {
         if enabled {
             self.load_gutter_state();
         }
+    }
+
+    // ── Side-by-side diff ─────────────────────────────────────────
+
+    /// Enable or disable side-by-side diff rendering.
+    pub fn set_side_by_side(&mut self, enabled: bool) {
+        self.side_by_side = enabled;
+    }
+
+    /// Returns whether side-by-side diff rendering is currently active.
+    #[must_use]
+    pub fn side_by_side(&self) -> bool {
+        self.side_by_side
     }
 
     /// Load git gutter state from the current file.

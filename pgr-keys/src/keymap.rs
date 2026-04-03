@@ -145,6 +145,8 @@ impl Keymap {
             (Key::EscSeq('S'), Command::ToggleSyntax),
             // Git gutter toggle
             (Key::EscSeq('G'), Command::ToggleGitGutter),
+            // Side-by-side diff toggle
+            (Key::EscSeq('V'), Command::ToggleSideBySide),
             // Mouse scroll (default 3 lines per wheel tick)
             (Key::ScrollUp, Command::ScrollBackward(3)),
             (Key::ScrollDown, Command::ScrollForward(3)),
@@ -739,5 +741,13 @@ mod tests {
     fn test_keymap_esc_g_maps_to_toggle_git_gutter() {
         let keymap = Keymap::default_less();
         assert_eq!(keymap.lookup(&Key::EscSeq('G')), Command::ToggleGitGutter);
+    }
+
+    // ── Task 355: Side-by-side toggle ──
+
+    #[test]
+    fn test_keymap_esc_upper_v_maps_to_toggle_side_by_side() {
+        let keymap = Keymap::default_less();
+        assert_eq!(keymap.lookup(&Key::EscSeq('V')), Command::ToggleSideBySide);
     }
 }

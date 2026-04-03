@@ -161,6 +161,8 @@ pub enum Command {
     NextDiffFile,
     /// Jump to the previous file in a multi-file diff. `[f`.
     PrevDiffFile,
+    /// Toggle side-by-side diff rendering. `ESC-V`.
+    ToggleSideBySide,
 }
 
 #[cfg(test)]
@@ -422,5 +424,17 @@ mod tests {
     #[test]
     fn test_command_next_hunk_differs_from_noop() {
         assert_ne!(Command::NextHunk, Command::Noop);
+    }
+
+    // ── Task 355: Side-by-side toggle command ──
+
+    #[test]
+    fn test_command_toggle_side_by_side_equality() {
+        assert_eq!(Command::ToggleSideBySide, Command::ToggleSideBySide);
+    }
+
+    #[test]
+    fn test_command_toggle_side_by_side_differs_from_noop() {
+        assert_ne!(Command::ToggleSideBySide, Command::Noop);
     }
 }

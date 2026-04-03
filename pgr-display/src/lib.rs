@@ -10,6 +10,7 @@ pub mod line_numbers;
 pub mod prompt;
 pub mod render;
 pub mod screen;
+pub mod side_by_side;
 pub mod squeeze;
 #[cfg(feature = "syntax")]
 pub mod syntax;
@@ -35,6 +36,10 @@ pub use render::{
     BinFmt, BinFmtSegment, ColoredRange, RawControlMode, RenderConfig, TabStops,
 };
 pub use screen::Screen;
+pub use side_by_side::{
+    build_side_by_side_lines, pair_hunk_lines, render_side_by_side, rendered_line_width,
+    SideBySideLayout, SideBySideLine, MIN_SIDE_BY_SIDE_COLS,
+};
 pub use squeeze::{is_blank_line, squeeze_visible_lines};
 pub use termcap::TermcapOverrides;
 pub use terminal_output::{
