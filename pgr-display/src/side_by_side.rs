@@ -197,10 +197,6 @@ pub fn pair_hunk_lines(lines: &[&str], line_types: &[DiffLineType]) -> Vec<SideB
 
 /// ANSI escape code for dim text.
 const DIM: &str = "\x1b[2m";
-/// ANSI escape code for removed (red background) text.
-const REMOVED_BG: &str = "\x1b[41m";
-/// ANSI escape code for added (green background) text.
-const ADDED_BG: &str = "\x1b[42m";
 /// ANSI reset code.
 const RESET: &str = "\x1b[0m";
 
@@ -234,18 +230,12 @@ fn render_one_line(line: &SideBySideLine, layout: &SideBySideLayout) -> String {
         layout.left_width + layout.right_width + 64, // extra for ANSI codes
     );
 
-    // Left panel with color
-    let left_color = color_for_type(line.left_type, true);
-    if let Some(color) = left_color {
-        out.push_str(color);
-    }
+    // Left panel — content is pre-colored with syntax highlighting + tinting.
+    // Reset after content so SGR doesn't bleed into padding/separator.
     out.push_str(left_truncated);
-    // Pad with spaces (still inside the color region so background fills)
+    out.push_str(RESET);
     for _ in 0..left_pad {
         out.push(' ');
-    }
-    if left_color.is_some() {
-        out.push_str(RESET);
     }
 
     // Separator
@@ -253,31 +243,14 @@ fn render_one_line(line: &SideBySideLine, layout: &SideBySideLayout) -> String {
     out.push_str(layout.separator);
     out.push_str(RESET);
 
-    // Right panel with color
-    let right_color = color_for_type(line.right_type, false);
-    if let Some(color) = right_color {
-        out.push_str(color);
-    }
+    // Right panel — same treatment.
     out.push_str(right_truncated);
+    out.push_str(RESET);
     for _ in 0..right_pad {
         out.push(' ');
     }
-    if right_color.is_some() {
-        out.push_str(RESET);
-    }
 
     out
-}
-
-/// Return the ANSI color escape for a given line type and panel side.
-///
-/// Returns `None` for context and other types that don't need coloring.
-fn color_for_type(line_type: DiffLineType, is_left: bool) -> Option<&'static str> {
-    match line_type {
-        DiffLineType::Removed if is_left => Some(REMOVED_BG),
-        DiffLineType::Added if !is_left => Some(ADDED_BG),
-        _ => None,
-    }
 }
 
 /// Build side-by-side rendered lines from raw buffer lines.

@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use pgr_core::{detect_content_mode, Buffer, ContentMode, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    build_side_by_side_lines, compute_line_screen_rows, eval_prompt, find_urls, line_number_width,
-    paint_info_line, paint_prompt, paint_screen_mapped, paint_screen_with_options,
-    parse_table_layout, snap_to_next_column, snap_to_prev_column, squeeze_visible_lines,
-    wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
-    RawControlMode, RenderConfig, Screen, ScreenLine, SqlTableLayout, TabStops,
-    DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
+    compute_line_screen_rows, eval_prompt, find_urls, line_number_width, paint_info_line,
+    paint_prompt, paint_screen_mapped, paint_screen_with_options, parse_table_layout,
+    snap_to_next_column, snap_to_prev_column, squeeze_visible_lines, wordwrap_segments,
+    ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle, RawControlMode,
+    RenderConfig, Screen, ScreenLine, SqlTableLayout, TabStops, DEFAULT_LONG_PROMPT,
+    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     count_matches, find_match_index, CaseMode, FilterState, FilteredLines, HighlightState,
@@ -4210,6 +4210,7 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Collects all buffer lines, pairs them using the diff pairing engine,
     /// pre-renders with ANSI coloring, and feeds the visible slice to the
     /// normal paint path.
+    #[allow(clippy::too_many_lines)] // Side-by-side has syntax highlighting + fallback paths
     fn repaint_side_by_side(
         &mut self,
         start: usize,
@@ -4227,28 +4228,79 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
-        // Strip git's ANSI coloring from raw lines before pairing.
-        // The side-by-side renderer applies its own background colors via
-        // color_for_type. Syntax highlighting within panels requires
-        // ANSI-aware prefix stripping (future enhancement).
-        let all_lines: Vec<Option<String>> = all_lines
+        // Strip git's ANSI coloring before pairing so +/- prefix detection works.
+        let stripped: Vec<Option<String>> = all_lines
             .iter()
             .map(|opt| opt.as_ref().map(|s| pgr_display::ansi::strip_ansi(s)))
             .collect();
 
         let (_, cols) = self.screen.dimensions();
 
-        // Build the side-by-side rendered lines.
-        let Some(sbs_lines) = build_side_by_side_lines(&all_lines, cols) else {
+        // Build side-by-side: pair lines, colorize each side, then render.
+        let layout = pgr_display::side_by_side::SideBySideLayout::from_terminal_width(cols);
+        let Some(layout) = layout else {
             // Terminal too narrow — fall back to unified, disable sbs.
             self.side_by_side = false;
             self.status_message = Some("terminal too narrow for side-by-side".to_string());
-            // Re-enter normal repaint (recursion-safe since side_by_side is now false).
             return self.repaint();
         };
 
-        // The paired output has a different line count than the buffer.
-        // Use the screen's top_line as an index into the paired output.
+        // Classify, pair, colorize, and render.
+        let raw_lines: Vec<&str> = stripped.iter().filter_map(|opt| opt.as_deref()).collect();
+        let types: Vec<pgr_core::DiffLineType> = raw_lines
+            .iter()
+            .map(|l| pgr_core::classify_diff_line(l))
+            .collect();
+        let mut paired = pgr_display::side_by_side::pair_hunk_lines(&raw_lines, &types);
+
+        // Apply syntax highlighting + background tinting to each side's content.
+        let mut did_syntax = false;
+        #[cfg(feature = "syntax")]
+        {
+            if self.syntax_enabled {
+                if let Some(ref highlighter) = self.highlighter {
+                    let filename = self.current_diff_filename();
+                    if let Some(ref fname) = filename {
+                        if let Some(syntax) = highlighter.detect_syntax(fname) {
+                            did_syntax = true;
+                            let mut hl_left = highlighter.highlight_lines(syntax);
+                            let mut hl_right = highlighter.highlight_lines(syntax);
+                            for line in &mut paired {
+                                if let Some(ref text) = line.left {
+                                    line.left = Some(pgr_display::highlight_content(
+                                        text,
+                                        line.left_type,
+                                        highlighter,
+                                        &mut hl_left,
+                                    ));
+                                }
+                                if let Some(ref text) = line.right {
+                                    line.right = Some(pgr_display::highlight_content(
+                                        text,
+                                        line.right_type,
+                                        highlighter,
+                                        &mut hl_right,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: tint without syntax highlighting.
+        if !did_syntax {
+            for line in &mut paired {
+                if let Some(ref text) = line.left {
+                    line.left = Some(pgr_display::tint_content(text, line.left_type));
+                }
+                if let Some(ref text) = line.right {
+                    line.right = Some(pgr_display::tint_content(text, line.right_type));
+                }
+            }
+        }
+
+        let sbs_lines = pgr_display::side_by_side::render_side_by_side(&paired, &layout);
         let sbs_total = sbs_lines.len();
         let visible_start = start.min(sbs_total);
         let visible_end = (visible_start + content_rows).min(sbs_total);

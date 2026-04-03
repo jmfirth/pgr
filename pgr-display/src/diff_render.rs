@@ -36,6 +36,69 @@ pub fn colorize_diff_line(line: &str, line_type: DiffLineType) -> String {
     }
 }
 
+/// Apply background tinting to already-stripped content (no `+`/`-` prefix).
+///
+/// Used by side-by-side rendering where prefixes have already been removed
+/// during line pairing. Applies the same subtle 24-bit background tints
+/// as the unified view.
+#[must_use]
+pub fn tint_content(text: &str, line_type: DiffLineType) -> String {
+    match line_type {
+        DiffLineType::Added => format!("{ADDED_BG}{text}{RESET}"),
+        DiffLineType::Removed => format!("{REMOVED_BG}{text}{RESET}"),
+        DiffLineType::HunkHeader => format!("{HUNK_HEADER_SGR}{text}{RESET}"),
+        DiffLineType::Header => format!("{FILE_HEADER_SGR}{text}{RESET}"),
+        DiffLineType::Context | DiffLineType::Other => text.to_string(),
+    }
+}
+
+/// Apply syntax highlighting + background tinting to already-stripped content.
+///
+/// Like [`tint_content`] but also applies syntect foreground colors when the
+/// `syntax` feature is enabled and a syntax is detected for the filename.
+#[cfg(feature = "syntax")]
+#[must_use]
+pub fn highlight_content(
+    text: &str,
+    line_type: DiffLineType,
+    highlighter: &crate::syntax::highlighting::Highlighter,
+    hl: &mut syntect::easy::HighlightLines<'_>,
+) -> String {
+    use crate::syntax::highlighting::as_24_bit_terminal_escaped;
+
+    match line_type {
+        DiffLineType::Added | DiffLineType::Removed | DiffLineType::Context => {
+            let code_nl = if text.ends_with('\n') {
+                text.to_string()
+            } else {
+                format!("{text}\n")
+            };
+
+            let syntax_colored = hl
+                .highlight_line(&code_nl, highlighter.syntax_set())
+                .ok()
+                .map(|ranges| {
+                    let escaped = as_24_bit_terminal_escaped(&ranges);
+                    escaped
+                        .trim_end_matches('\n')
+                        .strip_suffix(RESET)
+                        .unwrap_or(escaped.trim_end_matches('\n'))
+                        .to_string()
+                });
+
+            let syntax_text = syntax_colored.as_deref().unwrap_or(text);
+
+            match line_type {
+                DiffLineType::Added => format!("{ADDED_BG}{syntax_text}{RESET}"),
+                DiffLineType::Removed => format!("{REMOVED_BG}{syntax_text}{RESET}"),
+                DiffLineType::Context => format!("{syntax_text}{RESET}"),
+                _ => unreachable!(),
+            }
+        }
+        _ => tint_content(text, line_type),
+    }
+}
+
 /// Highlight code within diff hunks using the detected file's syntax.
 ///
 /// For each line, strips git's ANSI coloring, applies syntax highlighting
