@@ -563,12 +563,8 @@ pub fn paint_prompt<W: Write>(
     // Truncate prompt to screen width using left-truncation (matching less
     // behavior). When the prompt is too long, leading characters are removed
     // so that the right side (line info, percentage) remains visible.
-    let char_count = prompt_text.chars().count();
-    let display_text: String = if char_count > screen_cols {
-        prompt_text.chars().skip(char_count - screen_cols).collect()
-    } else {
-        prompt_text.to_string()
-    };
+    // Uses grapheme-aware truncation for correct CJK/emoji handling.
+    let display_text = crate::unicode::left_truncate_to_width(prompt_text, screen_cols);
     // Render with configured color or fallback to reverse video
     let sgr = prompt_sgr.unwrap_or("\x1b[7m");
     write!(writer, "{sgr}{display_text}\x1b[0m")?;
@@ -596,7 +592,8 @@ pub fn paint_info_line<W: Write>(
     // Clear the entire line
     write!(writer, "\x1b[2K")?;
     // Right-truncate: keep leading characters, drop trailing overflow.
-    let display_text: String = text.chars().take(screen_cols).collect();
+    // Uses grapheme-aware truncation for correct CJK/emoji handling.
+    let (display_text, _) = crate::unicode::truncate_to_width_grapheme(text, screen_cols);
     // Render with configured color or fallback to reverse video
     let sgr_code = sgr.unwrap_or("\x1b[7m");
     write!(writer, "{sgr_code}{display_text}\x1b[0m")?;
@@ -1454,5 +1451,48 @@ mod tests {
         // Outer ?a is false (search_active=false), so entire block is skipped.
         // Inner ?g, ?C, ?T, ?W must be properly skipped.
         assert_eq!(eval_prompt("?a?glinks.?Cshift.?Ttag.?Wwait..", &ctx), "");
+    }
+
+    // --- Unicode-correct truncation tests (Task 301) ---
+
+    #[test]
+    fn test_paint_prompt_cjk_left_truncation() {
+        // CJK prompt wider than screen: each char is 2 cols
+        // 10 CJK chars = 20 display columns, screen_cols = 10
+        let prompt =
+            "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}";
+        let mut buf = Vec::new();
+        paint_prompt(&mut buf, prompt, 24, 10, None).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // Should show rightmost 10 display columns = 5 CJK chars
+        assert!(
+            output.contains("\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}"),
+            "expected rightmost 5 CJK chars in prompt: {output}"
+        );
+        // Should NOT contain the first CJK char
+        assert!(
+            !output.contains("\u{4e2d}\u{6587}"),
+            "should not contain leftmost CJK chars: {output}"
+        );
+    }
+
+    #[test]
+    fn test_paint_info_line_cjk_right_truncation() {
+        // CJK info text wider than screen: 10 CJK chars = 20 cols, screen = 10
+        let text =
+            "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}";
+        let mut buf = Vec::new();
+        paint_info_line(&mut buf, text, 1, 10, None).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // Should show leftmost 10 display columns = 5 CJK chars
+        assert!(
+            output.contains("\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\u{4e00}"),
+            "expected leftmost 5 CJK chars in info line: {output}"
+        );
+        // Should NOT contain the last CJK char
+        assert!(
+            !output.contains("\u{516d}"),
+            "should not contain rightmost CJK char: {output}"
+        );
     }
 }

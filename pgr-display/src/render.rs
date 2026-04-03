@@ -727,7 +727,13 @@ pub fn apply_chop_markers(
         // This is a visible character
         let c = rendered[i..].chars().next().unwrap_or(' ');
         let char_len = c.len_utf8();
-        let char_w = UnicodeWidthChar::width(c).unwrap_or(1).max(1);
+        let char_w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if char_w == 0 {
+            // Zero-width character (combining mark): emit without advancing column
+            result.push(c);
+            i += char_len;
+            continue;
+        }
 
         if visible_col == right_marker_col {
             // Replace last visible character with `>`
@@ -1808,5 +1814,43 @@ mod tests {
         // "a\x01b": a=1, [01]=4, b=1 = 6
         let width = line_display_width("a\x01b", &config);
         assert_eq!(width, 6);
+    }
+
+    // --- Chop marker combining mark tests (Task 301) ---
+
+    #[test]
+    fn test_apply_chop_markers_combining_marks_correct_position() {
+        // "e\u{0301}f" rendered in 10 cols with right truncation.
+        // "e\u{0301}" = 1 display col, "f" = 1 display col => total 2.
+        // With display_width=2 and truncated_right, marker col = 1.
+        // The "f" at visible_col=1 should be replaced with ">".
+        let (result, width) = apply_chop_markers("e\u{0301}f", 2, 0, true);
+        assert_eq!(width, 2);
+        // The combining mark should stay with its base character 'e',
+        // and 'f' is replaced by '>'
+        assert!(
+            result.contains("e\u{0301}"),
+            "combining mark should stay with base char: {result}"
+        );
+        assert!(result.contains('>'), "should have right marker: {result}");
+    }
+
+    #[test]
+    fn test_apply_chop_markers_cjk_correct_position() {
+        // CJK char (width 2) + ASCII char at display width 3.
+        // "\u{4e2d}a" = 2+1 = 3 display cols.
+        // With display_width=3 and truncated, marker_col=2.
+        // 'a' at visible_col=2 should be replaced with '>'.
+        let (result, width) = apply_chop_markers("\u{4e2d}a", 3, 0, true);
+        assert_eq!(width, 3);
+        assert!(
+            result.contains('\u{4e2d}'),
+            "CJK char should be present: {result}"
+        );
+        assert!(result.contains('>'), "should have right marker: {result}");
+        assert!(
+            !result.contains('a'),
+            "ASCII 'a' should be replaced by marker: {result}"
+        );
     }
 }

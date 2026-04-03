@@ -5,9 +5,12 @@
 
 use std::io::Write;
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::line_numbers;
 use crate::render::{self, RenderConfig};
 use crate::screen::Screen;
+use crate::unicode;
 
 /// A visible line paired with its actual buffer line number.
 ///
@@ -590,10 +593,14 @@ pub fn compute_line_screen_rows(width: usize, margin_width: usize, cols: usize) 
 /// Split a rendered line into word-wrapped segments of at most `max_width` display columns.
 ///
 /// Breaks at word boundaries matching GNU less `--wordwrap` behavior: if the
-/// character at position `max_width` is a space (or end of text), include the
-/// full `max_width` characters and skip the space. Otherwise, find the last
-/// space within the segment and break after it. If no space exists, fall back
-/// to breaking at exactly `max_width` characters (character-level wrapping).
+/// grapheme at the column boundary is a space (or end of text), include the
+/// content up to `max_width` columns and skip the space. Otherwise, find the
+/// last space within the segment and break after it. If no space exists, fall
+/// back to breaking at exactly `max_width` display columns (hard wrapping).
+///
+/// The input may contain ANSI escape sequences (SGR color codes) from the
+/// render pipeline. These have zero display width and are preserved in the
+/// output segments.
 ///
 /// Returns a vector of string segments to render on consecutive screen rows.
 #[must_use]
@@ -606,52 +613,94 @@ pub fn wordwrap_segments(text: &str, max_width: usize) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        let char_count = remaining.chars().count();
-        if char_count <= max_width {
+        // Check if the remaining text fits within max_width display columns.
+        // Strip ANSI for width measurement since ANSI sequences are zero-width.
+        let stripped = crate::ansi::strip_ansi(remaining);
+        if unicode::str_display_width(&stripped) <= max_width {
             segments.push(remaining.to_string());
             break;
         }
 
-        // Check the character at position max_width (the first char that
-        // wouldn't fit). If it's a space, the first max_width chars form a
-        // clean word boundary — take them and skip the space.
-        let boundary_char = remaining.chars().nth(max_width);
-        if boundary_char == Some(' ') {
-            // The word ends exactly at max_width; take the first max_width
-            // chars and skip the space after them.
-            let byte_end = remaining
-                .char_indices()
-                .nth(max_width)
-                .map_or(remaining.len(), |(i, _)| i);
-            segments.push(remaining[..byte_end].to_string());
-            // Skip the space character
-            let byte_past_space = remaining
-                .char_indices()
-                .nth(max_width + 1)
-                .map_or(remaining.len(), |(i, _)| i);
-            remaining = &remaining[byte_past_space..];
-            continue;
+        // Iterate grapheme clusters over the original text, skipping ANSI
+        // escape sequences for width accounting but preserving them in output.
+        let mut col: usize = 0;
+        // byte_end: byte index in `remaining` where we'd hard-break
+        let mut byte_end: Option<usize> = None;
+        // last_space_byte_end: byte index just past the last space within max_width
+        let mut last_space_byte_end: Option<usize> = None;
+        // boundary_is_space: whether the grapheme just past max_width is a space
+        let mut boundary_is_space = false;
+        // byte_past_boundary_space: byte index past the boundary space (to skip it)
+        let mut byte_past_boundary_space: usize = 0;
+
+        let bytes = remaining.as_bytes();
+        let len = bytes.len();
+        let mut i: usize = 0;
+
+        while i < len {
+            // Detect ANSI escape sequence: ESC [ ... m
+            if bytes[i] == b'\x1b' && i + 1 < len && bytes[i + 1] == b'[' {
+                i += 2; // skip ESC [
+                while i < len && !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'm') {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1; // skip the terminator
+                }
+                continue;
+            }
+
+            // Extract the grapheme cluster starting at byte position `i`.
+            let grapheme_str = &remaining[i..];
+            let Some((_, first_grapheme)) = grapheme_str.grapheme_indices(true).next() else {
+                // Safety fallback: advance one byte
+                i += 1;
+                continue;
+            };
+            let grapheme_end = i + first_grapheme.len();
+
+            let w = unicode::grapheme_width(first_grapheme);
+
+            if col + w > max_width {
+                // This grapheme would exceed max_width. Set hard break at `i`.
+                byte_end = Some(i);
+                // Check if this boundary grapheme is a space
+                if first_grapheme == " " {
+                    boundary_is_space = true;
+                    byte_past_boundary_space = grapheme_end;
+                }
+                break;
+            }
+
+            // Track the last space position within the fitting region
+            if first_grapheme == " " {
+                last_space_byte_end = Some(grapheme_end);
+            }
+
+            col += w;
+            i = grapheme_end;
         }
 
-        // The character at max_width is not a space (mid-word). Find the last
-        // space within the first max_width characters.
-        let prefix: String = remaining.chars().take(max_width).collect();
-        if let Some(last_space) = prefix.rfind(' ') {
-            // Break after the space (include the space on this row)
-            let byte_end = remaining
-                .char_indices()
-                .nth(last_space + 1)
-                .map_or(remaining.len(), |(i, _)| i);
-            segments.push(remaining[..byte_end].to_string());
-            remaining = &remaining[byte_end..];
+        // If we never exceeded max_width (shouldn't happen since we checked above,
+        // but handle gracefully), take everything.
+        let Some(hard_break) = byte_end else {
+            segments.push(remaining.to_string());
+            break;
+        };
+
+        if boundary_is_space {
+            // The grapheme at the boundary is a space — take content up to it
+            // and skip the space.
+            segments.push(remaining[..hard_break].to_string());
+            remaining = &remaining[byte_past_boundary_space..];
+        } else if let Some(space_end) = last_space_byte_end {
+            // Break after the last space (include the space on this row).
+            segments.push(remaining[..space_end].to_string());
+            remaining = &remaining[space_end..];
         } else {
-            // No space found: fall back to character-level break at max_width
-            let byte_end = remaining
-                .char_indices()
-                .nth(max_width)
-                .map_or(remaining.len(), |(i, _)| i);
-            segments.push(remaining[..byte_end].to_string());
-            remaining = &remaining[byte_end..];
+            // No space found: hard break at the column boundary.
+            segments.push(remaining[..hard_break].to_string());
+            remaining = &remaining[hard_break..];
         }
     }
 
@@ -1461,6 +1510,92 @@ mod tests {
         assert!(
             output_str.contains("1"),
             "expected line number 1 for header: {output_str}"
+        );
+    }
+
+    // --- Unicode-correct wordwrap tests (Task 301) ---
+
+    #[test]
+    fn test_wordwrap_cjk_breaks_at_display_width() {
+        // 10 CJK chars = 20 display columns. max_width=15: should break after
+        // 7 CJK chars (14 cols) because the 8th (16 cols) would exceed 15.
+        let cjk =
+            "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}";
+        let segments = wordwrap_segments(cjk, 15);
+        assert_eq!(segments.len(), 2);
+        // First segment: 7 CJK chars = 14 columns
+        assert_eq!(
+            segments[0],
+            "\u{4e2d}\u{6587}\u{6d4b}\u{8bd5}\u{4e00}\u{4e8c}\u{4e09}"
+        );
+        // Second segment: remaining 3 CJK chars = 6 columns
+        assert_eq!(segments[1], "\u{56db}\u{4e94}\u{516d}");
+    }
+
+    #[test]
+    fn test_wordwrap_ascii_unchanged() {
+        let segments = wordwrap_segments("hello world foo", 11);
+        // "hello world" = 11 chars exactly fits, space at boundary -> skip space
+        assert_eq!(segments, vec!["hello world", "foo"]);
+    }
+
+    #[test]
+    fn test_wordwrap_mixed_cjk_ascii() {
+        // "hello \u{4e2d}\u{6587}\u{6d4b}\u{8bd5} world" = 5+1+8+1+5 = 20 display cols
+        // max_width=12: "hello \u{4e2d}\u{6587}\u{6d4b}" = 5+1+6 = 12 cols -> break after space+3 CJK
+        let text = "hello \u{4e2d}\u{6587}\u{6d4b}\u{8bd5} world";
+        let segments = wordwrap_segments(text, 12);
+        assert!(
+            segments.len() >= 2,
+            "expected at least 2 segments, got {segments:?}"
+        );
+        // First segment should be at most 12 display columns
+        let first_width = crate::unicode::str_display_width(&segments[0]);
+        assert!(
+            first_width <= 12,
+            "first segment width {first_width} exceeds max 12"
+        );
+    }
+
+    #[test]
+    fn test_wordwrap_emoji_not_split() {
+        // ZWJ family emoji = 2 display columns, should stay in one segment
+        let emoji = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        let segments = wordwrap_segments(emoji, 10);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], emoji);
+    }
+
+    #[test]
+    fn test_wordwrap_combining_marks_not_split() {
+        // "e\u{0301}" (e + combining acute) = 1 display column, treated as one grapheme
+        let text = "e\u{0301}e\u{0301}e\u{0301}e\u{0301}e\u{0301}";
+        // 5 graphemes, each 1 col = 5 display columns
+        let segments = wordwrap_segments(text, 3);
+        assert_eq!(segments.len(), 2);
+        // First segment: 3 graphemes = 3 cols
+        assert_eq!(segments[0], "e\u{0301}e\u{0301}e\u{0301}");
+        assert_eq!(segments[1], "e\u{0301}e\u{0301}");
+    }
+
+    #[test]
+    fn test_wordwrap_ansi_sequences_preserved() {
+        // Input with SGR codes: red "hello" + reset, then more text
+        let text = "\x1b[31mhello\x1b[0m world and more";
+        let segments = wordwrap_segments(text, 11);
+        // "hello world" = 11 display cols (ANSI codes are zero-width)
+        // First segment should contain the ANSI codes and fit within 11 cols
+        assert!(
+            segments[0].contains("\x1b[31m"),
+            "ANSI start code should be preserved"
+        );
+        assert!(
+            segments[0].contains("\x1b[0m"),
+            "ANSI reset code should be preserved"
+        );
+        assert!(
+            segments.len() >= 2,
+            "expected at least 2 segments, got {segments:?}"
         );
     }
 }
