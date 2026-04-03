@@ -92,19 +92,19 @@ fn is_diff(lines: &[&str]) -> bool {
         return false;
     }
 
-    // git diff header
-    if lines[0].starts_with("diff --git ") {
-        return true;
-    }
-
-    // unified diff header
-    if lines.len() >= 2 && lines[0].starts_with("--- ") && lines[1].starts_with("+++ ") {
-        return true;
-    }
-
-    // hunk headers in first 10 lines
-    let check_count = lines.len().min(10);
-    for line in &lines[..check_count] {
+    // Scan all available lines (up to MAX_DETECT_LINES) for diff markers.
+    // This handles `git log -p` where commit headers precede the diff,
+    // and `git show` where the diff starts after the commit message.
+    for (i, line) in lines.iter().enumerate() {
+        // git diff header anywhere in the content
+        if line.starts_with("diff --git ") {
+            return true;
+        }
+        // unified diff header (two consecutive lines)
+        if line.starts_with("--- ") && i + 1 < lines.len() && lines[i + 1].starts_with("+++ ") {
+            return true;
+        }
+        // hunk header
         if is_hunk_header(line) {
             return true;
         }

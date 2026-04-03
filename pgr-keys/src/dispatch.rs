@@ -4957,7 +4957,15 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Called once per file on the first paint. If a non-plain mode is detected,
     /// sets a transient status message like `"[diff mode]"`.
     fn detect_content_mode_from_lines(&mut self, lines: &[Option<String>]) {
-        let borrowed: Vec<&str> = lines.iter().filter_map(|opt| opt.as_deref()).collect();
+        // Strip ANSI escape sequences before detection — tools like git
+        // wrap output in SGR codes (e.g., bold diff headers) which would
+        // cause prefix-based detection to fail.
+        let stripped: Vec<String> = lines
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .map(|s| pgr_display::ansi::strip_ansi(s))
+            .collect();
+        let borrowed: Vec<&str> = stripped.iter().map(String::as_str).collect();
         self.content_mode = detect_content_mode(&borrowed);
         if let Some(label) = self.content_mode.status_label() {
             self.status_message = Some(label);
