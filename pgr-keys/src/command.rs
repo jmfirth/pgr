@@ -84,7 +84,15 @@ pub enum Command {
     /// Open the current file in the editor (`$VISUAL` or `$EDITOR`).
     EditFile,
     /// Save pipe input to a file (`s filename`).
+    ///
+    /// Less-conformant command: only available when reading from a pipe.
+    /// No longer bound to any default key; see `SaveBuffer` for the pgr extension.
     SavePipeInput,
+    /// Save the entire buffer to a file, stripping ANSI escape sequences.
+    ///
+    /// pgr extension that replaces `SavePipeInput` on the `s` key. Works for
+    /// both pipe and file input. Blocked in secure mode.
+    SaveBuffer,
     /// Examine (open) a new file. `:e [filename]`.
     Examine,
     /// Same as Examine (alternative bindings: `^X^V`, `E`).
@@ -436,5 +444,22 @@ mod tests {
     #[test]
     fn test_command_toggle_side_by_side_differs_from_noop() {
         assert_ne!(Command::ToggleSideBySide, Command::Noop);
+    }
+
+    // ── Task 366: Buffer save command ──
+
+    #[test]
+    fn test_command_save_buffer_equality() {
+        assert_eq!(Command::SaveBuffer, Command::SaveBuffer);
+    }
+
+    #[test]
+    fn test_command_save_buffer_differs_from_noop() {
+        assert_ne!(Command::SaveBuffer, Command::Noop);
+    }
+
+    #[test]
+    fn test_command_save_buffer_differs_from_save_pipe_input() {
+        assert_ne!(Command::SaveBuffer, Command::SavePipeInput);
     }
 }

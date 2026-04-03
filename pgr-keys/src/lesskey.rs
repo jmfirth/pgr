@@ -371,6 +371,7 @@ fn build_action_map() -> HashMap<&'static str, Command> {
     m.insert("pipe", Command::PipeToCommand);
     m.insert("visual", Command::EditFile);
     m.insert("edit", Command::EditFile);
+    m.insert("save-pipe-input", Command::SavePipeInput);
 
     // Marks (map to Noop for now since pgr doesn't have mark commands yet)
     m.insert("set-mark", Command::Noop);
@@ -398,6 +399,9 @@ fn build_action_map() -> HashMap<&'static str, Command> {
     // Clipboard yank (pgr extension)
     m.insert("yank-line", Command::YankLine);
     m.insert("yank-screen", Command::YankScreen);
+
+    // Buffer save (pgr extension)
+    m.insert("save-buffer", Command::SaveBuffer);
 
     m
 }
@@ -1188,5 +1192,13 @@ k  forw-line
         // j and k are now swapped
         assert_eq!(keymap.lookup(&Key::Char('j')), Command::ScrollBackward(1));
         assert_eq!(keymap.lookup(&Key::Char('k')), Command::ScrollForward(1));
+    }
+
+    // ── Task 366: save-buffer action name ──
+
+    #[test]
+    fn test_lesskey_save_buffer_action_name() {
+        let m = build_action_map();
+        assert_eq!(m.get("save-buffer"), Some(&Command::SaveBuffer));
     }
 }

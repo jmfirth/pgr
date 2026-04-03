@@ -1160,6 +1160,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::SavePipeInput => {
                 self.handle_save_pipe_input(total)?;
             }
+            Command::SaveBuffer => {
+                self.handle_save_buffer(total)?;
+            }
             Command::Examine | Command::ExamineAlt => {
                 self.examine_prompt()?;
             }
@@ -1995,6 +1998,43 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
 
         std::fs::write(&input, content)?;
+        Ok(())
+    }
+
+    /// Handle the `s` (save buffer) dispatch.
+    ///
+    /// Saves all buffer lines to a user-specified file, stripping ANSI escape
+    /// sequences so the output is plain text. Works for both pipe and file input.
+    /// Blocked in secure mode.
+    fn handle_save_buffer(&mut self, total: usize) -> Result<()> {
+        if self.secure_mode {
+            self.write_status("Command not available")?;
+            return Ok(());
+        }
+
+        let input = self.read_command_line("s ")?;
+        let Some(input) = input else {
+            return Ok(());
+        };
+
+        if input.is_empty() {
+            return Ok(());
+        }
+
+        // Collect all buffer lines, stripping ANSI escape sequences.
+        let mut content = String::new();
+        let mut line_count: usize = 0;
+        for line_num in 0..total {
+            if let Some(line) = self.index.get_line(line_num, &*self.buffer)? {
+                let stripped = pgr_display::ansi::strip_ansi(&line);
+                content.push_str(&stripped);
+                content.push('\n');
+                line_count += 1;
+            }
+        }
+
+        std::fs::write(&input, &content)?;
+        self.write_status(&format!("Saved {line_count} lines to {input}"))?;
         Ok(())
     }
 
@@ -6143,25 +6183,25 @@ mod tests {
         assert!(!output.contains("Command not available"));
     }
 
-    // Test 11: SavePipeInput fails gracefully when not reading from pipe.
+    // Task 366: SaveBuffer is blocked in secure mode.
     #[test]
-    fn test_dispatch_save_pipe_input_fails_when_not_pipe() {
+    fn test_dispatch_save_buffer_blocked_in_secure_mode() {
         let content = make_test_content(50);
-        // 's' when not a pipe shows "Not reading from pipe" then 'q' exits.
+        // 's' in secure mode shows "Command not available" then 'q' exits.
         let mut keys: Vec<u8> = Vec::new();
         keys.push(b's');
         keys.push(b'q');
-        let pager = run_pager_with_settings(&keys, &content, Some("file.txt"), false, false);
+        let pager = run_pager_with_settings(&keys, &content, Some("file.txt"), true, false);
         let output = String::from_utf8_lossy(&pager.writer);
-        assert!(output.contains("Not reading from pipe"));
+        assert!(output.contains("Command not available"));
     }
 
-    // Test 10: SavePipeInput writes buffer content to specified file.
+    // Task 366: SaveBuffer works from a file (not pipe) — saves plain content.
     #[test]
-    fn test_dispatch_save_pipe_input_writes_content() {
+    fn test_dispatch_save_buffer_writes_content() {
         let content = b"hello world\n";
         let tmpdir = std::env::temp_dir();
-        let tmpfile = tmpdir.join("pgr_test_save_pipe_input.txt");
+        let tmpfile = tmpdir.join("pgr_test_save_buffer.txt");
         // Clean up if it exists from a prior run.
         let _ = std::fs::remove_file(&tmpfile);
 
@@ -6173,12 +6213,95 @@ mod tests {
         keys.push(b'\r'); // Enter
         keys.push(b'q');
 
-        let _pager = run_pager_with_settings(&keys, content, None, false, true);
+        // is_pipe=false: SaveBuffer works even when reading from a file.
+        let pager = run_pager_with_settings(&keys, content, Some("input.txt"), false, false);
 
         let saved = std::fs::read_to_string(&tmpfile).unwrap();
         assert_eq!(saved, "hello world\n");
 
+        // Status line should show the save confirmation.
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Saved"));
+        assert!(output.contains("lines to"));
+
         // Clean up.
+        let _ = std::fs::remove_file(&tmpfile);
+    }
+
+    // Task 366: SaveBuffer strips ANSI from lines written to file.
+    #[test]
+    fn test_dispatch_save_buffer_strips_ansi() {
+        // Content with ANSI color code.
+        let content = b"\x1b[31mred text\x1b[0m\n";
+        let tmpdir = std::env::temp_dir();
+        let tmpfile = tmpdir.join("pgr_test_save_buffer_ansi.txt");
+        let _ = std::fs::remove_file(&tmpfile);
+
+        let filename_bytes = tmpfile.to_str().unwrap().as_bytes();
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b's');
+        keys.extend_from_slice(filename_bytes);
+        keys.push(b'\r');
+        keys.push(b'q');
+
+        let _pager = run_pager_with_settings(&keys, content, None, false, false);
+
+        let saved = std::fs::read_to_string(&tmpfile).unwrap();
+        // ANSI codes must be stripped; only plain text remains.
+        assert_eq!(saved, "red text\n");
+
+        let _ = std::fs::remove_file(&tmpfile);
+    }
+
+    // Regression: SavePipeInput via lesskey rebind still shows "Not reading from pipe".
+    #[test]
+    fn test_dispatch_save_pipe_input_fails_when_not_pipe() {
+        // Bind 's' back to save-pipe-input via lesskey to exercise the old code path.
+        use crate::lesskey::parse_lesskey_source;
+
+        let content = make_test_content(50);
+        let buf_len = content.len() as u64;
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b's');
+        keys.push(b'q');
+
+        let reader = KeyReader::new(Cursor::new(keys));
+        let writer = Vec::new();
+        let buffer = Box::new(TestBuffer::new(&content));
+        let index = LineIndex::new(buf_len);
+        let mut pager = Pager::new(reader, writer, buffer, index, Some("file.txt".to_string()));
+        pager.set_secure_mode(false);
+        pager.set_is_pipe(false);
+        // Override 's' → save-pipe-input so we test that code path.
+        let config = parse_lesskey_source("#command\ns  save-pipe-input\n");
+        pager.apply_lesskey_config(&config);
+        let _ = pager.run();
+
+        let output = String::from_utf8_lossy(&pager.writer);
+        assert!(output.contains("Not reading from pipe"));
+    }
+
+    // Task 366: SaveBuffer writes content from pipe input too (not pipe-only).
+    #[test]
+    fn test_dispatch_save_buffer_works_with_pipe_input() {
+        let content = b"pipe line\n";
+        let tmpdir = std::env::temp_dir();
+        let tmpfile = tmpdir.join("pgr_test_save_buffer_pipe.txt");
+        let _ = std::fs::remove_file(&tmpfile);
+
+        let filename_bytes = tmpfile.to_str().unwrap().as_bytes();
+        let mut keys: Vec<u8> = Vec::new();
+        keys.push(b's');
+        keys.extend_from_slice(filename_bytes);
+        keys.push(b'\r');
+        keys.push(b'q');
+
+        // is_pipe=true: SaveBuffer also works when reading from a pipe.
+        let _pager = run_pager_with_settings(&keys, content, None, false, true);
+
+        let saved = std::fs::read_to_string(&tmpfile).unwrap();
+        assert_eq!(saved, "pipe line\n");
+
         let _ = std::fs::remove_file(&tmpfile);
     }
 
