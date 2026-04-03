@@ -9,6 +9,7 @@ syntax = ["dep:syntect"]
 
 [dependencies]
 pgr-core = { path = "../pgr-core" }
+regex = "1"
 syntect = { version = "5.2", optional = true, default-features = false, features = ["default-fancy"] }
 thiserror = "2"
 unicode-segmentation = "1"

@@ -127,8 +127,10 @@ impl Keymap {
             (Key::Char('}'), Command::FindOpenBracket('{', '}')),
             (Key::Char('('), Command::FindCloseBracket('(', ')')),
             (Key::Char(')'), Command::FindOpenBracket('(', ')')),
-            (Key::Char('['), Command::FindCloseBracket('[', ']')),
-            (Key::Char(']'), Command::FindOpenBracket('[', ']')),
+            // `[` and `]` are handled via PendingCommand::OpenBracketPrefix
+            // and PendingCommand::CloseBracketPrefix in dispatch.rs. When followed
+            // by `u` they trigger URL navigation; otherwise they resolve to
+            // bracket matching (FindCloseBracket/FindOpenBracket).
             // Cross-file search repeat (ESC-n, ESC-N)
             (Key::EscSeq('n'), Command::SearchNextCrossFile),
             (Key::EscSeq('N'), Command::SearchPrevCrossFile),
@@ -629,22 +631,19 @@ mod tests {
         );
     }
 
+    // `[` and `]` are now handled via PendingCommand in dispatch.rs,
+    // so the keymap returns Noop for them (they never reach keymap lookup).
+
     #[test]
-    fn test_keymap_open_square_maps_to_find_close_bracket() {
+    fn test_keymap_open_square_returns_noop_handled_via_pending() {
         let keymap = Keymap::default_less();
-        assert_eq!(
-            keymap.lookup(&Key::Char('[')),
-            Command::FindCloseBracket('[', ']')
-        );
+        assert_eq!(keymap.lookup(&Key::Char('[')), Command::Noop);
     }
 
     #[test]
-    fn test_keymap_close_square_maps_to_find_open_bracket() {
+    fn test_keymap_close_square_returns_noop_handled_via_pending() {
         let keymap = Keymap::default_less();
-        assert_eq!(
-            keymap.lookup(&Key::Char(']')),
-            Command::FindOpenBracket('[', ']')
-        );
+        assert_eq!(keymap.lookup(&Key::Char(']')), Command::Noop);
     }
 
     // ── Task 215: Tag navigation key bindings ──

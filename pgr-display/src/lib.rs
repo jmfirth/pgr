@@ -16,6 +16,7 @@ pub mod syntax;
 pub mod termcap;
 pub mod terminal_output;
 pub mod unicode;
+pub mod url;
 
 pub use ansi::{AnsiState, OverstrikeMode};
 pub use charset::{CharType, Charset};
@@ -40,3 +41,4 @@ pub use terminal_output::{
     clear_screen, compute_line_screen_rows, paint_error_message, paint_screen, paint_screen_mapped,
     paint_screen_with_options, wordwrap_segments, PaintOptions, ScreenLine,
 };
+pub use url::{find_urls, UrlMatch};

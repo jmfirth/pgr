@@ -390,6 +390,11 @@ fn build_action_map() -> HashMap<&'static str, Command> {
     // Byte offset
     m.insert("goto-byte", Command::GotoByteOffset);
 
+    // URL navigation
+    m.insert("next-url", Command::NextUrl);
+    m.insert("prev-url", Command::PrevUrl);
+    m.insert("open-url", Command::OpenUrl);
+
     m
 }
 

@@ -141,6 +141,12 @@ pub enum Command {
     RemoveHighlight,
     /// List all active highlight patterns. `&l`.
     ListHighlights,
+    /// Navigate to the next URL on screen. `]u`.
+    NextUrl,
+    /// Navigate to the previous URL on screen. `[u`.
+    PrevUrl,
+    /// Open the currently highlighted URL in a browser. `o` (when URL is highlighted).
+    OpenUrl,
 }
 
 #[cfg(test)]
@@ -304,5 +310,32 @@ mod tests {
     #[test]
     fn test_command_list_highlights_differs_from_filter() {
         assert_ne!(Command::ListHighlights, Command::Filter);
+    }
+
+    // ── Task 332: URL navigation commands ──
+
+    #[test]
+    fn test_command_next_url_equality() {
+        assert_eq!(Command::NextUrl, Command::NextUrl);
+    }
+
+    #[test]
+    fn test_command_prev_url_equality() {
+        assert_eq!(Command::PrevUrl, Command::PrevUrl);
+    }
+
+    #[test]
+    fn test_command_open_url_equality() {
+        assert_eq!(Command::OpenUrl, Command::OpenUrl);
+    }
+
+    #[test]
+    fn test_command_next_url_differs_from_prev_url() {
+        assert_ne!(Command::NextUrl, Command::PrevUrl);
+    }
+
+    #[test]
+    fn test_command_open_url_differs_from_noop() {
+        assert_ne!(Command::OpenUrl, Command::Noop);
     }
 }

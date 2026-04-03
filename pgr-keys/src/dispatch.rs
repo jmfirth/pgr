@@ -10,11 +10,11 @@ use std::time::Duration;
 
 use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
 use pgr_display::{
-    compute_line_screen_rows, eval_prompt, line_number_width, paint_info_line, paint_prompt,
-    paint_screen_mapped, paint_screen_with_options, squeeze_visible_lines, wordwrap_segments,
-    ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle, RawControlMode,
-    RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT, DEFAULT_MEDIUM_PROMPT,
-    DEFAULT_SHORT_PROMPT,
+    compute_line_screen_rows, eval_prompt, find_urls, line_number_width, paint_info_line,
+    paint_prompt, paint_screen_mapped, paint_screen_with_options, squeeze_visible_lines,
+    wordwrap_segments, ColoredRange, OverstrikeMode, PaintOptions, PromptContext, PromptStyle,
+    RawControlMode, RenderConfig, Screen, ScreenLine, TabStops, DEFAULT_LONG_PROMPT,
+    DEFAULT_MEDIUM_PROMPT, DEFAULT_SHORT_PROMPT,
 };
 use pgr_search::{
     count_matches, find_match_index, CaseMode, FilterState, FilteredLines, HighlightState,
@@ -127,6 +127,10 @@ pub enum PendingCommand {
     /// `&` pressed; waiting for sub-command: bare → filter, `+` → add highlight,
     /// `-` → remove highlight, `l` → list highlights.
     FilterPrefix,
+    /// `[` pressed; waiting for second key: `u` → `PrevUrl`, else bracket match.
+    OpenBracketPrefix,
+    /// `]` pressed; waiting for second key: `u` → `NextUrl`, else bracket match.
+    CloseBracketPrefix,
 }
 
 /// The main pager state, tying together all subsystems.
@@ -252,6 +256,11 @@ pub struct Pager<R: Read, W: Write> {
     /// Whether syntax highlighting is enabled at runtime (can be toggled).
     #[cfg(feature = "syntax")]
     syntax_enabled: bool,
+    /// All URLs detected on the currently visible screen lines.
+    /// Each entry is `(buffer_line, url_index_within_line, url_text)`.
+    screen_urls: Vec<(usize, usize, String)>,
+    /// Index into `screen_urls` for the currently highlighted URL, if any.
+    current_url_index: Option<usize>,
 }
 
 impl<R: Read, W: Write> Pager<R, W> {
@@ -333,6 +342,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             highlighter: None,
             #[cfg(feature = "syntax")]
             syntax_enabled: true,
+            screen_urls: Vec::new(),
+            current_url_index: None,
         }
     }
 
@@ -476,6 +487,13 @@ impl<R: Read, W: Write> Pager<R, W> {
             }
         }
 
+        // When a URL is highlighted, `o` opens it in the browser.
+        if *key == Key::Char('o') && self.current_url_index.is_some() {
+            let count = self.pending_count.take();
+            self.execute(&Command::OpenUrl, count)?;
+            return Ok(!self.should_quit);
+        }
+
         let command = self.keymap.lookup(key);
         let count = self.pending_count.take();
 
@@ -501,6 +519,8 @@ impl<R: Read, W: Write> Pager<R, W> {
             Key::Char(':') => Some(PendingCommand::ColonPrefix),
             Key::Char('Z') => Some(PendingCommand::ZPrefix),
             Key::Char('&') => Some(PendingCommand::FilterPrefix),
+            Key::Char('[') => Some(PendingCommand::OpenBracketPrefix),
+            Key::Char(']') => Some(PendingCommand::CloseBracketPrefix),
             _ => None,
         }
     }
@@ -614,6 +634,28 @@ impl<R: Read, W: Write> Pager<R, W> {
                         if self.editing_filter {
                             return self.process_filter_key(key);
                         }
+                    }
+                }
+                return Ok(!self.should_quit);
+            }
+            PendingCommand::OpenBracketPrefix => {
+                let count = self.pending_count.take();
+                match *key {
+                    Key::Char('u') => self.execute(&Command::PrevUrl, count)?,
+                    _ => {
+                        // Default: bracket matching (FindCloseBracket for `[`).
+                        self.execute(&Command::FindCloseBracket('[', ']'), count)?;
+                    }
+                }
+                return Ok(!self.should_quit);
+            }
+            PendingCommand::CloseBracketPrefix => {
+                let count = self.pending_count.take();
+                match *key {
+                    Key::Char('u') => self.execute(&Command::NextUrl, count)?,
+                    _ => {
+                        // Default: bracket matching (FindOpenBracket for `]`).
+                        self.execute(&Command::FindOpenBracket('[', ']'), count)?;
                     }
                 }
                 return Ok(!self.should_quit);
@@ -797,6 +839,15 @@ impl<R: Read, W: Write> Pager<R, W> {
     /// Execute a command with the given numeric count prefix.
     #[allow(clippy::too_many_lines)] // dispatch table is inherently large
     fn execute(&mut self, command: &Command, count: Option<usize>) -> Result<()> {
+        // Clear URL highlight when executing any non-URL command, so the
+        // highlight disappears when the user scrolls or does something else.
+        if !matches!(
+            command,
+            Command::NextUrl | Command::PrevUrl | Command::OpenUrl
+        ) {
+            self.current_url_index = None;
+        }
+
         let raw_total = self.index.total_lines(&*self.buffer)?;
         let total = if self.filter.is_active() {
             self.filtered_lines
@@ -1135,6 +1186,15 @@ impl<R: Read, W: Write> Pager<R, W> {
                 self.status_message = Some("hyperlink open not yet implemented".to_string());
                 self.repaint()?;
             }
+            Command::NextUrl => {
+                self.navigate_url_next()?;
+            }
+            Command::PrevUrl => {
+                self.navigate_url_prev()?;
+            }
+            Command::OpenUrl => {
+                self.open_current_url()?;
+            }
             Command::ToggleSyntax => {
                 #[cfg(feature = "syntax")]
                 {
@@ -1255,6 +1315,114 @@ impl<R: Read, W: Write> Pager<R, W> {
             "No matching {} found",
             if forward { close } else { open }
         ));
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Scan visible lines for URLs and populate `screen_urls`.
+    fn scan_screen_urls(&mut self) -> Result<()> {
+        self.screen_urls.clear();
+        let total = self.index.lines_indexed();
+        let (start, end) = self.screen.visible_range();
+
+        for line_num in start..end.min(total) {
+            if let Some(ref content) = self.index.get_line(line_num, &*self.buffer)? {
+                let urls = find_urls(content);
+                for (url_idx, url_match) in urls.iter().enumerate() {
+                    self.screen_urls
+                        .push((line_num, url_idx, url_match.url.clone()));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Navigate to the next URL on screen.
+    fn navigate_url_next(&mut self) -> Result<()> {
+        self.scan_screen_urls()?;
+
+        if self.screen_urls.is_empty() {
+            self.current_url_index = None;
+            self.status_message = Some("No URLs found on screen".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let new_index = match self.current_url_index {
+            Some(idx) => {
+                if idx + 1 < self.screen_urls.len() {
+                    idx + 1
+                } else {
+                    0 // wrap around
+                }
+            }
+            None => 0,
+        };
+
+        self.current_url_index = Some(new_index);
+        let total_urls = self.screen_urls.len();
+        let url = self.screen_urls[new_index].2.clone();
+        self.status_message = Some(format!("URL {} of {}: {}", new_index + 1, total_urls, url));
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Navigate to the previous URL on screen.
+    fn navigate_url_prev(&mut self) -> Result<()> {
+        self.scan_screen_urls()?;
+
+        if self.screen_urls.is_empty() {
+            self.current_url_index = None;
+            self.status_message = Some("No URLs found on screen".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        let new_index = match self.current_url_index {
+            Some(idx) => {
+                if idx > 0 {
+                    idx - 1
+                } else {
+                    self.screen_urls.len() - 1 // wrap around
+                }
+            }
+            None => self.screen_urls.len() - 1,
+        };
+
+        self.current_url_index = Some(new_index);
+        let total_urls = self.screen_urls.len();
+        let url = self.screen_urls[new_index].2.clone();
+        self.status_message = Some(format!("URL {} of {}: {}", new_index + 1, total_urls, url));
+        self.repaint()?;
+        Ok(())
+    }
+
+    /// Open the currently highlighted URL in the user's browser.
+    fn open_current_url(&mut self) -> Result<()> {
+        if self.secure_mode {
+            self.status_message = Some("cannot open URLs in secure mode".to_string());
+            self.repaint()?;
+            return Ok(());
+        }
+
+        if let Some(idx) = self.current_url_index {
+            if idx < self.screen_urls.len() {
+                let url = self.screen_urls[idx].2.clone();
+                match shell::open_url(&url) {
+                    Ok(()) => {
+                        self.status_message = Some(format!("Opened: {url}"));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Failed to open URL: {e}"));
+                    }
+                }
+                self.repaint()?;
+                return Ok(());
+            }
+        }
+
+        self.status_message = Some("No URL selected".to_string());
         self.repaint()?;
         Ok(())
     }

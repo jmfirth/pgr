@@ -123,6 +123,38 @@ pub fn build_editor_command(editor: &str, filename: &str, line_number: usize) ->
     }
 }
 
+/// Open a URI in the user's preferred browser or system opener.
+///
+/// Tries, in order:
+/// 1. `$BROWSER` environment variable
+/// 2. `open` on macOS
+/// 3. `xdg-open` on Linux / other Unix
+///
+/// Returns `Ok(())` on success, or an I/O error if the opener fails to launch.
+///
+/// # Errors
+///
+/// Returns an I/O error if the browser command cannot be spawned.
+pub fn open_url(uri: &str) -> std::io::Result<()> {
+    let opener = std::env::var("BROWSER").ok();
+    let (cmd, args): (&str, Vec<&str>) = if let Some(ref browser) = opener {
+        (browser.as_str(), vec![uri])
+    } else if cfg!(target_os = "macos") {
+        ("open", vec![uri])
+    } else {
+        ("xdg-open", vec![uri])
+    };
+
+    ProcessCommand::new(cmd)
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

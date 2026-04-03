@@ -463,6 +463,7 @@ name = "pgr-display"
 version = "0.1.0"
 dependencies = [
  "pgr-core",
+ "regex",
  "syntect",
  "thiserror",
  "unicode-segmentation",
