@@ -8,7 +8,7 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::time::Duration;
 
-use pgr_core::{Buffer, LineIndex, Mark, MarkStore};
+use pgr_core::{detect_content_mode, Buffer, ContentMode, LineIndex, Mark, MarkStore};
 use pgr_display::{
     compute_line_screen_rows, eval_prompt, find_urls, line_number_width, paint_info_line,
     paint_prompt, paint_screen_mapped, paint_screen_with_options, squeeze_visible_lines,
@@ -250,6 +250,8 @@ pub struct Pager<R: Read, W: Write> {
     quit_on_intr: bool,
     /// The reason the pager exited.
     exit_reason: ExitReason,
+    /// Detected content type (diff, man page, etc.) — set on first paint.
+    content_mode: ContentMode,
     /// Syntax highlighter instance (compiled-in only with `syntax` feature).
     #[cfg(feature = "syntax")]
     highlighter: Option<pgr_display::syntax::highlighting::Highlighter>,
@@ -342,6 +344,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             redraw_on_quit: false,
             quit_on_intr: false,
             exit_reason: ExitReason::Normal,
+            content_mode: ContentMode::Plain,
             #[cfg(feature = "syntax")]
             highlighter: None,
             #[cfg(feature = "syntax")]
@@ -3351,6 +3354,8 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         // Invalidate match count cache when switching files since the buffer changed.
         self.match_count_cache = None;
+        // Reset content mode so it is re-detected on next first paint.
+        self.content_mode = ContentMode::Plain;
     }
 
     /// Load the current file's display name and viewport into the pager state.
@@ -3442,6 +3447,9 @@ impl<R: Read, W: Write> Pager<R, W> {
                     &self.render_config,
                     &paint_opts,
                 )?;
+                if self.initial_render {
+                    self.detect_content_mode_from_lines(&lines);
+                }
                 self.paint_status_prompt(visible_total)?;
                 return Ok(());
             }
@@ -3564,6 +3572,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             &paint_opts,
         )?;
 
+        // Detect content mode on first paint and show status message.
+        if self.initial_render {
+            self.detect_content_mode_from_lines(&lines);
+        }
+
         // Prompt always on the last terminal row (matching GNU less).
         self.paint_status_prompt(total)?;
 
@@ -3657,6 +3670,11 @@ impl<R: Read, W: Write> Pager<R, W> {
             &self.render_config,
             &paint_opts,
         )?;
+
+        // Detect content mode on first paint and show status message.
+        if self.initial_render {
+            self.detect_content_mode_from_lines(&line_contents);
+        }
 
         self.paint_status_prompt(total)?;
 
@@ -4308,6 +4326,24 @@ impl<R: Read, W: Write> Pager<R, W> {
     #[must_use]
     pub fn exit_reason(&self) -> ExitReason {
         self.exit_reason
+    }
+
+    /// Returns the detected content mode for the current file.
+    #[must_use]
+    pub fn content_mode(&self) -> ContentMode {
+        self.content_mode
+    }
+
+    /// Detect content mode from the visible lines and set the status message.
+    ///
+    /// Called once per file on the first paint. If a non-plain mode is detected,
+    /// sets a transient status message like `"[diff mode]"`.
+    fn detect_content_mode_from_lines(&mut self, lines: &[Option<String>]) {
+        let borrowed: Vec<&str> = lines.iter().filter_map(|opt| opt.as_deref()).collect();
+        self.content_mode = detect_content_mode(&borrowed);
+        if let Some(label) = self.content_mode.status_label() {
+            self.status_message = Some(label);
+        }
     }
 
     /// Immediately index all lines in the buffer (`--file-size`).
