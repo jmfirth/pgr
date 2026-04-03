@@ -2,6 +2,7 @@
 //! Terminal rendering, prompt evaluation, ANSI handling, color, and Unicode width.
 
 pub mod ansi;
+pub mod blame_render;
 pub mod charset;
 pub mod color;
 pub mod diff_render;
@@ -21,6 +22,9 @@ pub mod unicode;
 pub mod url;
 
 pub use ansi::{AnsiState, OverstrikeMode};
+pub use blame_render::colorize_blame_line;
+#[cfg(feature = "syntax")]
+pub use blame_render::colorize_blame_line_syntax;
 pub use charset::{CharType, Charset};
 pub use color::{Color, ColorAutoDetect, ColorConfig, ColorSelector, ColorSpec};
 pub use diff_render::colorize_diff_line;
