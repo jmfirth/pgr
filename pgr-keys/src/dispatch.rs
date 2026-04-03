@@ -3670,58 +3670,6 @@ impl<R: Read, W: Write> Pager<R, W> {
         self.tag_state = Some(state);
     }
 
-    /// Open the tag prompt (matching GNU less `t` command).
-    ///
-    /// Shows a "Tag: " prompt, reads a tag name, and either navigates to the
-    /// tag or displays an error. This matches GNU less's prompt-based tag
-    /// command, where `t` opens a prompt rather than immediately navigating.
-    fn tag_prompt(&mut self) -> Result<()> {
-        let mut editor = LineEditor::new("Tag: ");
-        let (rows, cols) = self.screen.dimensions();
-        if rows > 0 {
-            let prompt_row = rows.saturating_sub(1);
-            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
-            let _ = self.writer.flush();
-        }
-
-        let tag_name = loop {
-            match self.reader.read_key() {
-                Ok(key) => match editor.process_key(&key) {
-                    LineEditResult::Continue | LineEditResult::ContinueWithStatus(_) => {
-                        if rows > 0 {
-                            let prompt_row = rows.saturating_sub(1);
-                            let _ = editor.render(&mut self.writer, prompt_row, 0, cols);
-                            let _ = self.writer.flush();
-                        }
-                    }
-                    LineEditResult::Confirm(input) => break input,
-                    LineEditResult::Cancel => {
-                        self.repaint()?;
-                        return Ok(());
-                    }
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-                Err(e) => return Err(e.into()),
-            }
-        };
-
-        if tag_name.is_empty() {
-            self.repaint()?;
-            return Ok(());
-        }
-
-        // With no tag state, show "No tags file".
-        if self.tag_state.is_none() {
-            self.status_message = Some(String::from("No tags file"));
-            self.repaint()?;
-            return Ok(());
-        }
-
-        // Try to navigate to the named tag.
-        self.navigate_tag_next()?;
-        Ok(())
-    }
-
     /// Navigate to the next tag match (`t` command).
     fn navigate_tag_next(&mut self) -> Result<()> {
         let should_repaint = if let Some(ref mut state) = self.tag_state {
@@ -5388,7 +5336,11 @@ mod tests {
             output.contains("No previous search pattern"),
             "Expected 'No previous search pattern' in output: {output}"
         );
-        assert_eq!(pager.screen().top_line(), 0, "n with no pattern should not scroll");
+        assert_eq!(
+            pager.screen().top_line(),
+            0,
+            "n with no pattern should not scroll"
+        );
     }
 
     // Test 13: Numeric prefix: `2n` finds the 2nd next match.
