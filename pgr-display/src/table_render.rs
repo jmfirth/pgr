@@ -226,14 +226,17 @@ pub fn colorize_table_lines(
                 Some(format!("{DIM}{clean}{RESET}"))
             } else {
                 // Data row: alternate background, dim structure characters.
-                let styled = dim_structure_chars(&clean);
-                let result = if data_row_idx % 2 == 1 {
-                    format!("{ALT_ROW_BG}{styled}{RESET}")
+                // Don't emit a trailing RESET after the alt bg — let it
+                // extend through clear_to_eol for full-width stripes.
+                let is_alt = data_row_idx % 2 == 1;
+                let bg = if is_alt { ALT_ROW_BG } else { "" };
+                let styled = dim_structure_chars_with_bg(&clean, bg);
+                data_row_idx += 1;
+                Some(if is_alt {
+                    format!("{ALT_ROW_BG}{styled}")
                 } else {
                     format!("{styled}{RESET}")
-                };
-                data_row_idx += 1;
-                Some(result)
+                })
             }
         })
         .collect()
@@ -245,14 +248,20 @@ fn is_row_count_footer(line: &str) -> bool {
     trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.contains("row")
 }
 
-/// Dim the `|` structure characters in a data row while keeping data bright.
-fn dim_structure_chars(line: &str) -> String {
-    let mut out = String::with_capacity(line.len() + 40);
+/// Dim `|` characters, restoring `bg` after each dim reset.
+///
+/// When a background color is active (alt-row stripe), the dim/reset
+/// around each `|` must re-emit the bg so it isn't lost.
+fn dim_structure_chars_with_bg(line: &str, bg: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 60);
     for ch in line.chars() {
         if ch == '|' {
             out.push_str(DIM);
             out.push(ch);
             out.push_str(RESET);
+            if !bg.is_empty() {
+                out.push_str(bg);
+            }
         } else {
             out.push(ch);
         }

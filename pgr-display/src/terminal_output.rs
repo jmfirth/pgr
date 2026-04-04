@@ -77,6 +77,10 @@ pub struct PaintOptions {
     /// symbol (+, -, ~) and the string is the ANSI color escape sequence.
     /// When the outer vec is empty, no gutter column is displayed.
     pub gutter_marks: Vec<Option<(char, &'static str)>>,
+    /// Skip reverse video on header lines. When true, header lines are
+    /// rendered with their existing ANSI styling instead of `\x1b[7m`.
+    /// Used for SQL table mode where headers have custom bold/dim styling.
+    pub header_plain_style: bool,
 }
 
 /// Paint the full screen content to the terminal.
@@ -385,7 +389,9 @@ fn paint_header_lines<W: Write>(
         if screen_row > 1 {
             move_cursor(writer, screen_row, 1)?;
         }
-        writer.write_all(b"\x1b[7m")?;
+        if !options.header_plain_style {
+            writer.write_all(b"\x1b[7m")?;
+        }
         if let Some(text) = header_line {
             if options.show_status_column {
                 writer.write_all(b"  ")?;

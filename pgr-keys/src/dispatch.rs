@@ -3877,6 +3877,7 @@ impl<R: Read, W: Write> Pager<R, W> {
                     wordwrap: self.runtime_options.wordwrap,
                     line_highlights,
                     gutter_marks,
+                    header_plain_style: false,
                 };
                 paint_screen_with_options(
                     &mut self.writer,
@@ -4083,6 +4084,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             wordwrap: self.runtime_options.wordwrap,
             line_highlights,
             gutter_marks,
+            header_plain_style: table_styled,
         };
         // When syntax highlighting, diff coloring, or compiler links injected
         // escape sequences, ensure the render pipeline uses at least AnsiOnly
@@ -4233,6 +4235,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             wordwrap: self.runtime_options.wordwrap,
             line_highlights,
             gutter_marks,
+            header_plain_style: false,
         };
         paint_screen_mapped(
             &mut self.writer,
@@ -4436,6 +4439,7 @@ impl<R: Read, W: Write> Pager<R, W> {
             wordwrap: false,
             line_highlights: Vec::new(),
             gutter_marks: Vec::new(),
+            header_plain_style: false,
         };
 
         paint_screen_with_options(
