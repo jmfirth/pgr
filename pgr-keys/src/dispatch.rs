@@ -4120,11 +4120,6 @@ impl<R: Read, W: Write> Pager<R, W> {
             self.screen.set_horizontal_offset(h);
         }
 
-        // Detect content mode on first paint and show status message.
-        if self.initial_render {
-            self.detect_content_mode_from_lines(&lines);
-        }
-
         // Prompt always on the last terminal row (matching GNU less).
         self.paint_status_prompt(total)?;
 
