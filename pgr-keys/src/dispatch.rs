@@ -5160,6 +5160,9 @@ impl<R: Read, W: Write> Pager<R, W> {
             if header_rows > 0 {
                 self.screen.set_header_lines(header_rows);
             }
+            // Tables must not wrap — wrapping destroys column alignment.
+            // Enable chop mode so users scroll horizontally instead.
+            self.screen.set_chop_mode(true);
         }
     }
 
