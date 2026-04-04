@@ -155,31 +155,52 @@ pub fn truncate_to_width_ansi(s: &str, max_width: usize) -> (&str, usize) {
     let mut i: usize = 0;
 
     while i < len {
-        // Skip ANSI escape sequences (ESC [ ... final_byte)
-        if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b'[' {
-            i += 2;
-            while i < len && !(0x40..=0x7E).contains(&bytes[i]) {
-                i += 1;
-            }
-            if i < len {
-                i += 1; // skip final byte
-            }
-            continue;
-        }
-        // Skip OSC sequences (ESC ] ... BEL/ST)
-        if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b']' {
-            i += 2;
-            while i < len && bytes[i] != 0x07 {
-                if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b'\\' {
+        // Skip any ESC-initiated sequence: CSI (ESC [), OSC (ESC ]),
+        // charset select (ESC ( / ESC )), and simple two-byte escapes.
+        if bytes[i] == 0x1B && i + 1 < len {
+            match bytes[i + 1] {
+                b'[' => {
+                    // CSI: ESC [ params final_byte
                     i += 2;
-                    break;
+                    while i < len && !(0x40..=0x7E).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    if i < len {
+                        i += 1;
+                    }
+                    continue;
                 }
-                i += 1;
+                b']' => {
+                    // OSC: ESC ] ... BEL or ESC backslash
+                    i += 2;
+                    while i < len && bytes[i] != 0x07 {
+                        if bytes[i] == 0x1B && i + 1 < len && bytes[i + 1] == b'\\' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if i < len && bytes[i] == 0x07 {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'(' | b')' | b'*' | b'+' => {
+                    // Charset selection: ESC ( C / ESC ) C — 3 bytes total
+                    i += 3;
+                    continue;
+                }
+                0x40..=0x5F => {
+                    // Simple two-byte escape (C1 controls): ESC + final byte
+                    i += 2;
+                    continue;
+                }
+                _ => {
+                    // Unknown ESC sequence — skip ESC and next byte
+                    i += 2;
+                    continue;
+                }
             }
-            if i < len && bytes[i] == 0x07 {
-                i += 1;
-            }
-            continue;
         }
 
         // Visible character — check width
