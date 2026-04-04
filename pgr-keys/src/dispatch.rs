@@ -1039,8 +1039,14 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::ScrollRight => {
                 if let Some(ref layout) = self.sql_table_layout {
                     // Column-snap hscroll: jump to the next column boundary.
+                    // Skip boundaries within the frozen first column since
+                    // they're already visible and scrolling there is a no-op.
                     let h = self.screen.horizontal_offset();
-                    let new_h = snap_to_next_column(layout, h);
+                    let freeze_w = pgr_display::first_column_width(layout);
+                    let mut new_h = snap_to_next_column(layout, h);
+                    while new_h <= freeze_w && new_h > h {
+                        new_h = snap_to_next_column(layout, new_h);
+                    }
                     self.screen.set_horizontal_offset(new_h);
                 } else {
                     let cols = self.screen.cols();
@@ -1053,8 +1059,15 @@ impl<R: Read, W: Write> Pager<R, W> {
             Command::ScrollLeft => {
                 if let Some(ref layout) = self.sql_table_layout {
                     // Column-snap hscroll: jump to the previous column boundary.
+                    // If landing within the frozen column, snap to 0 (home).
                     let h = self.screen.horizontal_offset();
+                    let freeze_w = pgr_display::first_column_width(layout);
                     let new_h = snap_to_prev_column(layout, h);
+                    let new_h = if new_h > 0 && new_h <= freeze_w {
+                        0
+                    } else {
+                        new_h
+                    };
                     self.screen.set_horizontal_offset(new_h);
                 } else {
                     let cols = self.screen.cols();
