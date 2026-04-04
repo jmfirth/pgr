@@ -149,12 +149,39 @@ Six Rust crates in a Cargo workspace:
 | `pgr-keys` | Terminal, key binding, command dispatch |
 | `pgr-cli` | Entry point, arg parsing, env vars |
 
+## Performance
+
+pgr is faster than GNU less at every file size, measured on the throughput path (open → dump → exit):
+
+| File size | less | pgr | Speedup |
+|-----------|------|-----|---------|
+| 100 lines (5 KB) | 3.7 ms | 3.1 ms | **1.2x faster** |
+| 10,000 lines (500 KB) | 7.2 ms | 3.4 ms | **2.1x faster** |
+| 100,000 lines (5 MB) | 37.9 ms | 5.8 ms | **6.5x faster** |
+
+Benchmarked with [hyperfine](https://github.com/sharkdp/hyperfine) on macOS (Apple Silicon). Syntax highlighting adds negligible overhead (~0.5ms on a 2,300-line Rust file).
+
+Interactive performance (first render, scroll responsiveness) is equivalent to less — pgr uses lazy line indexing so the first screen appears before the full file is scanned.
+
 ## Testing
 
-- **2,125+ unit tests** across all crates
-- **212 conformance tests** — PTY comparison against GNU less 692
-- **11 visual smoke tests** — PTY verification of Phase 3 features
-- Both build profiles (full + thin) tested in CI
+pgr has **2,400+ tests** across three tiers:
+
+| Tier | Tests | What it validates |
+|------|-------|-------------------|
+| **Unit tests** | 2,151 | Internal API correctness across all 6 crates |
+| **Conformance** | 212 | PTY side-by-side comparison against GNU less 692 |
+| **Visual** | 37 | PTY end-to-end verification of every Phase 3 feature |
+
+The visual test suite spawns pgr in a real pseudo-terminal, sends keystrokes, and inspects the rendered screen at cell level — verifying exact colors, text content, and cursor positions. Every feature (syntax highlighting, diff coloring, side-by-side, content modes, search, clipboard, URL navigation, git gutter, SQL tables, compiler hyperlinks) is validated this way.
+
+Both build profiles (full + thin) are tested in CI.
+
+```
+just test          # 2,151 unit tests (<10s)
+just conformance   # 212 PTY tests vs GNU less (~90s)
+just visual        # 37 PTY feature tests (~12s)
+```
 
 ## License
 
