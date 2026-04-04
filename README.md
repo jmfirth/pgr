@@ -1,16 +1,20 @@
 # pgr
 
-A drop-in replacement for GNU `less` with syntax highlighting, diff awareness, and content-sensitive rendering. Set `PAGER=pgr` and everything gets better.
+A pager that understands what it's looking at.
 
-## Why pgr
+`$PAGER` is the most underutilized integration point in the terminal. Dozens of tools pipe through it — `git diff`, `git log`, `man`, `kubectl`, `psql`, `journalctl` — but your pager treats everything as plain text. pgr changes that.
 
-`$PAGER` is invoked transparently by dozens of tools — `git diff`, `git log`, `man`, `kubectl`, `psql`, `journalctl`. The pager is the only place in the pipeline where highlighting, navigation, and rendering can improve. pgr makes that happen automatically.
+Set `PAGER=pgr` and diffs get background tinting and hunk navigation. Man pages get section jumping. Git blame gets recency coloring. JSON gets syntax highlighting. SQL tables get sticky headers. Compiler errors get clickable links. No configuration, no piping through external tools. One binary, zero dependencies.
 
-- **100% less-compatible** — 212 PTY conformance tests against GNU less 692
-- **Syntax highlighting** — 75 languages via syntect, built in. No external tools needed.
-- **Diff awareness** — background tinting, per-hunk syntax highlighting, side-by-side view, hunk/file navigation
-- **Content detection** — auto-detects diff, man page, git blame, git log, JSON, SQL tables, compiler errors
-- **Modern features** — match count, multi-pattern highlighting, clipboard yank, URL navigation, git gutter
+**Drop-in compatible.** Every less keybinding works. 212 PTY conformance tests against GNU less 692.
+
+**Faster.** Up to 6.5x throughput on large files. First screen appears before the full file is scanned.
+
+**Competitive size.** 2.3 MB fully static with 75-language highlighting included. GNU less with its dynamic dependencies (ncurses, pcre2, libtinfo) is ~1.35 MB — pgr adds content awareness, diff rendering, and syntax highlighting for less than 1 MB more. A thin build without highlighting is 1.7 MB.
+
+**Tested.** 2,400+ tests across unit, PTY conformance, and visual verification tiers.
+
+pgr replaces less, bat, delta, and diff-so-fancy in a single backward-compatible binary.
 
 ## Install
 
@@ -23,18 +27,11 @@ Then add to your shell profile:
 export PAGER=pgr
 ```
 
-## Two builds
-
-| Build | Command | Size | What's included |
-|-------|---------|------|-----------------|
-| **Full** (default) | `cargo install pgr` | ~2.3 MB | Everything including syntax highlighting |
-| **Thin** | `cargo install pgr --no-default-features` | ~1.7 MB | All features except syntax highlighting |
-
 ## Features
 
 ### Syntax highlighting
 
-Opens a file → highlighted. Opens a diff → code within hunks is highlighted. No configuration, no piping through other tools. 75 languages supported out of the box.
+Opens a file — highlighted. Opens a diff — code within hunks is highlighted. No configuration, no piping through other tools. 75 languages supported out of the box.
 
 - Toggle on/off: `ESC-S`
 - Choose theme: `--theme <name>` or `PGR_THEME=name`
@@ -149,9 +146,16 @@ Six Rust crates in a Cargo workspace:
 | `pgr-keys` | Terminal, key binding, command dispatch |
 | `pgr-cli` | Entry point, arg parsing, env vars |
 
+## Two builds
+
+| Build | Command | Size | What's included |
+|-------|---------|------|-----------------|
+| **Full** (default) | `cargo install pgr` | ~2.3 MB | Everything including syntax highlighting |
+| **Thin** | `cargo install pgr --no-default-features` | ~1.7 MB | All features except syntax highlighting |
+
 ## Performance
 
-pgr is faster than GNU less at every file size, measured on the throughput path (open → dump → exit):
+pgr is faster than GNU less at every file size, measured on the throughput path (open, dump, exit):
 
 | File size | less | pgr | Speedup |
 |-----------|------|-----|---------|
