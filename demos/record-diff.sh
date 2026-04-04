@@ -1,6 +1,6 @@
 #!/bin/bash
 # Scripted demo: diff awareness in pgr
-# Run: asciinema rec --command "./demos/record-diff.sh" --cols 120 --rows 30 demos/diff-awareness.cast
+# Run: asciinema rec --command "./demos/record-diff.sh" --cols 140 --rows 30 demos/diff-awareness.cast
 
 export TERM=xterm-256color
 PGR="$(pwd)/target/release/pgr-cli"
@@ -62,7 +62,7 @@ DIFF
 
 unset TMUX
 tmux kill-session -t "$SESSION" 2>/dev/null
-tmux new-session -d -s "$SESSION" -x 120 -y 30 "$PGR $DIFF_FILE"
+tmux new-session -d -s "$SESSION" -x 140 -y 30 "$PGR $DIFF_FILE"
 
 tmux set -t "$SESSION" status on
 tmux set -t "$SESSION" status-style "fg=white,bg=#333333"
