@@ -4259,7 +4259,23 @@ impl<R: Read, W: Write> Pager<R, W> {
             .collect();
         let mut paired = pgr_display::side_by_side::pair_hunk_lines(&raw_lines, &types);
 
+        // Compute word-level diffs on paired removed+added lines (raw text).
+        let word_diffs: Vec<Vec<pgr_core::word_diff::WordChange>> = paired
+            .iter()
+            .map(|line| {
+                if line.left_type == pgr_core::DiffLineType::Removed
+                    && line.right_type == pgr_core::DiffLineType::Added
+                {
+                    if let (Some(ref left), Some(ref right)) = (&line.left, &line.right) {
+                        return pgr_core::word_diff::compute_word_diff(left, right);
+                    }
+                }
+                Vec::new()
+            })
+            .collect();
+
         // Apply syntax highlighting + background tinting to each side's content.
+        // Word-diff emphasis is applied instead of flat tinting for paired lines.
         let mut did_syntax = false;
         #[cfg(feature = "syntax")]
         {
@@ -4271,22 +4287,41 @@ impl<R: Read, W: Write> Pager<R, W> {
                             did_syntax = true;
                             let mut hl_left = highlighter.highlight_lines(syntax);
                             let mut hl_right = highlighter.highlight_lines(syntax);
-                            for line in &mut paired {
-                                if let Some(ref text) = line.left {
-                                    line.left = Some(pgr_display::highlight_content(
-                                        text,
-                                        line.left_type,
-                                        highlighter,
-                                        &mut hl_left,
-                                    ));
-                                }
-                                if let Some(ref text) = line.right {
-                                    line.right = Some(pgr_display::highlight_content(
-                                        text,
-                                        line.right_type,
-                                        highlighter,
-                                        &mut hl_right,
-                                    ));
+                            for (line, wd) in paired.iter_mut().zip(word_diffs.iter()) {
+                                if wd.is_empty() {
+                                    if let Some(ref text) = line.left {
+                                        line.left = Some(pgr_display::highlight_content(
+                                            text,
+                                            line.left_type,
+                                            highlighter,
+                                            &mut hl_left,
+                                        ));
+                                    }
+                                    if let Some(ref text) = line.right {
+                                        line.right = Some(pgr_display::highlight_content(
+                                            text,
+                                            line.right_type,
+                                            highlighter,
+                                            &mut hl_right,
+                                        ));
+                                    }
+                                } else {
+                                    // Word-diff emphasis — skip syntax highlighting to
+                                    // keep byte offsets valid.
+                                    if let Some(ref text) = line.left {
+                                        line.left = Some(pgr_display::apply_word_emphasis(
+                                            text,
+                                            pgr_display::DiffSide::Old,
+                                            wd,
+                                        ));
+                                    }
+                                    if let Some(ref text) = line.right {
+                                        line.right = Some(pgr_display::apply_word_emphasis(
+                                            text,
+                                            pgr_display::DiffSide::New,
+                                            wd,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -4294,14 +4329,31 @@ impl<R: Read, W: Write> Pager<R, W> {
                 }
             }
         }
-        // Fallback: tint without syntax highlighting.
+        // Fallback: tint without syntax highlighting (with word emphasis where available).
         if !did_syntax {
-            for line in &mut paired {
-                if let Some(ref text) = line.left {
-                    line.left = Some(pgr_display::tint_content(text, line.left_type));
-                }
-                if let Some(ref text) = line.right {
-                    line.right = Some(pgr_display::tint_content(text, line.right_type));
+            for (line, wd) in paired.iter_mut().zip(word_diffs.iter()) {
+                if wd.is_empty() {
+                    if let Some(ref text) = line.left {
+                        line.left = Some(pgr_display::tint_content(text, line.left_type));
+                    }
+                    if let Some(ref text) = line.right {
+                        line.right = Some(pgr_display::tint_content(text, line.right_type));
+                    }
+                } else {
+                    if let Some(ref text) = line.left {
+                        line.left = Some(pgr_display::apply_word_emphasis(
+                            text,
+                            pgr_display::DiffSide::Old,
+                            wd,
+                        ));
+                    }
+                    if let Some(ref text) = line.right {
+                        line.right = Some(pgr_display::apply_word_emphasis(
+                            text,
+                            pgr_display::DiffSide::New,
+                            wd,
+                        ));
+                    }
                 }
             }
         }

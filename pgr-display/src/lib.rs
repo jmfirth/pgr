@@ -36,6 +36,7 @@ pub use diff_render::highlight_content;
 #[cfg(feature = "syntax")]
 pub use diff_render::highlight_diff_hunk;
 pub use diff_render::tint_content;
+pub use diff_render::{apply_word_emphasis, DiffSide};
 pub use error::{DisplayError, Result};
 pub use hyperlink::{parse_osc8, strip_osc8, HyperlinkSpan};
 pub use line_numbers::{

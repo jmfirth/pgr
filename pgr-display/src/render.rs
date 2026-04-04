@@ -1007,7 +1007,9 @@ fn render_ansi_only_highlighted(
     let mut col: usize = 0;
     let mut skipped: usize = 0;
     let mut visible_width: usize = 0;
-    let mut byte_offset: usize = 0;
+    // Text-only byte offset for highlight lookups — highlights are computed
+    // on raw text (no SGR), so we skip escape sequence bytes.
+    let mut text_byte_offset: usize = 0;
     let mut in_standout = false;
     // Track the last SGR sequence from the input so we can restore it
     // after a search highlight ends, instead of hard-resetting with \x1b[0m
@@ -1030,7 +1032,7 @@ fn render_ansi_only_highlighted(
                     last_sgr.clear();
                     last_sgr.push_str(esc);
                 }
-                byte_offset += esc.len();
+                // Escapes are not in the raw text — don't advance text_byte_offset.
             }
             Segment::Text(text) => {
                 for c in text.chars() {
@@ -1045,12 +1047,12 @@ fn render_ansi_only_highlighted(
                         if char_w <= remaining_to_skip {
                             skipped += char_w;
                             col += char_w;
-                            byte_offset += c.len_utf8();
+                            text_byte_offset += c.len_utf8();
                             continue;
                         }
                         skipped += char_w;
                         col += char_w;
-                        byte_offset += c.len_utf8();
+                        text_byte_offset += c.len_utf8();
                         continue;
                     }
 
@@ -1058,7 +1060,7 @@ fn render_ansi_only_highlighted(
                         break;
                     }
 
-                    let should_highlight = is_highlighted(byte_offset, highlights);
+                    let should_highlight = is_highlighted(text_byte_offset, highlights);
                     if should_highlight && !in_standout {
                         output.push_str(hl_on);
                         in_standout = true;
@@ -1076,7 +1078,7 @@ fn render_ansi_only_highlighted(
                     output.push_str(&expansion);
                     visible_width += char_w;
                     col += char_w;
-                    byte_offset += c.len_utf8();
+                    text_byte_offset += c.len_utf8();
                 }
             }
         }
@@ -1190,7 +1192,9 @@ fn render_ansi_only_multi_highlighted(
     let mut col: usize = 0;
     let mut skipped: usize = 0;
     let mut visible_width: usize = 0;
-    let mut byte_offset: usize = 0;
+    // Text-only byte offset for highlight lookups — highlights are computed
+    // on raw text (no SGR), so we skip escape sequence bytes.
+    let mut text_byte_offset: usize = 0;
     let mut current_sgr: Option<&str> = None;
     // Track the last input SGR to restore after highlight ends.
     let mut last_input_sgr = String::new();
@@ -1205,7 +1209,7 @@ fn render_ansi_only_multi_highlighted(
                     last_input_sgr.clear();
                     last_input_sgr.push_str(esc);
                 }
-                byte_offset += esc.len();
+                // Escapes are not in the raw text — don't advance text_byte_offset.
             }
             Segment::Text(text) => {
                 for c in text.chars() {
@@ -1220,12 +1224,12 @@ fn render_ansi_only_multi_highlighted(
                         if char_w <= remaining_to_skip {
                             skipped += char_w;
                             col += char_w;
-                            byte_offset += c.len_utf8();
+                            text_byte_offset += c.len_utf8();
                             continue;
                         }
                         skipped += char_w;
                         col += char_w;
-                        byte_offset += c.len_utf8();
+                        text_byte_offset += c.len_utf8();
                         continue;
                     }
 
@@ -1233,7 +1237,7 @@ fn render_ansi_only_multi_highlighted(
                         break;
                     }
 
-                    let new_sgr = find_colored_highlight(byte_offset, colored_ranges);
+                    let new_sgr = find_colored_highlight(text_byte_offset, colored_ranges);
                     if new_sgr != current_sgr {
                         if current_sgr.is_some() {
                             // Restore input SGR instead of hard reset.
@@ -1252,7 +1256,7 @@ fn render_ansi_only_multi_highlighted(
                     output.push_str(&expansion);
                     visible_width += char_w;
                     col += char_w;
-                    byte_offset += c.len_utf8();
+                    text_byte_offset += c.len_utf8();
                 }
             }
         }
@@ -2341,5 +2345,77 @@ mod tests {
         let (rendered, _) = render_line_multi_highlighted("helloworld!", 0, 80, &config, &ranges);
         // Should reset between them
         assert!(rendered.contains(&format!("{STANDOUT_OFF}\x1b[30;43m")));
+    }
+
+    /// Regression: search highlights on SGR-colored text must use text-only byte offsets.
+    ///
+    /// Highlights are computed on raw text (no SGR), but the renderer processes
+    /// text with injected SGR escape sequences. The highlight lookup must use a
+    /// text-only byte counter that skips SGR bytes, otherwise highlights land on
+    /// wrong characters or suppress coloring entirely.
+    #[test]
+    fn test_highlight_on_sgr_colored_text_uses_text_offsets() {
+        let config = RenderConfig {
+            raw_mode: RawControlMode::AnsiOnly,
+            ..RenderConfig::default()
+        };
+        // Input: "hello" with SGR foreground wrapping it.
+        // Raw text would be "hello" (5 bytes). SGR adds ~8 bytes before and 4 after.
+        let colored_line = "\x1b[32mhello\x1b[0m";
+        // Highlight bytes 0..5 of the RAW text ("hello").
+        let highlights = [(0usize, 5usize)];
+        let hl_on = "\x1b[7m";
+
+        let (rendered, _) =
+            render_line_highlighted(colored_line, 0, 80, &config, &highlights, Some(hl_on));
+
+        // The highlight SGR should appear in the output.
+        assert!(
+            rendered.contains(hl_on),
+            "highlight not applied to SGR-colored text: {rendered:?}"
+        );
+        // "hello" should still be present.
+        assert!(
+            rendered.contains("hello"),
+            "text content missing: {rendered:?}"
+        );
+    }
+
+    /// Regression: search highlight on diff-colored line preserves diff coloring.
+    ///
+    /// When searching in diff mode, the diff background tinting (e.g., green for
+    /// added lines) must survive the highlight overlay. The highlight should only
+    /// affect the matched region; surrounding text keeps its diff coloring.
+    #[test]
+    fn test_highlight_preserves_surrounding_sgr() {
+        let config = RenderConfig {
+            raw_mode: RawControlMode::AnsiOnly,
+            ..RenderConfig::default()
+        };
+        // Simulate a diff-colored line: green bg wrapping "hello world end".
+        // Highlight "world" in the MIDDLE so there's text after it that needs
+        // the green bg restored.
+        let green_bg = "\x1b[48;2;20;60;20m";
+        let reset = "\x1b[0m";
+        let colored_line = format!("{green_bg}hello world end{reset}");
+        // Highlight "world" (bytes 6..11 in raw text "hello world end").
+        let highlights = [(6usize, 11usize)];
+        let hl_on = "\x1b[7m";
+
+        let (rendered, _) =
+            render_line_highlighted(&colored_line, 0, 80, &config, &highlights, Some(hl_on));
+
+        // The highlight should appear.
+        assert!(rendered.contains(hl_on), "highlight missing: {rendered:?}");
+        // The green background should be present (for the non-highlighted portion).
+        assert!(
+            rendered.contains(green_bg),
+            "diff coloring lost: {rendered:?}"
+        );
+        // After the highlight ends, the green bg should be restored for " end".
+        assert!(
+            rendered.contains(&format!("{STANDOUT_OFF}{green_bg}")),
+            "diff coloring not restored after highlight: {rendered:?}"
+        );
     }
 }

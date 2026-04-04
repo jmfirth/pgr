@@ -12,6 +12,10 @@ use pgr_core::DiffLineType;
 const ADDED_BG: &str = "\x1b[48;2;20;60;20m";
 /// Red-tinted background for removed lines (24-bit true color).
 const REMOVED_BG: &str = "\x1b[48;2;60;20;20m";
+/// Intense green background for word-level emphasis on added lines.
+const ADDED_EMPHASIS_BG: &str = "\x1b[48;2;40;120;40m";
+/// Intense red background for word-level emphasis on removed lines.
+const REMOVED_EMPHASIS_BG: &str = "\x1b[48;2;120;40;40m";
 /// Cyan foreground + dim for hunk headers.
 const HUNK_HEADER_SGR: &str = "\x1b[36;2m";
 /// Bold for file-level headers.
@@ -53,6 +57,77 @@ pub fn tint_content(text: &str, line_type: DiffLineType) -> String {
     }
 }
 
+/// Which side of a diff pair a line belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSide {
+    /// Old/removed side.
+    Old,
+    /// New/added side.
+    New,
+}
+
+/// Apply word-level emphasis to diff content.
+///
+/// Unchanged portions get the normal dim tint (`ADDED_BG`/`REMOVED_BG`),
+/// while changed byte spans get an intense highlight. The `changes` are
+/// byte ranges from [`pgr_core::word_diff::compute_word_diff`].
+///
+/// `side` determines which span offsets (`old_*` or `new_*`) and which
+/// colors to use.
+#[must_use]
+pub fn apply_word_emphasis(
+    text: &str,
+    side: DiffSide,
+    changes: &[pgr_core::word_diff::WordChange],
+) -> String {
+    if changes.is_empty() {
+        // No word-level data — fall back to whole-line tinting.
+        let lt = match side {
+            DiffSide::Old => DiffLineType::Removed,
+            DiffSide::New => DiffLineType::Added,
+        };
+        return tint_content(text, lt);
+    }
+
+    let (dim_bg, emphasis_bg) = match side {
+        DiffSide::Old => (REMOVED_BG, REMOVED_EMPHASIS_BG),
+        DiffSide::New => (ADDED_BG, ADDED_EMPHASIS_BG),
+    };
+
+    let mut out = String::with_capacity(text.len() + changes.len() * 30);
+    let mut pos = 0;
+
+    for change in changes {
+        let (start, end) = match side {
+            DiffSide::Old => (change.old_start, change.old_end),
+            DiffSide::New => (change.new_start, change.new_end),
+        };
+
+        // Emit unchanged portion before this change (dim tint).
+        if start > pos {
+            out.push_str(dim_bg);
+            out.push_str(&text[pos..start]);
+        }
+
+        // Emit the changed span (intense emphasis).
+        if end > start {
+            out.push_str(emphasis_bg);
+            out.push_str(&text[start..end]);
+        }
+
+        pos = end;
+    }
+
+    // Trailing unchanged portion.
+    if pos < text.len() {
+        out.push_str(dim_bg);
+        out.push_str(&text[pos..]);
+    }
+
+    out.push_str(RESET);
+    out
+}
+
 /// Apply syntax highlighting + background tinting to already-stripped content.
 ///
 /// Like [`tint_content`] but also applies syntect foreground colors when the
@@ -80,10 +155,13 @@ pub fn highlight_content(
                 .ok()
                 .map(|ranges| {
                     let escaped = as_24_bit_terminal_escaped(&ranges);
+                    // Strip RESET first, then trim the \n that was added for syntect.
+                    // The \n sits between the last token and the trailing RESET, so
+                    // trim_end_matches('\n') must run after strip_suffix(RESET).
                     escaped
-                        .trim_end_matches('\n')
                         .strip_suffix(RESET)
-                        .unwrap_or(escaped.trim_end_matches('\n'))
+                        .unwrap_or(&escaped)
+                        .trim_end_matches('\n')
                         .to_string()
                 });
 
@@ -157,12 +235,11 @@ pub fn highlight_diff_hunk(
                         .ok()
                         .map(|ranges| {
                             let escaped = as_24_bit_terminal_escaped(&ranges);
-                            // Remove trailing newline and the trailing reset from
-                            // as_24_bit_terminal_escaped so we can wrap with background.
+                            // Strip RESET first, then trim the \n added for syntect.
                             escaped
-                                .trim_end_matches('\n')
                                 .strip_suffix(RESET)
-                                .unwrap_or(escaped.trim_end_matches('\n'))
+                                .unwrap_or(&escaped)
+                                .trim_end_matches('\n')
                                 .to_string()
                         });
 
@@ -322,5 +399,152 @@ mod tests {
     fn test_colorize_empty_line() {
         let result = colorize_diff_line("", DiffLineType::Context);
         assert_eq!(result, "");
+    }
+
+    /// Regression: highlight_content must not leave a trailing `\n` in its output.
+    ///
+    /// syntect requires `\n`-terminated input, but the added `\n` must be stripped
+    /// before returning. A stale `\n` causes `truncate_to_width_ansi` to overcount
+    /// width by 1 (unicode-width 0.2 reports `\n` as width 1), misaligning the
+    /// side-by-side separator.
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_highlight_content_no_trailing_newline() {
+        let highlighter = crate::syntax::highlighting::Highlighter::new();
+        let syntax = highlighter.detect_syntax("test.rs").unwrap();
+        let mut hl = highlighter.highlight_lines(syntax);
+
+        let text = "let x = 42;";
+        let result = highlight_content(text, DiffLineType::Added, &highlighter, &mut hl);
+
+        assert!(
+            !result.contains('\n'),
+            "highlight_content must strip trailing newline, got: {result:?}"
+        );
+    }
+
+    /// Regression: highlight_content separator alignment through full render path.
+    ///
+    /// When highlight_content output is fed through side-by-side rendering,
+    /// the separator column must be identical across all lines — headers,
+    /// hunk headers, and syntax-highlighted code lines.
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn test_highlight_content_sbs_separator_aligned() {
+        use crate::ansi::strip_ansi;
+        use crate::side_by_side::{render_side_by_side, SideBySideLayout, SideBySideLine};
+
+        let highlighter = crate::syntax::highlighting::Highlighter::new();
+        let syntax = highlighter.detect_syntax("test.rs").unwrap();
+        let mut hl_left = highlighter.highlight_lines(syntax);
+        let mut hl_right = highlighter.highlight_lines(syntax);
+
+        let layout = SideBySideLayout::from_terminal_width(100).unwrap();
+
+        let mut lines = vec![
+            SideBySideLine {
+                left: Some("a/foo.rs".to_string()),
+                right: Some("b/foo.rs".to_string()),
+                left_type: DiffLineType::Header,
+                right_type: DiffLineType::Header,
+            },
+            SideBySideLine {
+                left: Some("@@ -1,3 +1,3 @@".to_string()),
+                right: Some("@@ -1,3 +1,3 @@".to_string()),
+                left_type: DiffLineType::HunkHeader,
+                right_type: DiffLineType::HunkHeader,
+            },
+            SideBySideLine {
+                left: Some("fn main() {".to_string()),
+                right: Some("fn main() {".to_string()),
+                left_type: DiffLineType::Context,
+                right_type: DiffLineType::Context,
+            },
+            SideBySideLine {
+                left: Some("    let x = 1;".to_string()),
+                right: Some("    let x = 2;".to_string()),
+                left_type: DiffLineType::Removed,
+                right_type: DiffLineType::Added,
+            },
+        ];
+
+        // Apply highlight_content (syntect path) to each side.
+        for line in &mut lines {
+            if let Some(ref text) = line.left {
+                line.left = Some(highlight_content(
+                    text,
+                    line.left_type,
+                    &highlighter,
+                    &mut hl_left,
+                ));
+            }
+            if let Some(ref text) = line.right {
+                line.right = Some(highlight_content(
+                    text,
+                    line.right_type,
+                    &highlighter,
+                    &mut hl_right,
+                ));
+            }
+        }
+
+        let rendered = render_side_by_side(&lines, &layout);
+        let sep_cols: Vec<usize> = rendered
+            .iter()
+            .filter_map(|l| {
+                let stripped = strip_ansi(l);
+                stripped.find('\u{2502}')
+            })
+            .collect();
+
+        assert_eq!(
+            sep_cols.len(),
+            rendered.len(),
+            "separator missing on some lines"
+        );
+        let first = sep_cols[0];
+        for (i, &col) in sep_cols.iter().enumerate() {
+            assert_eq!(
+                col, first,
+                "line {} separator at column {}, expected {} (line 0). Likely a stale \\n in highlight_content output.",
+                i, col, first
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_word_emphasis_changed_spans() {
+        use pgr_core::word_diff::WordChange;
+
+        let text = "hello world";
+        let changes = vec![WordChange {
+            old_start: 6,
+            old_end: 11,
+            new_start: 6,
+            new_end: 11,
+        }];
+
+        let result = apply_word_emphasis(text, DiffSide::Old, &changes);
+        // "hello " should get dim red, "world" should get intense red.
+        assert!(
+            result.contains("\x1b[48;2;60;20;20m"),
+            "expected dim red bg: {result:?}"
+        );
+        assert!(
+            result.contains("\x1b[48;2;120;40;40m"),
+            "expected intense red bg: {result:?}"
+        );
+        assert!(result.contains("hello"), "missing 'hello': {result:?}");
+        assert!(result.contains("world"), "missing 'world': {result:?}");
+    }
+
+    #[test]
+    fn test_apply_word_emphasis_empty_changes_falls_back() {
+        let result = apply_word_emphasis("some text", DiffSide::New, &[]);
+        // Should fall back to flat tint (added green bg).
+        assert!(
+            result.contains("\x1b[48;2;20;60;20m"),
+            "expected green bg fallback: {result:?}"
+        );
     }
 }
