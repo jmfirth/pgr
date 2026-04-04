@@ -90,7 +90,7 @@ Adding a new dependency requires justification. Don't pull in a crate for someth
 ## 4. Architecture
 
 ### Crate boundaries
-- Crate boundaries from SPECIFICATION.md §8 are authoritative.
+- Crate boundaries are authoritative. See CLAUDE.md for the architecture table.
 - No circular dependencies. The dependency graph is a DAG.
 - Cross-crate communication uses traits defined in `pgr-core` or in the consuming crate.
 - Private implementation details stay private. Only the designed public API is `pub`.
@@ -190,7 +190,7 @@ Examples:
 - Don't add features beyond what the current task specifies.
 - Don't refactor code outside your task's scope.
 - Don't add comments explaining obvious code.
-- Don't add `// TODO` without a tracked task in PLAN.md.
+- Don't add `// TODO` without a tracked issue.
 - Don't use `String` where `&str` suffices.
 - Don't use `Box<dyn Trait>` where a generic `<T: Trait>` works (unless you need type erasure).
 - Don't add optional dependencies or feature flags without architectural justification.

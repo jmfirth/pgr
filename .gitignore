@@ -1,7 +1,5 @@
 /target
 .claude/
-
-# Proprietary process docs — kept on disk, not in repo
 PLAN.md
 PROCESS.md
 SPECIFICATION.md
