@@ -22,19 +22,22 @@ use crate::options::Options;
 /// Dump buffer content to stdout and exit. Used when no controlling terminal
 /// is available (e.g., `cmd | pgr file` in a non-interactive context).
 /// Matches GNU less behavior: when there's no TTY, act like `cat`.
-fn dump_to_stdout(buffer: &dyn Buffer, mut index: LineIndex) -> anyhow::Result<ExitReason> {
+fn dump_to_stdout(buffer: &dyn Buffer, _index: LineIndex) -> anyhow::Result<ExitReason> {
     use std::io::Write;
-    // Ensure all data is indexed (important for pipe buffers).
-    index.index_all(buffer)?;
     let mut stdout = std::io::stdout().lock();
-    let mut line_num = 0;
-    while let Ok(Some(line)) = index.get_line(line_num, buffer) {
-        let _ = stdout.write_all(line.as_bytes());
-        if !line.ends_with('\n') {
-            let _ = stdout.write_all(b"\n");
+    // Write raw buffer bytes directly — no indexing, no line-by-line overhead.
+    // Read in 64KB chunks from offset 0, matching less's mmap-write approach.
+    let mut offset = 0;
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = buffer.read_at(offset, &mut chunk)?;
+        if n == 0 {
+            break;
         }
-        line_num += 1;
+        stdout.write_all(&chunk[..n])?;
+        offset += n;
     }
+    stdout.flush()?;
     Ok(ExitReason::Normal)
 }
 
