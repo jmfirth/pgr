@@ -3815,7 +3815,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
         self.index.index_all(&*self.buffer)?;
 
-        let header_line_contents = self.fetch_header_lines()?;
+        let mut header_line_contents = self.fetch_header_lines()?;
 
         // When a filter is active, use the filtered line mapping.
         if self.filter.is_active() {
@@ -3921,6 +3921,28 @@ impl<R: Read, W: Write> Pager<R, W> {
         // (diff coloring, SQL sticky header, etc.) applies from the start.
         if self.initial_render {
             self.detect_content_mode_from_lines(&lines);
+
+            // Detection may have called set_header_lines (e.g., SQL table mode),
+            // which changes content_rows and top_line. Re-query everything and
+            // re-fetch lines with the updated screen geometry.
+            if self.screen.header_lines() > 0 {
+                let new_content_rows = self.screen.content_rows();
+                let (new_start, new_end) = self.screen.visible_range();
+                header_line_contents = self.fetch_header_lines()?;
+                lines.clear();
+                for line_num in new_start..new_end {
+                    if line_num < total {
+                        let content = self.index.get_line(line_num, &*self.buffer)?;
+                        lines.push(content);
+                    } else {
+                        lines.push(None);
+                    }
+                }
+                // Pad to new content_rows if needed.
+                while lines.len() < new_content_rows {
+                    lines.push(None);
+                }
+            }
         }
 
         // SQL table mode: apply frozen first column when horizontally scrolled.

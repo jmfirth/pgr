@@ -1,11 +1,11 @@
 #!/bin/bash
 # Scripted demo: diff awareness in pgr
-# Run: asciinema rec --command "./demos/record-diff.sh" --cols 140 --rows 30 demos/diff-awareness.cast
+# Run: asciinema rec --cols 140 --rows 30 --overwrite -c "./demos/record-diff.sh" demos/diff-awareness.cast
 
 export TERM=xterm-256color
 PGR="$(pwd)/target/release/pgr-cli"
-SESSION="pgr-diff-$$"
 DIFF_FILE="/tmp/pgr_demo_diff.txt"
+SOCK="pgr-demo-$$"
 
 # Generate a realistic diff
 cat > "$DIFF_FILE" << 'DIFF'
@@ -60,20 +60,21 @@ index abc1234..def5678 100644
  }
 DIFF
 
+# Use a SEPARATE tmux server socket — no interference from existing sessions
 unset TMUX
-tmux kill-session -t "$SESSION" 2>/dev/null
-# Force tmux to use the specified size, not resize to client terminal
-tmux new-session -d -s "$SESSION" -x 140 -y 30 "$PGR $DIFF_FILE"
-tmux set -t "$SESSION" window-size manual
+tmux -L "$SOCK" kill-server 2>/dev/null
+tmux -L "$SOCK" new-session -d -s demo -x 140 -y 30 "$PGR $DIFF_FILE"
+tmux -L "$SOCK" set -g default-terminal "xterm-256color"
+tmux -L "$SOCK" set -ga terminal-overrides ",xterm-256color:Tc"
 
-tmux set -t "$SESSION" status on
-tmux set -t "$SESSION" status-style "fg=white,bg=#333333"
-tmux set -t "$SESSION" status-left ""
-tmux set -t "$SESSION" status-right ""
-tmux set -t "$SESSION" status-justify centre
+tmux -L "$SOCK" set -t demo status on
+tmux -L "$SOCK" set -t demo status-style "fg=white,bg=#333333"
+tmux -L "$SOCK" set -t demo status-left ""
+tmux -L "$SOCK" set -t demo status-right ""
+tmux -L "$SOCK" set -t demo status-justify centre
 
-show_key() { tmux set -t "$SESSION" status-left "  $1"; }
-clear_key() { tmux set -t "$SESSION" status-left ""; }
+show_key() { tmux -L "$SOCK" set -t demo status-left "  $1"; }
+clear_key() { tmux -L "$SOCK" set -t demo status-left ""; }
 
 {
     sleep 3
@@ -81,51 +82,51 @@ clear_key() { tmux set -t "$SESSION" status-left ""; }
     # Scroll through the diff
     show_key "j  (scroll)"
     for i in $(seq 1 12); do
-        tmux send-keys -t "$SESSION" j; sleep 0.3
+        tmux -L "$SOCK" send-keys -t demo j; sleep 0.3
     done
     sleep 2
     clear_key
 
     # Jump to top
     show_key "g  (top)"
-    tmux send-keys -t "$SESSION" g
+    tmux -L "$SOCK" send-keys -t demo g
     sleep 2
     clear_key
 
     # Hunk navigation
     show_key "]c  (next hunk)"
-    tmux send-keys -t "$SESSION" ']'
+    tmux -L "$SOCK" send-keys -t demo ']'
     sleep 0.1
-    tmux send-keys -t "$SESSION" c
+    tmux -L "$SOCK" send-keys -t demo c
     sleep 2
 
-    tmux send-keys -t "$SESSION" ']'
+    tmux -L "$SOCK" send-keys -t demo ']'
     sleep 0.1
-    tmux send-keys -t "$SESSION" c
+    tmux -L "$SOCK" send-keys -t demo c
     sleep 2
     clear_key
 
     # Side-by-side
     show_key "ESC-V  (side-by-side)"
-    tmux send-keys -t "$SESSION" Escape
+    tmux -L "$SOCK" send-keys -t demo Escape
     sleep 0.1
-    tmux send-keys -t "$SESSION" V
+    tmux -L "$SOCK" send-keys -t demo V
     sleep 4
     clear_key
 
     # Back to unified
     show_key "ESC-V  (unified)"
-    tmux send-keys -t "$SESSION" Escape
+    tmux -L "$SOCK" send-keys -t demo Escape
     sleep 0.1
-    tmux send-keys -t "$SESSION" V
+    tmux -L "$SOCK" send-keys -t demo V
     sleep 2
     clear_key
 
     # Quit
     show_key "q  (quit)"
-    tmux send-keys -t "$SESSION" q
+    tmux -L "$SOCK" send-keys -t demo q
 } &
 
-tmux attach -t "$SESSION"
+tmux -L "$SOCK" attach -t demo
 wait
-tmux kill-session -t "$SESSION" 2>/dev/null
+tmux -L "$SOCK" kill-server 2>/dev/null

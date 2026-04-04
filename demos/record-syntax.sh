@@ -1,11 +1,11 @@
 #!/bin/bash
 # Scripted demo: syntax highlighting in pgr
-# Uses tmux to send keystrokes with real timing.
-# Run: asciinema rec --command "./demos/record-syntax.sh" --cols 100 --rows 30 demos/syntax-highlight.cast
+# Run: asciinema rec --cols 100 --rows 30 --overwrite -c "./demos/record-syntax.sh" demos/syntax-highlight.cast
 
+export TERM=xterm-256color
 PGR="$(pwd)/target/release/pgr-cli"
 FILE="/tmp/pgr_demo.rs"
-SESSION="pgr-demo-$$"
+SOCK="pgr-demo-$$"
 
 # Create demo file
 cat > "$FILE" << 'RUST'
@@ -111,73 +111,62 @@ fn main() {
 }
 RUST
 
-# Unset TMUX to avoid nested tmux issues
+# Use a SEPARATE tmux server socket — no interference from existing sessions
 unset TMUX
+tmux -L "$SOCK" kill-server 2>/dev/null
+tmux -L "$SOCK" new-session -d -s demo -x 100 -y 30 "$PGR $FILE"
+tmux -L "$SOCK" set -g default-terminal "xterm-256color"
+tmux -L "$SOCK" set -ga terminal-overrides ",xterm-256color:Tc"
 
-# Kill any leftover session
-tmux kill-session -t "$SESSION" 2>/dev/null
+# Configure status bar for keystroke overlay
+tmux -L "$SOCK" set -t demo status on
+tmux -L "$SOCK" set -t demo status-style "fg=white,bg=#333333"
+tmux -L "$SOCK" set -t demo status-left ""
+tmux -L "$SOCK" set -t demo status-right ""
+tmux -L "$SOCK" set -t demo status-justify centre
 
-# Start pgr in a detached tmux session
-tmux new-session -d -s "$SESSION" -x 100 -y 30 "$PGR $FILE"
+show_key() { tmux -L "$SOCK" set -t demo status-left "  $1"; }
+clear_key() { tmux -L "$SOCK" set -t demo status-left ""; }
 
-# Configure tmux status bar for keystroke display
-tmux set -t "$SESSION" status on
-tmux set -t "$SESSION" status-style "fg=white,bg=#333333"
-tmux set -t "$SESSION" status-left ""
-tmux set -t "$SESSION" status-right ""
-tmux set -t "$SESSION" status-justify centre
-
-# Helper: show a keystroke label in the tmux status bar
-show_key() {
-    tmux set -t "$SESSION" status-left "  $1"
-}
-clear_key() {
-    tmux set -t "$SESSION" status-left ""
-}
-
-# Background: send keystrokes with real timing
+# Background: send scripted keystrokes
 {
-    sleep 2
+    sleep 3
 
-    # Scroll down slowly
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        show_key "j  (scroll down)"
-        tmux send-keys -t "$SESSION" j
-        sleep 0.5
+    # Scroll down
+    show_key "j  (scroll down)"
+    for i in $(seq 1 12); do
+        tmux -L "$SOCK" send-keys -t demo j; sleep 0.4
     done
     clear_key
     sleep 1.5
 
     # Jump to top
     show_key "g  (go to top)"
-    tmux send-keys -t "$SESSION" g
+    tmux -L "$SOCK" send-keys -t demo g
     sleep 2
     clear_key
 
     # Search for "fn"
     show_key "/fn  (search)"
-    tmux send-keys -t "$SESSION" /fn Enter
+    tmux -L "$SOCK" send-keys -t demo /fn Enter
     sleep 2
 
     # Next match
     show_key "n  (next match)"
-    tmux send-keys -t "$SESSION" n
+    tmux -L "$SOCK" send-keys -t demo n
     sleep 1.5
-    tmux send-keys -t "$SESSION" n
+    tmux -L "$SOCK" send-keys -t demo n
     sleep 1.5
-    tmux send-keys -t "$SESSION" n
+    tmux -L "$SOCK" send-keys -t demo n
     sleep 2
     clear_key
 
     # Quit
     show_key "q  (quit)"
-    tmux send-keys -t "$SESSION" q
+    tmux -L "$SOCK" send-keys -t demo q
 } &
-KEYS_PID=$!
 
-# Attach — this is what asciinema captures
-tmux attach -t "$SESSION"
-
-# Cleanup
-wait $KEYS_PID 2>/dev/null
-tmux kill-session -t "$SESSION" 2>/dev/null
+# Attach �� this is the foreground process asciinema captures
+tmux -L "$SOCK" attach -t demo
+wait
+tmux -L "$SOCK" kill-server 2>/dev/null

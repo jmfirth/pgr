@@ -150,8 +150,12 @@ pub fn render_frozen_column(line: &str, layout: &SqlTableLayout, h_offset: usize
     // Extract the frozen prefix (first column) from the original line.
     let frozen_prefix = take_display_columns(&clean, freeze_width);
 
-    // Extract the portion after h_offset (the scrolled part).
-    let scrolled = skip_display_columns(&clean, h_offset + freeze_width);
+    // The scrolled portion starts at whichever is further right: the end
+    // of the frozen prefix or the horizontal scroll offset. When h_offset
+    // is within the frozen region we show from freeze_width onward; when
+    // it's past the frozen region we skip to h_offset.
+    let skip = h_offset.max(freeze_width);
+    let scrolled = skip_display_columns(&clean, skip);
 
     if scrolled.is_empty() {
         frozen_prefix
@@ -452,9 +456,103 @@ mod tests {
         };
         let line = "| col1 | col2 | col3 |";
         let result = render_frozen_column(line, &layout, 7);
-        // First column width is 8 chars (| col1 |+space)
-        // Should start with the frozen first column
-        assert!(result.starts_with("| col1 |"));
+        assert!(
+            result.starts_with("| col1 |"),
+            "frozen prefix wrong: {result:?}"
+        );
+    }
+
+    /// Regression: frozen column must not eat into the next column.
+    ///
+    /// With boundaries [0, 7, 14, 21] and h_offset=7, the scrolled portion
+    /// must start at position 8 (after the frozen prefix), showing the full
+    /// second column content including its leading separator.
+    #[test]
+    fn test_render_frozen_column_alignment_after_scroll() {
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 7, 14, 21],
+            header_rows: 3,
+        };
+        // positions: 0123456789...
+        // | col1 || col2 || col3 |
+        let line = "| col1 | col2 | col3 |";
+        let result = render_frozen_column(line, &layout, 7);
+        // Frozen prefix = "| col1 |" (8 chars, positions 0-7)
+        // Scrolled = from position max(7, 8) = 8 onward = " col2 | col3 |"
+        assert_eq!(
+            result, "| col1 | col2 | col3 |",
+            "h_offset at first boundary should show all columns"
+        );
+    }
+
+    #[test]
+    fn test_render_frozen_column_scroll_past_second_column() {
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 7, 14, 21],
+            header_rows: 3,
+        };
+        let line = "| col1 | col2 | col3 |";
+        let result = render_frozen_column(line, &layout, 14);
+        // Frozen prefix = "| col1 |" (8 chars)
+        // Scrolled = from position max(14, 8) = 14 onward = "| col3 |"
+        assert_eq!(result, "| col1 || col3 |");
+    }
+
+    #[test]
+    fn test_render_frozen_rule_line_alignment() {
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 7, 14, 21],
+            header_rows: 3,
+        };
+        let line = "+------+------+------+";
+        let result = render_frozen_column(line, &layout, 7);
+        // Frozen prefix = "+------+" (8 chars)
+        // Scrolled = from position 8 onward = "------+------+"
+        // Combined should look like: "+------+------+------+"
+        assert_eq!(
+            result, "+------+------+------+",
+            "rule line should align with data lines"
+        );
+    }
+
+    #[test]
+    fn test_render_frozen_rule_line_scroll_past_second() {
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 7, 14, 21],
+            header_rows: 3,
+        };
+        let line = "+------+------+------+";
+        let result = render_frozen_column(line, &layout, 14);
+        // Frozen = "+------+" (8 chars), Scrolled from 14 = "+------+"
+        assert_eq!(result, "+------++------+");
+    }
+
+    #[test]
+    fn test_render_frozen_wider_columns() {
+        // Wider table: +----------+----------+
+        // Boundaries at [0, 11, 22]
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 11, 22],
+            header_rows: 3,
+        };
+        let line = "| username  | email     |";
+        let result = render_frozen_column(line, &layout, 11);
+        // freeze_width = 12 (11 - 0 + 1), frozen = "| username  |" (12 chars)
+        // scrolled from max(11, 12) = 12: " email     |"
+        assert_eq!(result, "| username  | email     |");
+    }
+
+    #[test]
+    fn test_render_frozen_short_line_no_panic() {
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 7, 14],
+            header_rows: 3,
+        };
+        // Line shorter than freeze_width
+        let line = "| hi |";
+        let result = render_frozen_column(line, &layout, 7);
+        // Should not panic; frozen prefix is whatever fits
+        assert!(!result.is_empty());
     }
 
     // ── take_display_columns / skip_display_columns tests ─────────────
