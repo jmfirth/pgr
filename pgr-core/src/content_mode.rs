@@ -460,12 +460,17 @@ fn is_sql_rule_line(line: &str) -> bool {
         return false;
     }
     let bytes = trimmed.as_bytes();
-    if bytes[0] != b'+' || bytes[bytes.len() - 1] != b'+' {
+    // Must contain at least one '-' and one '+'
+    let has_dash = bytes.contains(&b'-');
+    let has_plus = bytes.contains(&b'+');
+    if !has_dash || !has_plus {
         return false;
     }
-    // Must contain at least one '-'
-    let has_dash = bytes.contains(&b'-');
-    if !has_dash {
+    // Must start and end with '+' or '-' (supports both mysql +---+---+
+    // and psql ---+--------+--- formats)
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if (first != b'+' && first != b'-') || (last != b'+' && last != b'-') {
         return false;
     }
     // All characters must be '+' or '-'
@@ -580,6 +585,17 @@ mod tests {
             "+------+------+",
             "| a    | b    |",
             "+------+------+",
+        ];
+        assert_eq!(detect_content_mode(&lines), ContentMode::SqlTable);
+    }
+
+    #[test]
+    fn test_detect_psql_table_returns_sqltable() {
+        let lines = vec![
+            " id | name    | email",
+            "----+---------+----------------",
+            "  1 | alice   | alice@test.com",
+            "  2 | bob     | bob@test.com",
         ];
         assert_eq!(detect_content_mode(&lines), ContentMode::SqlTable);
     }

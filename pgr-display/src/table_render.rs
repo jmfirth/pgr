@@ -59,16 +59,31 @@ pub fn parse_table_layout(lines: &[&str]) -> Option<SqlTableLayout> {
         return None;
     }
 
-    // Header rows: everything up to and including the second rule line
-    // (which separates header from data). If there's no second rule line,
-    // use the first rule line + 1 header row + 1 separator = 3 rows,
-    // or just up to and including the first rule if only one exists.
+    // Header rows: everything up to and including the rule line that
+    // separates header labels from data.
+    //
+    // mysql format: rule, header, rule → second_rule_idx + 1
+    //   +------+------+   (row 0, rule)
+    //   | col1 | col2 |   (row 1, header)
+    //   +------+------+   (row 2, rule) ← header_rows = 3
+    //
+    // psql format: header, rule → first_rule_idx + 1
+    //    col1 |  col2     (row 0, header)
+    //   ------+-------    (row 1, rule) ← header_rows = 2
     let header_rows = if let Some(second) = second_rule_idx {
         second + 1
     } else {
-        // Only one rule line found — treat it as the top border,
-        // and assume 1 header row follows it. Header = 2 rows.
-        first_rule_idx.map_or(0, |first| first + 2)
+        first_rule_idx.map_or(0, |first| {
+            if first == 0 {
+                // Rule at line 0 is a top border (mysql style).
+                // Header label follows on line 1, so freeze 2 rows.
+                2
+            } else {
+                // Rule below line 0 is a separator under header labels
+                // (psql style). Freeze everything through the rule.
+                first + 1
+            }
+        })
     };
 
     Some(SqlTableLayout {
@@ -164,21 +179,25 @@ pub fn render_frozen_column(line: &str, layout: &SqlTableLayout, h_offset: usize
     }
 }
 
-/// Check if a line is a SQL table horizontal rule: `+[-+]+`
+/// Check if a line is a SQL table horizontal rule.
 ///
-/// Must start and end with `+`, containing only `-` and `+` characters,
-/// with at least one `-`.
+/// Supports both mysql format (`+------+------+`) and psql format
+/// (`----+--------+----`). Must contain only `-` and `+` characters,
+/// with at least one of each.
 fn is_rule_line(line: &str) -> bool {
     let trimmed = line.trim_end();
     if trimmed.len() < 3 {
         return false;
     }
     let bytes = trimmed.as_bytes();
-    if bytes[0] != b'+' || bytes[bytes.len() - 1] != b'+' {
+    let has_dash = bytes.contains(&b'-');
+    let has_plus = bytes.contains(&b'+');
+    if !has_dash || !has_plus {
         return false;
     }
-    let has_dash = bytes.contains(&b'-');
-    if !has_dash {
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if (first != b'+' && first != b'-') || (last != b'+' && last != b'-') {
         return false;
     }
     bytes.iter().all(|&b| b == b'+' || b == b'-')
@@ -187,9 +206,18 @@ fn is_rule_line(line: &str) -> bool {
 /// Extract column boundary positions from a rule line.
 ///
 /// Each `+` character position (in display columns) is a boundary.
+/// For mysql format (`+------+------+`), boundaries are at the `+` positions.
+/// For psql format (`----+--------+----`), an implicit boundary at position 0
+/// is added since the first column starts at the left edge.
+///
 /// Example: `+------+------+` yields `[0, 7, 14]`.
+/// Example: `----+--------+----` yields `[0, 4, 13]`.
 fn extract_column_boundaries(rule_line: &str) -> Vec<usize> {
     let mut boundaries = Vec::new();
+    // Psql-style: line starts with '-', add implicit boundary at 0.
+    if rule_line.starts_with('-') {
+        boundaries.push(0);
+    }
     let mut col: usize = 0;
     for ch in rule_line.chars() {
         if ch == '+' {
@@ -311,6 +339,46 @@ mod tests {
         let layout = parse_table_layout(&lines).unwrap();
         assert_eq!(layout.column_boundaries, vec![0, 7, 14]);
         assert_eq!(layout.header_rows, 2); // rule + header row
+    }
+
+    #[test]
+    fn test_parse_layout_psql_style() {
+        // psql format: header above rule, no top border
+        let lines = vec![
+            " id | name    | email",
+            "----+---------+----------------",
+            "  1 | alice   | alice@test.com",
+            "  2 | bob     | bob@test.com",
+        ];
+        let layout = parse_table_layout(&lines).unwrap();
+        // Boundaries: implicit 0, then + positions at 4 and 14
+        assert_eq!(layout.column_boundaries, vec![0, 4, 14]);
+        // header + rule = 2 rows
+        assert_eq!(layout.header_rows, 2);
+    }
+
+    #[test]
+    fn test_is_rule_line_psql_format() {
+        assert!(is_rule_line("----+--------+----"));
+        assert!(is_rule_line("---+---------+----------------"));
+    }
+
+    #[test]
+    fn test_is_rule_line_mysql_format() {
+        assert!(is_rule_line("+------+------+"));
+        assert!(is_rule_line("+---+---+---+"));
+    }
+
+    #[test]
+    fn test_is_rule_line_rejects_dashes_only() {
+        assert!(!is_rule_line("----------"));
+    }
+
+    #[test]
+    fn test_extract_boundaries_psql() {
+        let boundaries = extract_column_boundaries("----+---------+------");
+        // implicit 0, then + at 4 and 14
+        assert_eq!(boundaries, vec![0, 4, 14]);
     }
 
     #[test]
