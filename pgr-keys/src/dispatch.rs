@@ -3895,6 +3895,30 @@ impl<R: Read, W: Write> Pager<R, W> {
         }
 
         let total = self.index.lines_indexed();
+
+        // On initial render, detect content mode from the first screenful.
+        // This must happen before we compute the final visible range because
+        // detection may call set_header_lines (e.g., SQL table mode), which
+        // changes content_rows and top_line.
+        if self.initial_render {
+            // Fetch a preliminary screenful for mode detection.
+            let (pre_start, pre_end) = self.screen.visible_range();
+            let pre_rows = self.screen.content_rows();
+            let mut detect_lines: Vec<Option<String>> = Vec::with_capacity(pre_rows);
+            for line_num in pre_start..pre_end {
+                if line_num < total {
+                    let content = self.index.get_line(line_num, &*self.buffer)?;
+                    detect_lines.push(content);
+                } else {
+                    detect_lines.push(None);
+                }
+            }
+            self.detect_content_mode_from_lines(&detect_lines);
+            // Re-fetch header lines now that header_lines may have changed.
+            header_line_contents = self.fetch_header_lines()?;
+        }
+
+        // Query screen geometry AFTER detection has potentially set header lines.
         let (start, end) = self.screen.visible_range();
         let content_rows = self.screen.content_rows();
 
@@ -3915,34 +3939,6 @@ impl<R: Read, W: Write> Pager<R, W> {
                 lines.push(content);
             } else {
                 lines.push(None);
-            }
-        }
-
-        // Detect content mode on first paint so content-aware rendering
-        // (diff coloring, SQL sticky header, etc.) applies from the start.
-        if self.initial_render {
-            self.detect_content_mode_from_lines(&lines);
-
-            // Detection may have called set_header_lines (e.g., SQL table mode),
-            // which changes content_rows and top_line. Re-query everything and
-            // re-fetch lines with the updated screen geometry.
-            if self.screen.header_lines() > 0 {
-                let new_content_rows = self.screen.content_rows();
-                let (new_start, new_end) = self.screen.visible_range();
-                header_line_contents = self.fetch_header_lines()?;
-                lines.clear();
-                for line_num in new_start..new_end {
-                    if line_num < total {
-                        let content = self.index.get_line(line_num, &*self.buffer)?;
-                        lines.push(content);
-                    } else {
-                        lines.push(None);
-                    }
-                }
-                // Pad to new content_rows if needed.
-                while lines.len() < new_content_rows {
-                    lines.push(None);
-                }
             }
         }
 
