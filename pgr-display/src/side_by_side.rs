@@ -529,4 +529,70 @@ mod tests {
         assert_eq!(paired[3].right.as_deref(), Some("added2"));
         assert_eq!(paired[4].left.as_deref(), Some("more context"));
     }
+
+    #[test]
+    fn test_render_separator_aligned_with_tinted_content() {
+        // Verify that the │ separator is at the same visible column
+        // regardless of line type and SGR wrapping.
+        use crate::ansi::strip_ansi;
+        use crate::diff_render::tint_content;
+
+        let layout = SideBySideLayout::from_terminal_width(100).unwrap();
+
+        // Create paired lines with different tinting
+        let lines = vec![
+            SideBySideLine {
+                left: Some(tint_content("a/foo.rs", DiffLineType::Header)),
+                right: Some(tint_content("b/foo.rs", DiffLineType::Header)),
+                left_type: DiffLineType::Header,
+                right_type: DiffLineType::Header,
+            },
+            SideBySideLine {
+                left: Some(tint_content("@@ -1,3 +1,3 @@", DiffLineType::HunkHeader)),
+                right: Some(tint_content("@@ -1,3 +1,3 @@", DiffLineType::HunkHeader)),
+                left_type: DiffLineType::HunkHeader,
+                right_type: DiffLineType::HunkHeader,
+            },
+            SideBySideLine {
+                left: Some("fn main() {".to_string()),
+                right: Some("fn main() {".to_string()),
+                left_type: DiffLineType::Context,
+                right_type: DiffLineType::Context,
+            },
+            SideBySideLine {
+                left: Some(tint_content("    let x = 1;", DiffLineType::Removed)),
+                right: Some(tint_content("    let x = 2;", DiffLineType::Added)),
+                left_type: DiffLineType::Removed,
+                right_type: DiffLineType::Added,
+            },
+        ];
+
+        let rendered = render_side_by_side(&lines, &layout);
+
+        // Find the visible column of │ on each rendered line
+        let mut sep_cols: Vec<usize> = Vec::new();
+        for line in &rendered {
+            let stripped = strip_ansi(line);
+            if let Some(pos) = stripped.find('│') {
+                // pos is byte offset in stripped string; for ASCII this equals column
+                sep_cols.push(pos);
+            }
+        }
+
+        // All separator columns must be identical
+        assert!(
+            sep_cols.len() == rendered.len(),
+            "separator missing on some lines: found {} of {}",
+            sep_cols.len(),
+            rendered.len()
+        );
+        let first = sep_cols[0];
+        for (i, &col) in sep_cols.iter().enumerate() {
+            assert_eq!(
+                col, first,
+                "line {} separator at column {}, expected {} (line 0)",
+                i, col, first
+            );
+        }
+    }
 }
