@@ -2,7 +2,7 @@
 
 A drop-in replacement for GNU `less`, written in Rust. Full behavioral conformance with less 692, plus content-aware rendering (diffs, man pages, git blame, JSON) and optional syntax highlighting via syntect.
 
-See `SPECIFICATION.md` for the full design document. See `PROCESS.md` for the development workflow. See `PLAN.md` for the current project plan and task status. See `CONVENTIONS.md` for coding conventions, style rules, and best practices — **read it before writing any code**. See `agents/` for agent role definitions (developer, reviewer, plan-reviewer).
+See `CONVENTIONS.md` for coding conventions, style rules, and best practices — **read it before writing any code**.
 
 ---
 
@@ -16,7 +16,7 @@ See `SPECIFICATION.md` for the full design document. See `PROCESS.md` for the de
 
 ## Architecture
 
-Six crates in a Cargo workspace (see SPECIFICATION.md §8):
+Six crates in a Cargo workspace:
 
 | Crate | Responsibility |
 |-------|---------------|
@@ -99,7 +99,7 @@ Tree-sitter and LSP-powered code intelligence is available via `cq-mcp`. These t
 ## Conventions
 
 - Branch naming: `task/[id]-[short-name]`
-- No `todo!()`, `unimplemented!()`, or `// TODO` in merged code unless tracked in PLAN.md
+- No `todo!()`, `unimplemented!()`, or `// TODO` in merged code unless tracked
 - Stubs only for interface contracts with identified downstream tasks
 - One logical change per commit
 - Main always builds and passes fast suite

@@ -1,2 +1,11 @@
 /target
-.claude/worktrees/
+.claude/
+
+# Proprietary process docs — kept on disk, not in repo
+PLAN.md
+PROCESS.md
+SPECIFICATION.md
+BOOTSTRAP.md
+/tasks/
+/agents/
+/reviews/
