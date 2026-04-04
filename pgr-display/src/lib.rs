@@ -57,8 +57,8 @@ pub use side_by_side::{
 };
 pub use squeeze::{is_blank_line, squeeze_visible_lines};
 pub use table_render::{
-    first_column_width, parse_table_layout, render_frozen_column, snap_to_next_column,
-    snap_to_prev_column, SqlTableLayout,
+    colorize_table_lines, first_column_width, parse_table_layout, render_frozen_column,
+    snap_to_next_column, snap_to_prev_column, SqlTableLayout,
 };
 pub use termcap::TermcapOverrides;
 pub use terminal_output::{

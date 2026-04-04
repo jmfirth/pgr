@@ -3978,8 +3978,16 @@ impl<R: Read, W: Write> Pager<R, W> {
             lines = self.linkify_compiler_lines(&lines);
         }
 
+        let table_styled = self.content_mode == ContentMode::SqlTable;
+        if table_styled {
+            if let Some(ref layout) = self.sql_table_layout {
+                let (start, _) = self.screen.visible_range();
+                lines = pgr_display::colorize_table_lines(&lines, layout, start);
+            }
+        }
+
         #[cfg(feature = "syntax")]
-        let syntax_active = if diff_colored || blame_colored || compiler_linked {
+        let syntax_active = if diff_colored || blame_colored || compiler_linked || table_styled {
             false // Diff, blame, and compiler modes handle their own rendering
         } else {
             self.is_syntax_active()
@@ -4035,7 +4043,11 @@ impl<R: Read, W: Write> Pager<R, W> {
         } else {
             visible_content
         };
-        let start_row = if self.initial_render && effective_rows <= content_rows && start == 0 {
+        let start_row = if self.initial_render
+            && effective_rows <= content_rows
+            && start == 0
+            && self.content_mode != ContentMode::SqlTable
+        {
             content_rows - effective_rows + 1
         } else {
             0
@@ -4045,11 +4057,19 @@ impl<R: Read, W: Write> Pager<R, W> {
         let gutter_marks = self.build_gutter_marks(start, lines.len());
 
         // Transform header lines with frozen column when SQL table is hscrolled.
-        let header_line_contents = if sql_frozen {
+        let mut header_line_contents = if sql_frozen {
             self.apply_frozen_column(&header_line_contents)
         } else {
             header_line_contents
         };
+
+        // Style header lines for SQL table mode (bold headers, dim rules).
+        if table_styled {
+            if let Some(ref layout) = self.sql_table_layout {
+                header_line_contents =
+                    pgr_display::colorize_table_lines(&header_line_contents, layout, 0);
+            }
+        }
 
         let paint_opts = PaintOptions {
             show_line_numbers: self.runtime_options.line_numbers,
@@ -4068,7 +4088,7 @@ impl<R: Read, W: Write> Pager<R, W> {
         // escape sequences, ensure the render pipeline uses at least AnsiOnly
         // mode so those codes are preserved.
         let effective_config =
-            if (syntax_active || diff_colored || blame_colored || compiler_linked)
+            if (syntax_active || diff_colored || blame_colored || compiler_linked || table_styled)
                 && self.render_config.raw_mode == RawControlMode::Off
             {
                 let mut cfg = self.render_config.clone();

@@ -179,6 +179,87 @@ pub fn render_frozen_column(line: &str, layout: &SqlTableLayout, h_offset: usize
     }
 }
 
+/// ANSI escape: bold.
+const BOLD: &str = "\x1b[1m";
+/// ANSI escape: dim.
+const DIM: &str = "\x1b[2m";
+/// ANSI escape: reset all.
+const RESET: &str = "\x1b[0m";
+/// Subtle alternating row background (very dark gray).
+const ALT_ROW_BG: &str = "\x1b[48;2;30;30;38m";
+
+/// Apply table-aware styling to lines.
+///
+/// - Header text (non-rule lines within `header_rows`): **bold**
+/// - Rule lines (`+---+` / `---+---`): dim
+/// - Data rows: alternating subtle background stripe
+/// - Row count footer (`(N rows)`): dim
+/// - Structure characters (`|`) in data rows: dim
+#[must_use]
+pub fn colorize_table_lines(
+    lines: &[Option<String>],
+    layout: &SqlTableLayout,
+    header_offset: usize,
+) -> Vec<Option<String>> {
+    let mut data_row_idx: usize = 0;
+
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            let text = opt.as_ref()?;
+            let clean = strip_ansi(text);
+            let line_num = header_offset + i;
+
+            if line_num < layout.header_rows {
+                // Header region: bold for label rows, dim for rule lines.
+                if is_rule_line(&clean) {
+                    Some(format!("{DIM}{clean}{RESET}"))
+                } else {
+                    Some(format!("{BOLD}{clean}{RESET}"))
+                }
+            } else if is_rule_line(&clean) {
+                // Rule line outside header (bottom border).
+                Some(format!("{DIM}{clean}{RESET}"))
+            } else if is_row_count_footer(&clean) {
+                // "(20 rows)" footer — dim.
+                Some(format!("{DIM}{clean}{RESET}"))
+            } else {
+                // Data row: alternate background, dim structure characters.
+                let styled = dim_structure_chars(&clean);
+                let result = if data_row_idx % 2 == 1 {
+                    format!("{ALT_ROW_BG}{styled}{RESET}")
+                } else {
+                    format!("{styled}{RESET}")
+                };
+                data_row_idx += 1;
+                Some(result)
+            }
+        })
+        .collect()
+}
+
+/// Check if a line is a row-count footer like `(20 rows)`.
+fn is_row_count_footer(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.contains("row")
+}
+
+/// Dim the `|` structure characters in a data row while keeping data bright.
+fn dim_structure_chars(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 40);
+    for ch in line.chars() {
+        if ch == '|' {
+            out.push_str(DIM);
+            out.push(ch);
+            out.push_str(RESET);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Check if a line is a SQL table horizontal rule.
 ///
 /// Supports both mysql format (`+------+------+`) and psql format
@@ -653,5 +734,115 @@ mod tests {
     #[test]
     fn test_skip_display_columns_zero_returns_full() {
         assert_eq!(skip_display_columns("hello", 0), "hello");
+    }
+
+    // ── colorize_table_lines tests ───────────────────────────────────
+
+    fn make_layout() -> SqlTableLayout {
+        SqlTableLayout {
+            column_boundaries: vec![0, 7, 14],
+            header_rows: 3,
+        }
+    }
+
+    #[test]
+    fn test_colorize_header_label_is_bold() {
+        let layout = make_layout();
+        let lines = vec![
+            Some("+------+------+".to_string()),
+            Some("| col1 | col2 |".to_string()),
+            Some("+------+------+".to_string()),
+        ];
+        let result = colorize_table_lines(&lines, &layout, 0);
+        // Rule lines (rows 0, 2) should be dim.
+        assert!(
+            result[0].as_ref().unwrap().contains(DIM),
+            "rule line should be dim: {:?}",
+            result[0]
+        );
+        // Header label (row 1) should be bold.
+        assert!(
+            result[1].as_ref().unwrap().contains(BOLD),
+            "header should be bold: {:?}",
+            result[1]
+        );
+    }
+
+    #[test]
+    fn test_colorize_data_rows_alternate() {
+        let layout = make_layout();
+        let lines = vec![
+            Some("| a    | b    |".to_string()),
+            Some("| c    | d    |".to_string()),
+            Some("| e    | f    |".to_string()),
+        ];
+        // These are data rows (offset = 3, past header_rows).
+        let result = colorize_table_lines(&lines, &layout, 3);
+        // First data row (idx 0): no alt bg.
+        assert!(
+            !result[0].as_ref().unwrap().contains(ALT_ROW_BG),
+            "first data row should not have alt bg"
+        );
+        // Second data row (idx 1): alt bg.
+        assert!(
+            result[1].as_ref().unwrap().contains(ALT_ROW_BG),
+            "second data row should have alt bg"
+        );
+        // Third data row (idx 2): no alt bg.
+        assert!(
+            !result[2].as_ref().unwrap().contains(ALT_ROW_BG),
+            "third data row should not have alt bg"
+        );
+    }
+
+    #[test]
+    fn test_colorize_structure_chars_dimmed() {
+        let layout = make_layout();
+        let lines = vec![Some("| a    | b    |".to_string())];
+        let result = colorize_table_lines(&lines, &layout, 3);
+        let styled = result[0].as_ref().unwrap();
+        // The | chars should be wrapped in DIM...RESET.
+        assert!(
+            styled.contains(&format!("{DIM}|{RESET}")),
+            "pipe chars should be dimmed: {styled:?}"
+        );
+    }
+
+    #[test]
+    fn test_colorize_row_count_footer_dimmed() {
+        let layout = make_layout();
+        let lines = vec![Some("(20 rows)".to_string())];
+        let result = colorize_table_lines(&lines, &layout, 25);
+        assert!(
+            result[0].as_ref().unwrap().contains(DIM),
+            "footer should be dim"
+        );
+    }
+
+    #[test]
+    fn test_colorize_psql_header_bold() {
+        let layout = SqlTableLayout {
+            column_boundaries: vec![0, 4, 14],
+            header_rows: 2,
+        };
+        let lines = vec![
+            Some(" id | name    | email".to_string()),
+            Some("----+---------+------".to_string()),
+        ];
+        let result = colorize_table_lines(&lines, &layout, 0);
+        // Header label (row 0) should be bold.
+        assert!(result[0].as_ref().unwrap().contains(BOLD));
+        // Rule (row 1) should be dim.
+        assert!(result[1].as_ref().unwrap().contains(DIM));
+    }
+
+    #[test]
+    fn test_colorize_none_lines_preserved() {
+        let layout = make_layout();
+        let lines = vec![None, Some("| a | b |".to_string()), None];
+        let result = colorize_table_lines(&lines, &layout, 3);
+        assert!(result[0].is_none());
+        assert!(result[1].is_some());
+        assert!(result[2].is_none());
     }
 }
