@@ -7,10 +7,11 @@
 use crate::ansi::strip_ansi;
 use pgr_core::DiffLineType;
 
-/// Light green background for added lines (24-bit true color).
-const ADDED_BG: &str = "\x1b[48;2;30;60;30m";
-/// Light red background for removed lines (24-bit true color).
-const REMOVED_BG: &str = "\x1b[48;2;60;30;30m";
+/// Green-tinted background for added lines (24-bit true color).
+/// Clearly green on dark terminals while keeping syntax colors readable.
+const ADDED_BG: &str = "\x1b[48;2;20;60;20m";
+/// Red-tinted background for removed lines (24-bit true color).
+const REMOVED_BG: &str = "\x1b[48;2;60;20;20m";
 /// Cyan foreground + dim for hunk headers.
 const HUNK_HEADER_SGR: &str = "\x1b[36;2m";
 /// Bold for file-level headers.
@@ -220,7 +221,7 @@ mod tests {
     fn test_colorize_added_line_contains_green_background() {
         let result = colorize_diff_line("+added line", DiffLineType::Added);
         assert!(
-            result.contains("\x1b[48;2;30;60;30m"),
+            result.contains("\x1b[48;2;20;60;20m"),
             "expected green background in: {result:?}"
         );
     }
@@ -229,7 +230,7 @@ mod tests {
     fn test_colorize_removed_line_contains_red_background() {
         let result = colorize_diff_line("-removed line", DiffLineType::Removed);
         assert!(
-            result.contains("\x1b[48;2;60;30;30m"),
+            result.contains("\x1b[48;2;60;20;20m"),
             "expected red background in: {result:?}"
         );
     }
@@ -262,7 +263,7 @@ mod tests {
         let result = colorize_diff_line(git_colored, DiffLineType::Added);
         // Should not contain git's green foreground; should contain our green background.
         assert!(!result.contains("\x1b[32m"));
-        assert!(result.contains("\x1b[48;2;30;60;30m"));
+        assert!(result.contains("\x1b[48;2;20;60;20m"));
         assert!(result.contains("+added line"));
     }
 
@@ -271,7 +272,7 @@ mod tests {
         let git_colored = "\x1b[31m-removed line\x1b[0m";
         let result = colorize_diff_line(git_colored, DiffLineType::Removed);
         assert!(!result.contains("\x1b[31m"));
-        assert!(result.contains("\x1b[48;2;60;30;30m"));
+        assert!(result.contains("\x1b[48;2;60;20;20m"));
         assert!(result.contains("-removed line"));
     }
 
@@ -289,7 +290,7 @@ mod tests {
         assert_eq!(result.len(), 3);
         // The added line should contain both the green background and foreground SGR.
         assert!(
-            result[1].contains("\x1b[48;2;30;60;30m"),
+            result[1].contains("\x1b[48;2;20;60;20m"),
             "expected green bg in added line: {:?}",
             result[1]
         );
@@ -308,7 +309,7 @@ mod tests {
         let result = highlight_diff_hunk(&lines, &types, &highlighter, "unknown.xyz123");
         assert_eq!(result.len(), 1);
         // Should still have the green background from colorize_diff_line.
-        assert!(result[0].contains("\x1b[48;2;30;60;30m"));
+        assert!(result[0].contains("\x1b[48;2;20;60;20m"));
     }
 
     #[test]

@@ -62,7 +62,9 @@ DIFF
 
 unset TMUX
 tmux kill-session -t "$SESSION" 2>/dev/null
+# Force tmux to use the specified size, not resize to client terminal
 tmux new-session -d -s "$SESSION" -x 140 -y 30 "$PGR $DIFF_FILE"
+tmux set -t "$SESSION" window-size manual
 
 tmux set -t "$SESSION" status on
 tmux set -t "$SESSION" status-style "fg=white,bg=#333333"

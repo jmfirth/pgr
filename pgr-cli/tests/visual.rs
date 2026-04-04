@@ -521,7 +521,7 @@ index 1234567..abcdefg 100644
 
     // Check for the green background (RGB 30,60,30) on added lines.
     assert!(
-        session.has_bg_color(30, 60, 30),
+        session.has_bg_color(20, 60, 20),
         "expected green background (30,60,30) on added diff lines"
     );
 
@@ -552,7 +552,7 @@ index 1234567..abcdefg 100644
 
     // Check for the red background (RGB 60,30,30) on removed lines.
     assert!(
-        session.has_bg_color(60, 30, 30),
+        session.has_bg_color(60, 20, 20),
         "expected red background (60,30,30) on removed diff lines"
     );
 
