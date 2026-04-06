@@ -309,7 +309,7 @@ mod poll {
     fn file_size(fd: RawFd) -> crate::Result<u64> {
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: fstat fills a stack-allocated struct from a valid fd.
-        let ret = unsafe { libc::fstat(fd, &mut stat) };
+        let ret = unsafe { libc::fstat(fd, &raw mut stat) };
         if ret < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -322,8 +322,8 @@ mod poll {
         let mut read_set = unsafe { std::mem::zeroed::<libc::fd_set>() };
         // SAFETY: FD_ZERO and FD_SET operate on a stack-allocated fd_set.
         unsafe {
-            libc::FD_ZERO(&mut read_set);
-            libc::FD_SET(fd, &mut read_set);
+            libc::FD_ZERO(&raw mut read_set);
+            libc::FD_SET(fd, &raw mut read_set);
         }
 
         #[allow(clippy::cast_possible_wrap)]
@@ -336,10 +336,10 @@ mod poll {
         let ret = unsafe {
             libc::select(
                 fd + 1,
-                &mut read_set,
+                &raw mut read_set,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut tv,
+                &raw mut tv,
             )
         };
 
