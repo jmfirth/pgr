@@ -4325,6 +4325,7 @@ impl<R: Read, W: Write> Pager<R, W> {
 
         // Apply syntax highlighting + background tinting to each side's content.
         // Word-diff emphasis is applied instead of flat tinting for paired lines.
+        #[allow(unused_mut)] // mut only used when syntax feature is enabled
         let mut did_syntax = false;
         #[cfg(feature = "syntax")]
         {
