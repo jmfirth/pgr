@@ -3236,8 +3236,8 @@ impl<R: Read, W: Write> Pager<R, W> {
         let watch_file = std::fs::File::open(Path::new(&filename))?;
         let watch_fd = std::os::unix::io::AsRawFd::as_raw_fd(&watch_file);
 
-        let watcher = FileWatcher::watch(watch_fd)
-            .map_err(|e| std::io::Error::other(format!("kqueue watch failed: {e}")))?;
+        let mut watcher = FileWatcher::watch(watch_fd)
+            .map_err(|e| std::io::Error::other(format!("file watch failed: {e}")))?;
 
         loop {
             let event = watcher
