@@ -14,8 +14,6 @@ Set `PAGER=pgr` and diffs get syntax-highlighted code with background tinting an
 
 pgr replaces less, bat, delta, and diff-so-fancy in a single backward-compatible binary.
 
-<!-- TODO: terminal recording GIF here -->
-
 ## Install
 
 ```
@@ -32,9 +30,10 @@ That's it. Every tool that uses `$PAGER` now gets pgr's features automatically.
 
 This is the headline feature. pgr detects diff content and transforms how you read it:
 
-<!-- TODO: side-by-side diff recording -->
+![Diff awareness](demos/diff-awareness.gif)
 
 - **Background tinting** — added lines get subtle green, removed lines get subtle red, with syntax-highlighted code inside the hunks
+- **Word-level emphasis** — changed words within modified lines are highlighted with intense color in side-by-side view
 - **Side-by-side view** — `ESC-V` toggles split panel view (old left, new right)
 - **Hunk navigation** — `]c` / `[c` jump between hunks, `]f` / `[f` between files
 - **Works transparently** — `git diff`, `git log -p`, `git show`, patch files — all detected automatically
@@ -45,6 +44,23 @@ $ git log -p | pgr        # per-commit navigation with ]g/[g
 $ git blame file.rs | pgr # recency-colored, syntax-highlighted
 ```
 
+## Syntax highlighting
+
+75 languages built in via syntect. Opens a `.rs` file — highlighted. Toggle with `ESC-S`. Works in both file and diff modes.
+
+![Syntax highlighting](demos/syntax-highlight.gif)
+
+## SQL table mode
+
+pgr detects SQL table output (psql, mysql, sqlite3) and activates a table viewer:
+
+![SQL table mode](demos/table-view.gif)
+
+- **Sticky header** — column names stay pinned at the top while you scroll
+- **Column-snap scroll** — left/right arrow jumps to column boundaries, not characters
+- **Frozen first column** — the ID column stays visible during horizontal scroll
+- **Visual treatment** — bold headers, dim structure characters, alternating row stripes
+
 ## 100% less compatible
 
 pgr isn't "mostly compatible." It's tested against GNU less 692 with 212 PTY-level conformance tests that compare terminal output byte-for-byte. Every flag, every keybinding, every prompt escape, every edge case in search, scroll, and multi-file navigation.
@@ -53,21 +69,19 @@ If your muscle memory works in less, it works in pgr. If your scripts pipe throu
 
 ## Content modes
 
-Beyond diffs, pgr auto-detects what it's looking at from the first screenful:
+Beyond diffs and tables, pgr auto-detects what it's looking at from the first screenful:
 
 | Content | What you get |
 |---------|-------------|
 | **Man pages** | `]s` / `[s` section navigation (jump to OPTIONS, SYNOPSIS, etc.) |
 | **Git log** | `]g` / `[g` commit-to-commit navigation |
 | **JSON** | Syntax highlighting (even from pipes with no filename) |
-| **SQL tables** | Sticky header row, column-snap horizontal scroll, frozen first column |
+| **SQL tables** | Sticky header, column-snap scroll, frozen first column |
 | **Compiler errors** | `file:line:col` references become clickable OSC 8 hyperlinks |
 
 Detection is automatic. No flags, no configuration.
 
 ## More features
-
-**Syntax highlighting** — 75 languages built in via syntect. Opens a `.rs` file — highlighted. Toggle with `ESC-S`. Works in both file and diff modes.
 
 **Search enhancements** — "match 3 of 47" in the prompt. Live match count during incremental search. `&+` adds extra highlight patterns in different colors.
 
@@ -125,7 +139,7 @@ Benchmarked with [hyperfine](https://github.com/sharkdp/hyperfine) on macOS (App
 
 | Tier | Tests | What it validates |
 |------|-------|-------------------|
-| Unit | 2,151 | API correctness across 6 crates |
+| Unit | 2,176 | API correctness across 6 crates |
 | Conformance | 212 | PTY comparison against GNU less 692 |
 | Visual | 37 | Cell-level PTY verification of every feature |
 
@@ -134,12 +148,6 @@ just test          # unit tests (<10s)
 just conformance   # PTY tests vs GNU less (~90s)
 just visual        # feature verification (~12s)
 ```
-
-## Known limitations
-
-- **Search highlighting in diff/syntax mode** — searching while viewing a diff can cause syntax colors to drop on some lines. The search match itself highlights correctly, but surrounding code may lose coloring until the next repaint.
-- **Word-level diff** — the algorithm is implemented but not yet wired into the rendering pipeline. Diffs show line-level changes (added/removed), not character-level changes within modified lines.
-- **Side-by-side syntax highlighting** — side-by-side diff view has background tinting but syntax highlighting within the panels is limited by the ANSI-aware truncation path.
 
 ## License
 
